@@ -483,6 +483,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// index rewrites it axis-true, which is what `recordingEpochAt` drops the entries above for.
     private let anchorShiftLock = NSLock()
     private var epochShiftByIndex: [Int: Double] = [:]
+    private var rebuiltRunSourceAxis = RebuiltRunSourceAxis()
     /// AE#418 round 8: how far below the axis it composed on the last measured placement actually
     /// landed, in seconds. Zero until a placement has been read back, which is also what makes an
     /// item's FIRST placement compose onto the axis itself.
@@ -2531,9 +2532,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
         }
-        prod.onVideoShiftKnown = { [weak self] shiftPts, firstItemTfdtPts in
+        prod.onVideoShiftKnown = { [weak self] shiftPts, firstItemTfdtPts, normalizationShiftPts in
             self?.handleVideoShiftKnown(
-                shiftPts, firstItemTfdtPts: firstItemTfdtPts)
+                shiftPts, firstItemTfdtPts: firstItemTfdtPts,
+                normalizationShiftPts: normalizationShiftPts)
         }
         prod.onLiveTimelineRebase = { [weak self] shiftPts, seamOutputSeconds in
             self?.handleLiveTimelineRebase(shiftPts, seamOutputSeconds: seamOutputSeconds)
@@ -2596,7 +2598,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var lastMuxerRebuildSegmentCount = -1
     static let maxLiveMuxerRebuildCycles = 3
 
-    private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64) {
+    private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64,
+                                      normalizationShiftPts: Int64) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         let seamItemSeconds = Double(firstItemTfdtPts) * sourceVideoTbSeconds
         // Live rebases the whole timeline at a program boundary and nothing older comes back on
@@ -2616,6 +2619,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let isRecut = recutIndices.remove(index) != nil
         epochShiftByIndex = Self.epochShiftTable(
             epochShiftByIndex, recordingEpochAt: index, shift: isRecut ? 0 : seconds)
+        // A rebuilt run still contains source timestamp normalization, even when
+        // its opening segment has no special placement offset (#481). PGS cues
+        // use raw source PTS, so losing this term makes all current cues disappear.
+        rebuiltRunSourceAxis.record(
+            index: index, presentationShift: seconds,
+            normalizationShift: normalizationShiftPts == Int64.min ? 0
+                : Double(normalizationShiftPts) * sourceVideoTbSeconds,
+            isRecut: isRecut)
         let placementAlreadyHappened = lastPlacedIndex == index
         anchorShiftLock.unlock()
         gateOpenCondition.lock()
@@ -2896,13 +2907,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !isLiveSession else { return false }
         anchorShiftLock.lock()
         let pending = lastPublishedPlacement
-        let shifts = epochShiftByIndex
+        let sourceAxis = rebuiltRunSourceAxis
         let displacement = lastPlacementDisplacement
         let opening = firstDeliveredIndexSinceSeek
         anchorShiftLock.unlock()
         // A placement awaiting measurement has the more specific reading (round 7) and measures the
         // same ranges; two writers on one axis would race, and the placement knows what it composed.
-        guard pending == nil, let opening else { return false }
+        guard pending == nil, let opening,
+              let openingSourceShift = sourceAxis.shift(at: opening) else { return false }
         restartLock.lock()
         let advertisedStart = opening >= 0 && opening < segmentPlan.count
             ? segmentPlan[opening].startSeconds : nil
@@ -2911,7 +2923,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let standing = playlistShiftSeconds
         guard let reading = Self.landingAxisReading(
             landingItemSeconds: landingItemSeconds, ranges: ranges,
-            openingSegmentStart: advertisedStart, worth: shifts[opening] ?? 0,
+            openingSegmentStart: advertisedStart, worth: openingSourceShift,
             assumedBase: Self.placementBase(axis: standing, displacement: displacement),
             standingAxis: standing)
         else { return false }
@@ -3074,13 +3086,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !isLiveSession else { return }
         anchorShiftLock.lock()
         let placement = lastPublishedPlacement
+        let sourceAxis = rebuiltRunSourceAxis
         // One placement is measured once. Publishing below re-enters this through the shift hook, and
         // the run this reading came from is by then part of the next baseline anyway.
         lastPublishedPlacement = nil
         anchorShiftLock.unlock()
         guard let placement,
               let reading = Self.placementReading(
-                advertisedStart: placement.advertisedStart, worth: placement.worth,
+                advertisedStart: placement.advertisedStart,
+                worth: sourceAxis.measuredWorth(at: placement.index, composedWorth: placement.worth,
+                                               rebuilt: source == .rebuiltTimeline),
                 assumedBase: placement.assumedBase, observedItemStart: observedItemStart)
         else { return }
         // Round 7: only the run this placement opened says anything about where a placement sits. A
@@ -3096,7 +3111,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             anchorShiftLock.unlock()
             teaching = .notTaught(standing: standing)
         }
-        guard abs(reading.residual) > Self.axisRepublishEpsilonSeconds else {
+        guard abs(reading.axis - (placement.assumedBase + placement.worth)) > Self.axisRepublishEpsilonSeconds else {
             // Said out loud, because a check that only speaks when it disagrees cannot be told from one
             // that never ran. This is the line that says the axis is measured on this session.
             EngineLog.emit(
