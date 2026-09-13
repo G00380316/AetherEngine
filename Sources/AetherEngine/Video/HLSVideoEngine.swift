@@ -474,16 +474,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         shiftLock.lock(); _playlistShiftSeconds = value; shiftLock.unlock()
     }
 
-    /// AE#418 round 2: what each stored segment adds to AVPlayer's axis when AVPlayer PLACES it.
-    ///
-    /// Only an epoch's FIRST segment can carry a non-zero offset: a gate that had to open below its
-    /// boundary puts that much extra content into that one segment, and every segment the epoch cuts
-    /// after it starts exactly on its boundary. Keyed by index rather than kept as one pair, because
-    /// several epochs can leave such a segment in the cache at once; an epoch marching through an
-    /// index rewrites it axis-true, which is what `recordingEpochAt` drops the entries above for.
+    /// AE#418 round 2 + PR #533: what each epoch left at the index it opened on, both what its first
+    /// segment adds to the axis and what all of its bytes carry. See `EpochAxisTable`.
     private let anchorShiftLock = NSLock()
-    private var epochShiftByIndex: [Int: Double] = [:]
-    private var rebuiltRunSourceAxis = RebuiltRunSourceAxis()
+    private var epochAxisByIndex = EpochAxisTable()
     /// AE#418 round 8: how far below the axis it composed on the last measured placement actually
     /// landed, in seconds. Zero until a placement has been read back, which is also what makes an
     /// item's FIRST placement compose onto the axis itself.
@@ -515,10 +509,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// opened its gate, so the placement can precede the offset it is worth; this is what lets the
     /// gate publish for a placement that already happened.
     private var lastPlacedIndex: Int = .min
-    /// AE#412: the index the most recent gate open belongs to and what it was worth. Separate from
-    /// `epochShiftByIndex`, which deliberately keeps no entry for a zero offset, so it cannot answer
-    /// "has this epoch opened yet" at all. Signalled through `gateOpenCondition`.
-    private var lastGateOpen: (index: Int, shift: Double)?
+    /// AE#412: the index the most recent gate open belongs to and what it opened with. Separate from
+    /// `epochAxisByIndex` because a re-cut BLOCKS on it: a waiter needs something to be signalled on,
+    /// which a dictionary is not. Signalled through `gateOpenCondition`.
+    private var lastGateOpen: (index: Int, axis: EpochAxis)?
     private let gateOpenCondition = NSCondition()
     /// AE#412: indices whose epoch an AE#412 re-cut started. Such a segment goes into a timeline
     /// AVPlayer is already building, and it puts it at its own tfdt there (measured 3 of 3 with
@@ -2617,20 +2611,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // at its own tfdt, so the epoch is worth nothing to the axis. Recording zero still drops the
         // entries at and above it, which is what the rewrite calls for.
         let isRecut = recutIndices.remove(index) != nil
-        epochShiftByIndex = Self.epochShiftTable(
-            epochShiftByIndex, recordingEpochAt: index, shift: isRecut ? 0 : seconds)
-        // A rebuilt run still contains source timestamp normalization, even when
-        // its opening segment has no special placement offset (#481). PGS cues
-        // use raw source PTS, so losing this term makes all current cues disappear.
-        rebuiltRunSourceAxis.record(
-            index: index, presentationShift: seconds,
-            normalizationShift: normalizationShiftPts == Int64.min ? 0
-                : Double(normalizationShiftPts) * sourceVideoTbSeconds,
+        // PR #533: the run keeps the source-to-item normalization its bytes were written with, even
+        // where its opening segment has no placement offset left to carry. Those are the same number
+        // only on a source whose timestamps start at zero.
+        let axis = EpochAxis(
+            presented: seconds,
+            carried: normalizationShiftPts == Int64.min
+                ? 0 : Double(normalizationShiftPts) * sourceVideoTbSeconds,
             isRecut: isRecut)
+        epochAxisByIndex.record(axis, at: index)
         let placementAlreadyHappened = lastPlacedIndex == index
         anchorShiftLock.unlock()
         gateOpenCondition.lock()
-        lastGateOpen = (index: index, shift: seconds)
+        lastGateOpen = (index: index, axis: axis)
         gateOpenCondition.broadcast()
         gateOpenCondition.unlock()
         if placementAlreadyHappened {
@@ -2660,12 +2653,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // AE#448: the table answers "is this an epoch's FIRST segment", not "is it worth anything".
         // Every other index is cut on its own boundary inside a run that already carries an axis, and
         // has nothing to say about where that run begins.
-        let epochShift = epochShiftByIndex[index]
+        let epoch = epochAxisByIndex.opening(at: index)
         // AE#418 round 8: how far below its axis the last measured placement landed. Zero until one
         // has been read back, which is what makes an item's first placement compose onto the axis.
         let displacement = lastPlacementDisplacement
         anchorShiftLock.unlock()
-        guard let epochShift else { return }
+        guard let epoch else { return }
+        let epochShift = epoch.placed
         restartLock.lock()
         let plannedStart = index >= 0 && index < segmentPlan.count
             ? segmentPlan[index].startSeconds : nil
@@ -2684,7 +2678,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         anchorShiftLock.lock()
         let superseded = lastPublishedPlacement
         lastPublishedPlacement = PublishedPlacement(
-            index: index, advertisedStart: plannedStart, worth: epochShift, assumedBase: base,
+            index: index, advertisedStart: plannedStart, worth: epochShift,
+            carried: epoch.openingSourceAxis, assumedBase: base,
             axisInForce: current, deliverySerialAtCompose: segmentDeliverySerial)
         anchorShiftLock.unlock()
         if let superseded {
@@ -2786,23 +2781,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// the axis that was in effect before it landed. Everything below that is still the old epoch's.
     static func seamItemSeconds(advertisedStart: Double, currentShift: Double) -> Double {
         return advertisedStart - currentShift
-    }
-
-    /// Record what the epoch beginning at `index` is worth, dropping every entry at or above it: a
-    /// producer that starts writing there rewrites those segments on their own boundaries, so an
-    /// older epoch's offset must stop being claimed for them.
-    ///
-    /// AE#448: an epoch worth NOTHING is recorded too, and that is not bookkeeping. Its bytes still
-    /// carry the axis in force when AVPlayer places them, and they still take over the stretch from
-    /// their own placement upward. Dropping the entry left that stretch to whatever seam sat below it,
-    /// which after a backward seek is an older epoch's, so the clock folded a shift the picture there
-    /// no longer had.
-    static func epochShiftTable(
-        _ table: [Int: Double], recordingEpochAt index: Int, shift: Double
-    ) -> [Int: Double] {
-        var next = table.filter { $0.key < index }
-        next[index] = shift
-        return next
     }
 
     /// AVPlayer discards a sub-second axis offset at a seek and snaps back to the playlist; a larger
@@ -2907,14 +2885,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !isLiveSession else { return false }
         anchorShiftLock.lock()
         let pending = lastPublishedPlacement
-        let sourceAxis = rebuiltRunSourceAxis
+        let epochs = epochAxisByIndex
         let displacement = lastPlacementDisplacement
         let opening = firstDeliveredIndexSinceSeek
         anchorShiftLock.unlock()
         // A placement awaiting measurement has the more specific reading (round 7) and measures the
         // same ranges; two writers on one axis would race, and the placement knows what it composed.
+        //
+        // PR #533: a run AVPlayer rebuilt at the segment's own playlist position has no placement
+        // offset left, and is NOT therefore source-true. Its bytes still map item time back onto the
+        // source with the normalization the producer folded into them, and reading a zero there cost
+        // a 600 s source origin its whole axis.
         guard pending == nil, let opening,
-              let openingSourceShift = sourceAxis.shift(at: opening) else { return false }
+              let openingSourceShift = epochs.sourceAxis(at: opening) else { return false }
         restartLock.lock()
         let advertisedStart = opening >= 0 && opening < segmentPlan.count
             ? segmentPlan[opening].startSeconds : nil
@@ -2948,6 +2931,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let advertisedStart: Double
         /// What the segment carries below that start. Negative for a gate that opened early.
         let worth: Double
+        /// PR #533: the source-to-item offset the same bytes carry, for a reading taken off a
+        /// timeline AVPlayer REBUILT, which puts them at their own playlist position rather than
+        /// through an axis. Kept here rather than looked up at measurement time: a backward rewrite
+        /// between the composition and its reading drops this epoch's entry, and the lookup would
+        /// then answer with an older run's normalization.
+        let carried: Double
         /// The axis the composition assumed AVPlayer's timeline was carrying when it placed this.
         let assumedBase: Double
         /// The axis in force when it was composed. This is what turns a reading into the displacement
@@ -3086,16 +3075,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !isLiveSession else { return }
         anchorShiftLock.lock()
         let placement = lastPublishedPlacement
-        let sourceAxis = rebuiltRunSourceAxis
         // One placement is measured once. Publishing below re-enters this through the shift hook, and
         // the run this reading came from is by then part of the next baseline anyway.
         lastPublishedPlacement = nil
         anchorShiftLock.unlock()
-        guard let placement,
-              let reading = Self.placementReading(
-                advertisedStart: placement.advertisedStart,
-                worth: sourceAxis.measuredWorth(at: placement.index, composedWorth: placement.worth,
-                                               rebuilt: source == .rebuiltTimeline),
+        guard let placement else { return }
+        // PR #533: a reading off a REBUILT timeline measures bytes AVPlayer put at their own playlist
+        // position, so what they are worth there is the normalization they carry and not the offset
+        // this side composed with. The two differ by the whole gate backoff, and on a source whose
+        // timestamps do not start at zero they differ by the source origin on top of it.
+        let worth = source == .rebuiltTimeline ? placement.carried : placement.worth
+        guard let reading = Self.placementReading(
+                advertisedStart: placement.advertisedStart, worth: worth,
                 assumedBase: placement.assumedBase, observedItemStart: observedItemStart)
         else { return }
         // Round 7: only the run this placement opened says anything about where a placement sits. A
@@ -3111,7 +3102,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             anchorShiftLock.unlock()
             teaching = .notTaught(standing: standing)
         }
-        guard abs(reading.axis - (placement.assumedBase + placement.worth)) > Self.axisRepublishEpsilonSeconds else {
+        // PR #533: against the axis this placement COMPOSED, not against the residual. They are the
+        // same test only while the reading is worth what the composition was: a rebuilt reading
+        // measures the same base and arrives at a different axis, and asking the residual would call
+        // that a confirmation and publish nothing.
+        let composedAxis = placement.assumedBase + placement.worth
+        guard abs(reading.axis - composedAxis) > Self.axisRepublishEpsilonSeconds else {
             // Said out loud, because a check that only speaks when it disagrees cannot be told from one
             // that never ran. This is the line that says the axis is measured on this session.
             EngineLog.emit(
@@ -3127,7 +3123,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "not \(String(format: "%.3f", placement.assumedBase))s (AVPlayer holds it from item "
             + "\(String(format: "%.3f", observedItemStart))s, clock \(String(format: "%.3f", itemClock))s, "
             + "residual \(String(format: "%+.3f", reading.residual))s): axis "
-            + "\(String(format: "%.3f", placement.assumedBase + placement.worth))s -> "
+            + "\(String(format: "%.3f", composedAxis))s -> "
             + "\(String(format: "%.3f", reading.axis))s; \(teaching.clause)",
             category: .session
         )
@@ -3352,7 +3348,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         recutIndices.insert(index)
         anchorShiftLock.unlock()
         requestRestart(at: index, authoritative: true)
-        guard let shift = awaitGateOpen(forIndex: index, timeout: Self.recutGateWaitSeconds) else {
+        guard let opened = awaitGateOpen(forIndex: index, timeout: Self.recutGateWaitSeconds) else {
             anchorShiftLock.lock()
             recutIndices.remove(index)
             anchorShiftLock.unlock()
@@ -3364,7 +3360,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             return itemSeconds
         }
         EngineLog.emit(
-            "[HLSVideoEngine] #412 seg\(index) re-cut opened \(String(format: "%.3f", shift))s below its "
+            // PR #533: the BACKOFF, not the gate's shift. The shift also carries the source origin,
+            // so on a source whose timestamps start at 600 s this line read "opened 591.000s below
+            // its boundary" for a re-cut that opened 9 s below it.
+            "[HLSVideoEngine] #412 seg\(index) re-cut opened "
+            + "\(String(format: "%.3f", opened.gateBackoffSeconds))s below its "
             + "boundary and now covers item \(String(format: "%.3f", itemSeconds))s",
             category: .session
         )
@@ -3422,16 +3422,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
 
     /// Blocks until the epoch anchored at `index` has opened its video gate, and answers what it
-    /// opened worth. nil on timeout. Polls against the condition rather than nesting locks: the pump
+    /// opened with. nil on timeout. Polls against the condition rather than nesting locks: the pump
     /// records under `anchorShiftLock` and signals under `gateOpenCondition`, and taking them in the
     /// other order here would be the classic inversion.
-    private func awaitGateOpen(forIndex index: Int, timeout: TimeInterval) -> Double? {
+    private func awaitGateOpen(forIndex index: Int, timeout: TimeInterval) -> EpochAxis? {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             gateOpenCondition.lock()
             if let open = lastGateOpen, open.index == index {
                 gateOpenCondition.unlock()
-                return open.shift
+                return open.axis
             }
             let signalled = gateOpenCondition.wait(until: deadline)
             gateOpenCondition.unlock()

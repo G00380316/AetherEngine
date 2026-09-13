@@ -12,12 +12,18 @@ the public-API contract.
 
 ### Fixed
 
-- **PGS cues keep using the source timestamp axis after a cached or rebuilt VOD run.** The
-  producer now hands both its opening presentation shift and its persistent timestamp
-  normalization to the engine. The opening segment keeps its placement-specific offset while
-  later segments retain the normalization carried by their bytes, so landing and placement
-  measurements no longer query bitmap cues hundreds of seconds away from the visible playhead.
-  Backward rewrites discard only superseded epochs, and zero-origin media remains unchanged.
+- **A source whose timestamps do not start at zero keeps its axis across a rebuilt VOD landing
+  (PR #533, thanks to @orut34iop).** The AE#481 landing rule reads the axis off the run holding a
+  seek landing, and where that run opens at the segment's own playlist position it published what
+  the segment is worth to a PLACEMENT, which inside a run is nothing. Those bytes still carry the
+  source-to-item normalization the producer folded into them, so on a source whose timestamps
+  begin at 600 s the session went on to map item time onto itself: bitmap subtitles were queried
+  600 s away from the picture, and the reported position went negative. Measured on
+  `tc-cues-lie.mkv` remuxed with `-output_ts_offset 600` over a 600 kbps / 300 ms origin, the
+  landing published `0.000s` where the run carries `600.000s`, the host clock read `-515.10s`, and
+  `capErr` jumped from -600.000 to +0.017 in one tick; afterwards every tick sits within one frame
+  of the truth. A source that starts at zero is unchanged, byte for byte, because there the two
+  quantities are the same number, which is what hid this through nine rounds of measurement.
 
 ## [6.84.0] - 2026-09-12
 

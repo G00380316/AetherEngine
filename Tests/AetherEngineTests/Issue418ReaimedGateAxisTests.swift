@@ -251,29 +251,16 @@ struct Issue418ReaimedGateAxisTests {
 
     // MARK: - What a producer restart does to the record
 
-    @Test("a new epoch drops what older epochs claimed at and above its own index")
-    func newEpochDropsTheIndicesItRewrites() {
-        let table = HLSVideoEngine.epochShiftTable([11: -0.875, 13: -9.0], recordingEpochAt: 12, shift: -5.0)
-        #expect(table == [11: -0.875, 12: -5.0])
-        // seg13 is now cut on its own boundary by the new producer, so claiming -9.0 for it would be
-        // the table-shaped mistake round 1 avoided by keeping a single pair.
-        #expect(table[13] == nil)
-    }
-
-    @Test("an epoch that opened on its boundary is recorded as worth nothing")
-    func exactEpochIsRecordedAsZero() {
-        // Round 2 asserted the opposite, that such an epoch is not recorded at all, and that
-        // assertion was the AE#448 defect written down: the entry is what says "an epoch begins
-        // here", so dropping it left the stretch the epoch had just taken over folding with the seam
-        // underneath it. Worth nothing to the axis VALUE is not the same as nothing to record.
-        #expect(HLSVideoEngine.epochShiftTable([13: -9.0], recordingEpochAt: 20, shift: 0)
-                == [13: -9.0, 20: 0])
-    }
-
+    // The record itself moved to `EpochAxisTable` with PR #533, and its cases with it; what a
+    // restart does to it is pinned in `EpochAxisTableTests`. Round 2 asserted that an epoch worth
+    // nothing is not recorded at all, and that assertion was the AE#448 defect written down.
     @Test("segments below a restart keep the offset their bytes still carry")
     func segmentsBelowARestartAreUntouched() {
-        let table = HLSVideoEngine.epochShiftTable([2: -0.875], recordingEpochAt: 13, shift: -9.0)
-        #expect(table == [2: -0.875, 13: -9.0])
+        var table = EpochAxisTable()
+        table.record(.zeroOrigin(-0.875), at: 2)
+        table.record(.zeroOrigin(-9.0), at: 13)
+        #expect(table.opening(at: 2)?.placed == -0.875)
+        #expect(table.opening(at: 13)?.placed == -9.0)
     }
 
     // MARK: - What a seek does to the axis
