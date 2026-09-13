@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **PGS cues keep using the source timestamp axis after a cached or rebuilt VOD run.** The
+  producer now hands both its opening presentation shift and its persistent timestamp
+  normalization to the engine. The opening segment keeps its placement-specific offset while
+  later segments retain the normalization carried by their bytes, so landing and placement
+  measurements no longer query bitmap cues hundreds of seconds away from the visible playhead.
+  Backward rewrites discard only superseded epochs, and zero-origin media remains unchanged.
 
 ## [6.84.0] - 2026-09-12
 
