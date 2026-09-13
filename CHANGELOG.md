@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.85.0] - 2026-09-14
+
 ### Fixed
 
 - **The VOD axis composes what AVPlayer's timeline is displaced by, not the whole shift (PR #533
