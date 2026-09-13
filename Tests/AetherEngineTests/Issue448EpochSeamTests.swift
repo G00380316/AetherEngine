@@ -37,7 +37,7 @@ struct Issue448EpochSeamTests {
         // and the stretch from that placement upward keeps the seam below it.
         var table = EpochAxisTable()
         table.record(.zeroOrigin(0), at: 0)
-        #expect(table.opening(at: 0)?.placed == 0)
+        #expect(table.opening(at: 0)?.placedOffset == 0)
     }
 
     @Test("recording an epoch still drops every entry at and above it")
@@ -47,11 +47,11 @@ struct Issue448EpochSeamTests {
         var table = EpochAxisTable()
         table.record(.zeroOrigin(-9.0), at: 13)
         table.record(.zeroOrigin(-1.667), at: 3)
-        #expect(table.opening(at: 3)?.placed == -1.667)
+        #expect(table.opening(at: 3)?.placedOffset == -1.667)
         #expect(table.opening(at: 13) == nil)
         // And the same for an epoch worth nothing, which is the case AE#448 turned on.
         table.record(.zeroOrigin(0), at: 0)
-        #expect(table.opening(at: 0)?.placed == 0)
+        #expect(table.opening(at: 0)?.placedOffset == 0)
         #expect(table.opening(at: 3) == nil)
     }
 
@@ -61,7 +61,7 @@ struct Issue448EpochSeamTests {
     func zeroWorthKeepsTheAxis() {
         // Its content begins exactly at its advertised start, so the placement adds nothing. The
         // picture agrees: axisErr read -10.709 before and after that epoch took over.
-        #expect(HLSVideoEngine.axisShift(after: -10.667, placing: 0, displacement: 0) == -10.667)
+        #expect(HLSVideoEngine.placementOffset(after: -10.667, placing: 0, displacement: 0) == -10.667)
     }
 
     @Test("the seam belongs at the placement, which is below the newest one after a backward seek")

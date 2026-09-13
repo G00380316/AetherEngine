@@ -28,17 +28,19 @@ struct EpochAxis: Equatable, Sendable {
     /// nothing and its bytes are read on the axis they were written with.
     let isRecut: Bool
 
-    /// What this epoch's first segment adds to the axis when AVPlayer PLACES it.
-    var placed: Double { isRecut ? 0 : presented }
-
-    /// The source-to-item offset for the epoch's OWN index, read off a timeline that opened the run
-    /// at that segment's playlist position: a re-cut sits at its own tfdt, anything else at its
-    /// advertised start, which is `presented` below where its bytes say it is.
-    var openingSourceAxis: Double { isRecut ? carried : presented }
-
     /// How far below its advertised boundary the gate opened. The backoff itself, on any source: the
     /// pin makes `carried` the plan anchor, so the difference drops the source origin out again.
     var gateBackoffSeconds: Double { presented - carried }
+
+    /// What this epoch's first segment adds to AVPlayer's own DISPLACEMENT when AVPlayer places it,
+    /// which is the quantity the composition works in. A re-cut adds nothing (AE#412).
+    var placedOffset: Double { isRecut ? 0 : gateBackoffSeconds }
+
+    /// The same placement in AXIS terms: what item time has to be read through to reach the source,
+    /// for the epoch's OWN index, on a timeline that opened the run at that segment's playlist
+    /// position. A re-cut sits at its own tfdt and so maps with the plain normalization; anything
+    /// else sits at its advertised start, which is `gateBackoffSeconds` away from it.
+    var openingSourceAxis: Double { carried + placedOffset }
 }
 
 /// AE#418 round 2: what each stored segment adds to AVPlayer's axis when AVPlayer PLACES it, and
@@ -77,6 +79,13 @@ struct EpochAxisTable: Equatable, Sendable {
     /// say about where that run begins.
     func opening(at index: Int) -> EpochAxis? {
         return epochs[index]
+    }
+
+    /// The normalization alone for the bytes holding `index`, which is what an axis measured there has
+    /// to be read through to leave AVPlayer's own displacement behind.
+    func carried(at index: Int) -> Double? {
+        guard let start = epochs.keys.filter({ $0 <= index }).max() else { return nil }
+        return epochs[start]?.carried
     }
 
     /// PR #533: the source-to-item offset the bytes holding `index` were written with, as AVPlayer

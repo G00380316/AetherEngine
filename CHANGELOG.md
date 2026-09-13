@@ -12,6 +12,20 @@ the public-API contract.
 
 ### Fixed
 
+- **The VOD axis composes what AVPlayer's timeline is displaced by, not the whole shift (PR #533
+  follow-up).** Every AE#418 rule is about one of the two quantities in the axis: how far AVPlayer
+  put a placed segment from its playlist position. The other one is the source-to-item
+  normalization the bytes carry, and adding both per placement added the source origin again each
+  time. Measured on the same 600 s twin: a second placement worth 596.833 s composed onto a
+  standing 599.625 s published **1196.458 s** and put the seam at item -531.625 s, so for as long
+  as that composition stood the session mapped every cue and every position a whole source origin
+  away; a placement that cannot be read back keeps it for the rest of the session (AE#418 round 7).
+  The composition now adds the gate's backoff and the normalization is added once, by the epoch
+  that wrote the bytes: the same chain publishes 590.625 s and the reading that follows lands on
+  591.000 s, which is what the picture reads. On a source whose timestamps start at zero the two
+  quantities are one number and nothing moves: the AE#418 chain still composes -9.000 s then
+  -18.000 s, and the fixture arms are unchanged run for run.
+
 - **A source whose timestamps do not start at zero keeps its axis across a rebuilt VOD landing
   (PR #533, thanks to @orut34iop).** The AE#481 landing rule reads the axis off the run holding a
   seek landing, and where that run opens at the segment's own playlist position it published what

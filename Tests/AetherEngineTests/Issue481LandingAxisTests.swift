@@ -48,7 +48,7 @@ struct Issue481LandingAxisTests {
             ranges: [(52.0, 61.0), (72.0, 119.958)],
             openingSegmentStart: 72.0,
             worth: 600.0,
-            assumedBase: 591.0,
+            assumedBase: -9.0,
             standingAxis: 591.0)
         #expect(reading?.axis == 600.0)
         #expect(reading?.runStart == 72.0)

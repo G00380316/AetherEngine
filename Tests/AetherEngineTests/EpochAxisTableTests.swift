@@ -49,10 +49,10 @@ struct EpochAxisTableTests {
         // moves the axis by nothing (AE#412, measured 3 of 3) and its bytes are read with their
         // normalization rather than with where its advertised start would have shown them.
         let recut = EpochAxis.originAt600(598, isRecut: true)
-        #expect(recut.placed == 0)
+        #expect(recut.placedOffset == 0)
         #expect(recut.openingSourceAxis == 600)
         let ordinary = EpochAxis.originAt600(598)
-        #expect(ordinary.placed == 598)
+        #expect(ordinary.placedOffset == -2)
         #expect(ordinary.openingSourceAxis == 598)
     }
 
@@ -64,8 +64,8 @@ struct EpochAxisTableTests {
         table.record(.zeroOrigin(-0.875), at: 11)
         table.record(.zeroOrigin(-9.0), at: 13)
         table.record(.zeroOrigin(-5.0), at: 12)
-        #expect(table.opening(at: 11)?.placed == -0.875)
-        #expect(table.opening(at: 12)?.placed == -5.0)
+        #expect(table.opening(at: 11)?.placedOffset == -0.875)
+        #expect(table.opening(at: 12)?.placedOffset == -5.0)
         // seg13 is now cut on its own boundary by the new producer, so claiming -9.0 for it would be
         // the table-shaped mistake round 1 avoided by keeping a single pair.
         #expect(table.opening(at: 13) == nil)
@@ -79,8 +79,37 @@ struct EpochAxisTableTests {
         var table = EpochAxisTable()
         table.record(.zeroOrigin(-9.0), at: 13)
         table.record(.zeroOrigin(0), at: 20)
-        #expect(table.opening(at: 13)?.placed == -9.0)
-        #expect(table.opening(at: 20)?.placed == 0)
+        #expect(table.opening(at: 13)?.placedOffset == -9.0)
+        #expect(table.opening(at: 20)?.placedOffset == 0)
+    }
+
+    // MARK: - What composes
+
+    @Test("a placement composes the backoff, not the whole shift")
+    func compositionAddsTheBackoffOnly() {
+        // Measured on the 600 s twin: a session standing at 599.625 s (seg18 backed off 0.375 s)
+        // places seg17, which backed off 3.167 s. Composing the AXIS published 1196.458 s and put the
+        // seam at item -531.625 s, because the source origin went in a second time. Composing the
+        // DISPLACEMENT publishes 596.458 s, and the reading that follows measures 596.833 s, which is
+        // the same number the picture reads.
+        let seg17 = EpochAxis(presented: 596.833, carried: 600, isRecut: false)
+        let composed = HLSVideoEngine.placementOffset(
+            after: -0.375, placing: seg17.placedOffset, displacement: 0)
+        #expect(abs(composed - (-3.542)) < 1e-9)
+        #expect(abs((seg17.carried + composed) - 596.458) < 1e-9)
+    }
+
+    @Test("the same chain on a source that starts at zero is what it always was")
+    func compositionUnchangedAtZeroOrigin() {
+        // AE#418 round 2's measured chain, which this must not move: a resume that opened 9 s below
+        // its boundary reads -9.000, and a seek that makes AVPlayer place that same segment again
+        // reads -18.000.
+        let seg13 = EpochAxis.zeroOrigin(-9)
+        #expect(HLSVideoEngine.placementOffset(
+            after: 0, placing: seg13.placedOffset, displacement: 0) == -9)
+        #expect(HLSVideoEngine.placementOffset(
+            after: -9, placing: seg13.placedOffset, displacement: 0) == -18)
+        #expect(seg13.carried + (-18) == -18)
     }
 
     // MARK: - The source axis a rebuilt run is read on

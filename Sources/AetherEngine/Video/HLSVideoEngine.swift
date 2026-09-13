@@ -478,6 +478,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// segment adds to the axis and what all of its bytes carry. See `EpochAxisTable`.
     private let anchorShiftLock = NSLock()
     private var epochAxisByIndex = EpochAxisTable()
+    /// PR #533 round 2: how far AVPlayer's OWN timeline is displaced from the playlist, which is the
+    /// quantity every AE#418 rule is about.
+    ///
+    /// The published axis is this plus the normalization the bytes carry, and on a source whose
+    /// timestamps start at zero those are one number, which is why eleven rounds could compose the
+    /// whole axis and be right. Measured on the 600 s twin: a second placement worth 596.833 s
+    /// composed onto a standing 599.625 s published **1196.458 s** and put the seam at item
+    /// -531.625 s, i.e. it added the source origin a second time. Zero at load, because a fresh
+    /// item's timeline is undisplaced on any source.
+    private var placementOffsetSeconds: Double = 0
     /// AE#418 round 8: how far below the axis it composed on the last measured placement actually
     /// landed, in seconds. Zero until a placement has been read back, which is also what makes an
     /// item's FIRST placement compose onto the axis itself.
@@ -2599,6 +2609,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Live rebases the whole timeline at a program boundary and nothing older comes back on
         // screen, so its axis is the epoch's own and it publishes here as it always has.
         guard !isLiveSession else {
+            // Live has no placement model: the epoch's shift IS the axis, so the displacement this
+            // session tracks for VOD stays where it is (nothing below reads it on a live session).
             publishPlaylistShift(seconds, seamItemSeconds: seamItemSeconds)
             return
         }
@@ -2657,30 +2669,35 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // AE#418 round 8: how far below its axis the last measured placement landed. Zero until one
         // has been read back, which is what makes an item's first placement compose onto the axis.
         let displacement = lastPlacementDisplacement
+        let offset = placementOffsetSeconds
         anchorShiftLock.unlock()
         guard let epoch else { return }
-        let epochShift = epoch.placed
         restartLock.lock()
         let plannedStart = index >= 0 && index < segmentPlan.count
             ? segmentPlan[index].startSeconds : nil
         restartLock.unlock()
         guard let plannedStart else { return }
         let current = playlistShiftSeconds
-        // The base this placement lands on is the axis in force LESS however far below it the last
-        // placement was measured to sit, which is where AVPlayer puts a segment it composes into a
-        // timeline it already has.
-        let base = Self.placementBase(axis: current, displacement: displacement)
-        let composed = Self.axisShift(
-            after: current, placing: epochShift, displacement: displacement)
+        // The base this placement lands on is the displacement in force LESS however far below it the
+        // last placement was measured to sit, which is where AVPlayer puts a segment it composes into
+        // a timeline it already has.
+        //
+        // PR #533 round 2: in DISPLACEMENT, not in axis. What composes is what AVPlayer's timeline is
+        // displaced by; the normalization the bytes carry is added once, at the end, by the epoch
+        // that wrote them. Composing the axis added the source origin again per placement.
+        let base = Self.placementBase(offset: offset, displacement: displacement)
+        let composedOffset = Self.placementOffset(
+            after: offset, placing: epoch.placedOffset, displacement: displacement)
+        let composed = epoch.carried + composedOffset
         let seam = Self.seamItemSeconds(advertisedStart: plannedStart, currentShift: base)
         // AE#418 round 3: keep what this composition assumed, so the placement can be checked against
         // AVPlayer's own account of where it put the bytes.
         anchorShiftLock.lock()
         let superseded = lastPublishedPlacement
         lastPublishedPlacement = PublishedPlacement(
-            index: index, advertisedStart: plannedStart, worth: epochShift,
-            carried: epoch.openingSourceAxis, assumedBase: base,
-            axisInForce: current, deliverySerialAtCompose: segmentDeliverySerial)
+            index: index, advertisedStart: plannedStart, epoch: epoch, assumedBase: base,
+            offsetInForce: offset, deliverySerialAtCompose: segmentDeliverySerial)
+        placementOffsetSeconds = composedOffset
         anchorShiftLock.unlock()
         if let superseded {
             // AE#418 round 4: named rather than left silent. A placement whose successor arrives before
@@ -2695,18 +2712,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         EngineLog.emit(
             "[HLSVideoEngine] #418 seg\(index) placed (advertised \(String(format: "%.3f", plannedStart))s, "
-            + "worth \(String(format: "%.3f", epochShift))s, sitting "
+            + "worth \(String(format: "%.3f", epoch.openingSourceAxis))s, sitting "
             + "\(String(format: "%.3f", displacement))s below its axis): axis shift "
             + "\(String(format: "%.3f", current))s -> \(String(format: "%.3f", composed))s "
             + "from item \(String(format: "%.3f", seam))s",
             category: .session
         )
-        publishPlaylistShift(composed, seamItemSeconds: seam)
+        publishPlaylistShift(composed, seamItemSeconds: seam, offset: composedOffset)
     }
 
-    /// AE#418 round 2: the axis after AVPlayer places a segment worth `epochShift`. It composes,
-    /// because AVPlayer puts the placed segment's advertised start where its CURRENT mapping says
-    /// that position is, not where the playlist says it is.
+    /// AE#418 round 2: how far AVPlayer's timeline is displaced after it places a segment whose gate
+    /// opened `epochOffset` below its boundary. It composes, because AVPlayer puts the placed
+    /// segment's advertised start where its CURRENT mapping says that position is, not where the
+    /// playlist says it is.
+    ///
+    /// PR #533 round 2: in DISPLACEMENT. Rounds 2 to 9 measured this on sources whose timestamps
+    /// start at zero, where the displacement and the published axis are one number, and composing the
+    /// axis then added the source origin once per placement (measured: 599.625 + 596.833 = 1196.458).
+    /// The normalization is not composed, it is added once by the epoch that wrote the bytes.
     ///
     /// AE#418 round 5: and it composes onto a BASE, which can sit below the axis. Rounds 5 to 7 read
     /// that distance as a multiple of the epoch's presentation lead: round 5 shipped the multiple as
@@ -2728,20 +2751,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
     ///
     /// So the distance is carried in the units it corrects, and the reading that already measures the
     /// base measures it. See [[reference_an_offset_about_presentation_is_measured_at_the_pts]].
-    static func axisShift(
-        after currentShift: Double, placing epochShift: Double, displacement: Double
+    static func placementOffset(
+        after currentOffset: Double, placing epochOffset: Double, displacement: Double
     ) -> Double {
-        return placementBase(axis: currentShift, displacement: displacement) + epochShift
+        return placementBase(offset: currentOffset, displacement: displacement) + epochOffset
     }
 
-    /// The base a placement lands on: the axis in force, less how far below it the last placement was
-    /// measured to sit. This is the value the reading takes back out of AVPlayer's buffer, so the
-    /// prediction is checkable against it on every placement that opens a run of its own.
-    static func placementBase(axis: Double, displacement: Double) -> Double {
-        return axis - displacement
+    /// The base a placement lands on: the displacement in force, less how far below it the last
+    /// placement was measured to sit. This is the value the reading takes back out of AVPlayer's
+    /// buffer (`advertisedStart - observedItemStart` is a statement about its timeline and nothing
+    /// else), so the prediction is checkable against it on every placement that opens its own run.
+    static func placementBase(offset: Double, displacement: Double) -> Double {
+        return offset - displacement
     }
 
-    /// AE#418 round 8: how far below the axis it composed on a placement actually landed.
+    /// AE#418 round 8: how far below the displacement it composed on a placement actually landed.
     ///
     /// Every reading produces one, a confirmation included, which is what the lead coefficient could
     /// not do: it needed a placement carrying a lead, and on a source with no frame reordering, or a
@@ -2761,8 +2785,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// and last-wins is kept: the deviation is one frame, it is undone by the next measurable
     /// placement, and no instrument here resolves better than the frame it would be chasing. The
     /// picture probe quantises at one frame too.
-    static func placementDisplacement(axis: Double, measuredBase: Double) -> Double {
-        let raw = axis - measuredBase
+    static func placementDisplacement(offset: Double, measuredBase: Double) -> Double {
+        let raw = offset - measuredBase
         guard raw.isFinite else { return 0 }
         // Below the epsilon a re-publish moves nothing anyone can see, so the placement is ON its
         // axis rather than a signed hair off it. This is also what keeps a chain of confirmations
@@ -2818,7 +2842,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         anchorShiftLock.lock()
         lastPublishedPlacement = nil
         anchorShiftLock.unlock()
-        publishPlaylistShift(snapped, seamItemSeconds: landingItemSeconds)
+        // The rule is reachable only where the source origin is under a second itself, so the axis it
+        // discards IS the displacement. Deliberately still asked of the axis rather than of the
+        // displacement: measured on the 600 s twin, keeping it inert there was the RIGHT answer on
+        // the one arm that separates the two, and the rule's own premise is what AE#534 is about.
+        publishPlaylistShift(
+            snapped, seamItemSeconds: landingItemSeconds, offset: snapped - sourceStartSeconds)
     }
 
     /// AE#481: what the run holding a seek landing carries, read off the playlist instead of inherited
@@ -2887,6 +2916,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let pending = lastPublishedPlacement
         let epochs = epochAxisByIndex
         let displacement = lastPlacementDisplacement
+        let standingOffset = placementOffsetSeconds
         let opening = firstDeliveredIndexSinceSeek
         anchorShiftLock.unlock()
         // A placement awaiting measurement has the more specific reading (round 7) and measures the
@@ -2907,7 +2937,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let reading = Self.landingAxisReading(
             landingItemSeconds: landingItemSeconds, ranges: ranges,
             openingSegmentStart: advertisedStart, worth: openingSourceShift,
-            assumedBase: Self.placementBase(axis: standing, displacement: displacement),
+            assumedBase: Self.placementBase(offset: standingOffset, displacement: displacement),
             standingAxis: standing)
         else { return false }
         EngineLog.emit(
@@ -2919,7 +2949,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "\(String(format: "%.3f", standing))s this session was mapping with",
             category: .session
         )
-        publishPlaylistShift(reading.axis, seamItemSeconds: reading.runStart)
+        let carried: Double = epochs.carried(at: opening) ?? 0
+        publishPlaylistShift(
+            reading.axis, seamItemSeconds: reading.runStart, offset: reading.axis - carried)
         return true
     }
 
@@ -2929,19 +2961,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let index: Int
         /// The segment's start in the playlist, which is the position AVPlayer reads through its axis.
         let advertisedStart: Double
-        /// What the segment carries below that start. Negative for a gate that opened early.
-        let worth: Double
-        /// PR #533: the source-to-item offset the same bytes carry, for a reading taken off a
-        /// timeline AVPlayer REBUILT, which puts them at their own playlist position rather than
-        /// through an axis. Kept here rather than looked up at measurement time: a backward rewrite
-        /// between the composition and its reading drops this epoch's entry, and the lookup would
-        /// then answer with an older run's normalization.
-        let carried: Double
-        /// The axis the composition assumed AVPlayer's timeline was carrying when it placed this.
+        /// PR #533: the epoch that wrote these bytes, both what its first segment shows against its
+        /// advertised start and the normalization every packet of the run carries. Kept here rather
+        /// than looked up at measurement time: a backward restart between the composition and its
+        /// reading drops this epoch's entry, which is the pruning rule working, and the late lookup
+        /// would then answer with an older run's numbers.
+        let epoch: EpochAxis
+        /// What the segment carries below its advertised start, in AXIS terms, which is what a
+        /// reading adds the measured base to. Negative for a gate that opened early on a source whose
+        /// timestamps start at zero.
+        var worth: Double { epoch.openingSourceAxis }
+        /// The displacement the composition assumed AVPlayer's timeline was carrying when it placed
+        /// this.
         let assumedBase: Double
-        /// The axis in force when it was composed. This is what turns a reading into the displacement
-        /// the next composition uses, and what a rollback returns to.
-        let axisInForce: Double
+        /// The displacement in force when it was composed. This is what turns a reading into the
+        /// distance the next composition uses, and what a rollback returns to.
+        let offsetInForce: Double
         /// AE#418 round 7: how many segment responses this session had completed when the placement
         /// was composed, so a later answer can be told from the one before it.
         let deliverySerialAtCompose: Int
@@ -3080,13 +3115,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         lastPublishedPlacement = nil
         anchorShiftLock.unlock()
         guard let placement else { return }
-        // PR #533: a reading off a REBUILT timeline measures bytes AVPlayer put at their own playlist
-        // position, so what they are worth there is the normalization they carry and not the offset
-        // this side composed with. The two differ by the whole gate backoff, and on a source whose
-        // timestamps do not start at zero they differ by the source origin on top of it.
-        let worth = source == .rebuiltTimeline ? placement.carried : placement.worth
+        // PR #533 round 2: one worth, whichever timeline this was read off. A placement's bytes map
+        // item time onto the source with the normalization they carry plus what their gate backed
+        // off, and that is true of the run AVPlayer opened for them and of one it rebuilt; what the
+        // two disagree about is the BASE, which is measured. Round 1 branched here because the
+        // composition still worked in axis terms, where an AE#412 re-cut is worth nothing.
         guard let reading = Self.placementReading(
-                advertisedStart: placement.advertisedStart, worth: worth,
+                advertisedStart: placement.advertisedStart, worth: placement.worth,
                 assumedBase: placement.assumedBase, observedItemStart: observedItemStart)
         else { return }
         // Round 7: only the run this placement opened says anything about where a placement sits. A
@@ -3127,7 +3162,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "\(String(format: "%.3f", reading.axis))s; \(teaching.clause)",
             category: .session
         )
-        publishPlaylistShift(reading.axis, seamItemSeconds: reading.seam)
+        publishPlaylistShift(
+            reading.axis, seamItemSeconds: reading.seam,
+            offset: reading.base + placement.epoch.placedOffset)
     }
 
     /// AE#418 round 8: a placement that opened a run of its own says how far below the axis it
@@ -3143,7 +3180,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         from placement: PublishedPlacement, measuredBase: Double
     ) -> DisplacementTeaching {
         let sample = Self.placementDisplacement(
-            axis: placement.axisInForce, measuredBase: measuredBase)
+            offset: placement.offsetInForce, measuredBase: measuredBase)
         anchorShiftLock.lock()
         let previous = lastPlacementDisplacement
         lastPlacementDisplacement = sample
@@ -3155,7 +3192,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             "[HLSVideoEngine] #418 seg\(placement.index) sat "
             + "\(String(format: "%.3f", sample))s below the axis it composed on, not "
             + "\(String(format: "%.3f", previous))s; the next composition starts there "
-            + "(axis \(String(format: "%.3f", placement.axisInForce))s, base measured "
+            + "(displacement \(String(format: "%.3f", placement.offsetInForce))s, base measured "
             + "\(String(format: "%.3f", measuredBase))s)",
             category: .session
         )
@@ -3233,13 +3270,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
             "[HLSVideoEngine] #418 seg\(placement.index) never reached AVPlayer's timeline (nothing "
             + "held at item \(String(format: "%.3f", placement.advertisedStart - placement.assumedBase))s); "
             + "rolling the composed axis \(String(format: "%.3f", composed))s back to "
-            + "\(String(format: "%.3f", placement.axisInForce))s",
+            + "\(String(format: "%.3f", placement.epoch.carried + placement.offsetInForce))s",
             category: .session
         )
         publishPlaylistShift(
-            placement.axisInForce,
+            placement.epoch.carried + placement.offsetInForce,
             seamItemSeconds: Self.seamItemSeconds(
-                advertisedStart: placement.advertisedStart, currentShift: placement.assumedBase))
+                advertisedStart: placement.advertisedStart, currentShift: placement.assumedBase),
+            offset: placement.offsetInForce)
     }
 
     /// AE#418 round 7: what the local server made of the request this placement was counted from. A
@@ -3437,6 +3475,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
             gateOpenCondition.unlock()
             if !signalled, Date() >= deadline { return nil }
         }
+    }
+
+    /// Publishes an axis together with the displacement it is made of, so the two cannot drift apart:
+    /// every axis this session states is `the run's normalization + displacement`, and the next
+    /// composition works on the second term alone (PR #533 round 2).
+    private func publishPlaylistShift(
+        _ seconds: Double, seamItemSeconds: Double, offset: Double
+    ) {
+        anchorShiftLock.lock()
+        placementOffsetSeconds = offset
+        anchorShiftLock.unlock()
+        publishPlaylistShift(seconds, seamItemSeconds: seamItemSeconds)
     }
 
     private func publishPlaylistShift(_ seconds: Double, seamItemSeconds: Double) {
