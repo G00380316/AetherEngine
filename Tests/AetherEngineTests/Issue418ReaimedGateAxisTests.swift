@@ -265,12 +265,13 @@ struct Issue418ReaimedGateAxisTests {
 
     // MARK: - What a seek does to the axis
 
-    @Test("a sub-second axis does not survive a seek")
+    @Test("a sub-second axis does not survive a seek that leaves the buffer")
     func subSecondAxisSnaps() {
-        // Measured: -0.500 and -0.875 both read axisErr 0.000 after a seek.
-        #expect(HLSVideoEngine.axisShiftAfterSeek(-0.5) == 0)
-        #expect(HLSVideoEngine.axisShiftAfterSeek(-0.875) == 0)
-        #expect(HLSVideoEngine.axisShiftAfterSeek(0.375) == 0)
+        // Measured: -0.500 and -0.875 both read axisErr 0.000 after a seek. AE#534: every arm that
+        // measured this boundary LEFT the buffer, so they are stated here as what they were.
+        #expect(HLSVideoEngine.axisShiftAfterSeek(-0.5, landingIsPlaced: false) == 0)
+        #expect(HLSVideoEngine.axisShiftAfterSeek(-0.875, landingIsPlaced: false) == 0)
+        #expect(HLSVideoEngine.axisShiftAfterSeek(0.375, landingIsPlaced: false) == 0)
     }
 
     @Test("a second or more survives a seek unchanged")
@@ -278,13 +279,35 @@ struct Issue418ReaimedGateAxisTests {
         // Measured, every one of them across a seek: -1.000, -1.083, -1.292, -1.500, -3.000,
         // -4.000, -7.000, -9.000, -11.000. The boundary sits between -0.875 and -1.000.
         for shift in [-1.0, -1.083, -1.292, -1.5, -3.0, -4.0, -7.0, -9.0, -11.0, -22.0] {
-            #expect(HLSVideoEngine.axisShiftAfterSeek(shift) == shift)
+            #expect(HLSVideoEngine.axisShiftAfterSeek(shift, landingIsPlaced: false) == shift)
         }
     }
 
     @Test("an axis of zero stays zero")
     func zeroStaysZero() {
-        #expect(HLSVideoEngine.axisShiftAfterSeek(0) == 0)
+        #expect(HLSVideoEngine.axisShiftAfterSeek(0, landingIsPlaced: false) == 0)
+    }
+
+    // MARK: - AE#534: a landing AVPlayer already holds
+
+    @Test("a sub-second axis survives a seek whose landing is already placed")
+    func subSecondAxisSurvivesAHeldLanding() {
+        // The reported case: same standing axis of -0.375, and the only difference between the two
+        // arms is whether the landing was inside what AVPlayer had placed. Held, it keeps the
+        // displacement, so discarding it here is what put `capErr` at -0.400 for the rest of the run.
+        #expect(HLSVideoEngine.axisShiftAfterSeek(-0.375, landingIsPlaced: true) == -0.375)
+        #expect(HLSVideoEngine.axisShiftAfterSeek(-0.5, landingIsPlaced: true) == -0.5)
+        #expect(HLSVideoEngine.axisShiftAfterSeek(0.375, landingIsPlaced: true) == 0.375)
+    }
+
+    @Test("a placed landing changes nothing for an axis that already survived")
+    func placedLandingLeavesALargeAxisAlone() {
+        // The gate may only ever ADD a survival. An axis of a second or more was never discarded, so
+        // both answers have to agree there, or the fix has moved an arm it was not asked about.
+        for shift in [-1.0, -1.292, -3.0, -9.0, -22.0, 0.0] {
+            #expect(HLSVideoEngine.axisShiftAfterSeek(shift, landingIsPlaced: true)
+                    == HLSVideoEngine.axisShiftAfterSeek(shift, landingIsPlaced: false))
+        }
     }
 
     // MARK: - What counts as a placement
