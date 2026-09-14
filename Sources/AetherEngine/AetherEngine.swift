@@ -4804,7 +4804,14 @@ public final class AetherEngine: ObservableObject {
                 guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
                 clock.currentTime = target
                 clock.sourceTime = target
-                state = .playing
+                // Sodalite#104 round 2: the transport this publishes is the HOST's, the same way the
+                // VOD landing below reads it off the host it just drove (#122, #292). The live branch
+                // returns early and never got that rule, so a rewind issued while paused published
+                // `.playing` over a host that `seekLiveDVR` had just anchored at rate 0: measured on
+                // the harness, five ticks of `state=playing` over a clock that did not move, and the
+                // next press then spent on a pause the host had already applied ("press Play, nothing;
+                // press it again, it plays").
+                state = (softwareHost?.isPlaying ?? true) ? .playing : .paused
                 setProgrammaticSeek(inFlight: false, target: nil)
                 closeSeekTicket(&programmaticSeekTicket, with: .landed(renderedTime: target))
                 return
