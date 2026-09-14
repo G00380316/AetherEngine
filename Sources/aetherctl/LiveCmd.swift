@@ -121,6 +121,7 @@ func runLive(
     fastZap: Bool = false,
     pacingPreroll: Double? = nil,
     pacingRate: Double? = nil,
+    originLead: Double? = nil,
     freezeAfter: Double? = nil,
     unfreezeAfter: Double? = nil,
     rewindBeforeFreeze: Double? = nil,
@@ -179,6 +180,11 @@ func runLive(
     if let preroll = pacingPreroll {
         fixture.pacingPrerollSeconds = preroll
         print("aetherctl live: --preroll \(preroll)s (0 = strict-realtime origin, no backlog burst)")
+    }
+    if let lead = originLead {
+        fixture.pacingLeadSeconds = lead
+        print("aetherctl live: --origin-lead \(lead)s (the paced origin runs up to \(lead)s of media "
+              + "ahead of the wall clock, which is the distance a raw live client reads behind it)")
     }
     if let rate = pacingRate {
         fixture.pacingRateMultiple = rate

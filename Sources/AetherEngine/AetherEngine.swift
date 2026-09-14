@@ -1578,6 +1578,9 @@ public final class AetherEngine: ObservableObject {
     /// still say whether the viewer was parked in the DVR window or sitting at the edge.
     var liveBehindWhenLastAdvancing: Double = 0
     var lastPublishedLivePlayhead: Double? = nil
+    /// Sodalite#104 round 2: playhead at the last cadence sample, which rate-limits the samples to one
+    /// every half second of media. See `LiveWindow.trackingCadenceSeconds`.
+    var lastLiveCadenceSamplePlayhead: Double? = nil
     /// AE#524: when the live runway was last checked, so the check stays at 1 Hz whatever rate the
     /// clock publishes at, and whether it has already been reported as thin (one line per episode,
     /// not one per second).
@@ -6488,6 +6491,7 @@ public final class AetherEngine: ObservableObject {
         liveWindow = nil
         liveBehindWhenLastAdvancing = 0
         lastPublishedLivePlayhead = nil
+        lastLiveCadenceSamplePlayhead = nil
         clock.liveEdgeTime = 0
         clock.seekableLiveRange = nil
         clock.isAtLiveEdge = false
