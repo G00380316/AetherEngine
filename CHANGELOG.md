@@ -12,6 +12,43 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.86.0] - 2026-09-14
+
+### Fixed
+
+- **A software live seek publishes the transport its host actually took (Sodalite#104).** The VOD
+  landing reads the transport off the host it just drove, which is what #122 and #292 put there: a
+  scrub issued while paused lands paused. The live branch returns early, before that reconcile, so
+  it wrote `.playing` over a `seekLiveDVR` that had just anchored the clock at rate 0 and set
+  `pausedByHost`. Measured on the harness (`play --live --sw --dvr-window 60 --host-calls
+  pauseseek`), before: `SEEKLANDED target=0.00 (clock=0.00, state=playing)` followed by five ticks
+  of `state=playing` over a clock that did not move. After: `state=paused`, and the resume moves
+  the clock on the first press. A host draws its play button and its next press from that field, so
+  the field being wrong cost a press: the one after a rewind confirmed while paused went into
+  pausing a host that was already parked.
+
+- **The live-edge verdict holds, and measures what its own source costs (Sodalite#104).** A host
+  draws a LIVE badge and a focusable Return to Live chip from `isAtEdge`, and that flag was a bare
+  threshold on a quantity that sawtooths by construction. On a read frontier both halves of the
+  comparison move: `lastEdgeStepSeconds` there measures the PUBLISH RATE, since it is however much
+  media arrived since the last tick, so the tolerance dithered between 2.03 and 3.32 s while the
+  distance sawtoothed across it. Measured against a loopback origin running 6 s ahead of the wall
+  clock, the verdict flipped two seconds after a return-to-live press, which puts the chip back in
+  the button row a viewer had just cleared. Leaving the edge now costs one more slack than entering
+  it, and where no playlist declares a cadence the tolerance takes the distance the session holds
+  WHILE the verdict already says it is at the edge, as a robust maximum. The sample gate is the
+  point: a session that is behind contributes nothing, so a deliberate rewind cannot teach the
+  tolerance patience. Fifteen ticks and one transition after the fix, on the run that flipped before.
+
+### Changed
+
+- `LiveWindow.isAtEdge` is the settled verdict with hysteresis; `isWithinEdgeTolerance` is the
+  instantaneous test the old name stood for. Both are internal.
+
+- `aetherctl live` gained `--origin-lead N`, how far ahead of the wall clock the paced origin is
+  allowed to run, which is the standing distance a raw live client ends up reading behind it. The
+  built-in 2 s sits exactly on the old edge tolerance and hides both sides of it.
+
 ## [6.85.0] - 2026-09-14
 
 ### Fixed
