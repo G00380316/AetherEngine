@@ -2813,14 +2813,33 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// all survive one unchanged. Anything below this is worth less than the frame it would move.
     static let axisSnapsBelowSeconds = 1.0
 
-    static func axisShiftAfterSeek(_ shift: Double) -> Double {
+    /// AE#534: the size of the axis was never the thing that decided this, it only correlated with it.
+    /// What AVPlayer actually throws an offset away at is a seek that makes it REBUILD its timeline,
+    /// and a seek whose landing it already holds rebuilds nothing, so it keeps the displacement and
+    /// this rule has to keep it too. Measured on `tc-cues-lie.mkv` over `slowrange.py` at 600 kbps /
+    /// 300 ms, same standing axis of -0.375 in both arms, 2 of 2 runs each:
+    ///
+    /// | seek | landing | placed ranges | AVPlayer | `capErr` on `main` |
+    /// | --- | --- | --- | --- | --- |
+    /// | 73 -> 78 | 78.375 | 72.000-84.337, holds it | KEEPS -0.375 | **-0.400**, wrong for the run |
+    /// | 73 -> 80 | 80.375 | 72.000-80.343, does not | discards it | -0.025, right |
+    ///
+    /// The round 2 arms that measured the size boundary all LEFT the buffer, which is why the proxy
+    /// held for them and why they stay exactly as they were here.
+    ///
+    /// Read the placement off `AVPlayerItem.loadedTimeRanges` and nothing else. The producer's own
+    /// buffered frontier is a different number in both directions on these very arms (95.62 against a
+    /// placed 84.337, and 75.62 against a placed 80.343): a fetch is not a placement (AE#418), and
+    /// only the placement says whether there is a timeline to rebuild.
+    static func axisShiftAfterSeek(_ shift: Double, landingIsPlaced: Bool) -> Double {
+        if landingIsPlaced { return shift }
         return abs(shift) < axisSnapsBelowSeconds ? 0 : shift
     }
 
     /// AE#418 round 2: the host seeked and the axis was small enough for AVPlayer to throw away.
     /// Publishing zero from the landing forward is what keeps the clock over the picture; the seam
     /// leaves everything below the landing on the axis its bytes were placed with.
-    func snapAxisAfterSeek(landingItemSeconds: Double) {
+    func snapAxisAfterSeek(landingItemSeconds: Double, landingIsPlaced: Bool) {
         guard !isLiveSession else { return }
         // AE#481: the landing reading asks about the segment that opens the run it lands in, so the
         // record starts empty at every seek. A stale one would describe the run before this seek.
@@ -2828,8 +2847,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         firstDeliveredIndexSinceSeek = nil
         anchorShiftLock.unlock()
         let current = playlistShiftSeconds
-        let snapped = Self.axisShiftAfterSeek(current)
-        guard snapped != current else { return }
+        let snapped = Self.axisShiftAfterSeek(current, landingIsPlaced: landingIsPlaced)
+        guard snapped != current else {
+            // AE#534: say so when the gate is what kept it. Without this the two cases that matter,
+            // "the axis was too large to discard" and "the landing was already held", leave the same
+            // silence behind, and a report about a clock sitting off the picture cannot be read.
+            if landingIsPlaced, current != 0, abs(current) < Self.axisSnapsBelowSeconds {
+                EngineLog.emit(String(
+                    format: "[HLSVideoEngine] #534 axis %.3fs kept at the seek landing %.3fs "
+                    + "(AVPlayer already holds it, so nothing rebuilds)",
+                    current, landingItemSeconds), category: .session)
+            }
+            return
+        }
         EngineLog.emit(
             "[HLSVideoEngine] #418 axis \(String(format: "%.3f", current))s discarded at the seek "
             + "landing \(String(format: "%.3f", landingItemSeconds))s (AVPlayer snaps a sub-second axis)",
@@ -2842,10 +2872,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         anchorShiftLock.lock()
         lastPublishedPlacement = nil
         anchorShiftLock.unlock()
-        // The rule is reachable only where the source origin is under a second itself, so the axis it
-        // discards IS the displacement. Deliberately still asked of the axis rather than of the
-        // displacement: measured on the 600 s twin, keeping it inert there was the RIGHT answer on
-        // the one arm that separates the two, and the rule's own premise is what AE#534 is about.
+        // Still asked of the AXIS rather than of the displacement, which is the second half of AE#534
+        // and deliberately not this change: on a source whose timestamps begin at 600 s the rule
+        // cannot fire at all, and the one arm that separates the two geometries says inert is the
+        // right answer there. With the placement gate above that arm is now inert for the right
+        // reason rather than by accident, which is what the displacement half needs before it moves.
         publishPlaylistShift(
             snapped, seamItemSeconds: landingItemSeconds, offset: snapped - sourceStartSeconds)
     }

@@ -97,7 +97,15 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
     // #38 follow-up: record the seek-lifecycle stream for the whole run. The level signal cannot show
     // whether a falling edge was a landing, a give-up or a supersede; the ledger below can.
     let seekEvents = UncheckedBox<[SeekEvent]>([])
-    let seekEventSub = engine.seekEvents.sink { event in seekEvents.value.append(event) }
+    // AE#534: and WHEN each one arrived. The ledger could say a seek terminated but not how long it
+    // took, so "does an extra off-main read on the seek path cost anything a viewer would see" had no
+    // observable at all. Events are published on the main actor in emission order, so stamping them
+    // at the sink is the same ordering the engine emitted them in.
+    let seekEventTimes = UncheckedBox<[Date]>([])
+    let seekEventSub = engine.seekEvents.sink { event in
+        seekEvents.value.append(event)
+        seekEventTimes.value.append(Date())
+    }
     defer { seekEventSub.cancel() }
 
     var options = LoadOptions()
@@ -350,6 +358,24 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
           + "late-landings=\(lateLandings.count)")
     let unpaired = begun.subtracting(terminated).sorted()
     print("  unpaired begans: " + (unpaired.isEmpty ? "none  <-- PASS" : "\(unpaired)  <-- FAIL"))
+    // AE#534: began -> first terminal, per seek, in issue order. Quote the median and the MAX: the
+    // read this measures is an XPC round trip to a media server that is least likely to answer during
+    // a seek, so a mean would bury exactly the case the question is about.
+    let stamped = Array(zip(seekEvents.value, seekEventTimes.value))
+    var latencies: [(UInt64, Double)] = []
+    for (event, at) in stamped where event.outcome == .began {
+        guard let end = stamped.first(where: { $0.0.id == event.id && $0.0.isTerminal }) else { continue }
+        latencies.append((event.id, end.1.timeIntervalSince(at) * 1000))
+    }
+    if latencies.isEmpty {
+        print("  seek latency: no began/terminal pair observed")
+    } else {
+        let sorted = latencies.map(\.1).sorted()
+        let median = sorted[sorted.count / 2]
+        print(String(format: "  seek latency ms: n=%d min=%.1f median=%.1f max=%.1f",
+                     sorted.count, sorted.first ?? 0, median, sorted.last ?? 0))
+        print("    per seek: " + latencies.map { String(format: "#%llu %.1f", $0.0, $0.1) }.joined(separator: "  "))
+    }
     for event in events.suffix(12) { print("    \(event)") }
     print("")
     print("VERDICT: seektest DONE (comparison harness; compare tallies old vs new build)")
