@@ -441,6 +441,15 @@ extension AetherEngine {
         // Sodalite#104 round 4: the cadence the playlist declares, which outranks how the source
         // happened to deliver. nil on the paths that serve no playlist of ours.
         w.noteTargetDuration(liveTargetDurationSeconds)
+        // Sodalite#104 round 2: does this tick describe a session keeping up by playback alone? Only
+        // such a tick's distance says what THIS source costs a client at the edge, and the samples are
+        // rate-limited so twelve of them span a stretch of media rather than a stretch of ticks (the
+        // publish rate follows `$currentTime`, not the wall clock).
+        let advance = lastPublishedLivePlayhead.map { currentTime - $0 } ?? 0
+        let sampleDue = lastLiveCadenceSamplePlayhead.map { currentTime - $0 >= 0.5 } ?? true
+        let tracking = state == .playing && !isSeeking && advance > 0 && advance < 1.5 && sampleDue
+        if tracking { lastLiveCadenceSamplePlayhead = currentTime }
+        w.settleEdgeVerdict(tracking: tracking)
         auditLiveRejoinPlacement()
         liveWindow = w
         // AE#442: tick-to-tick advancement, not a running maximum: a backward DVR seek drops the
@@ -461,7 +470,9 @@ extension AetherEngine {
                 + "edge=\(String(format: "%.2f", w.edgeTime))s "
                 + "lastEdgeStep=\(String(format: "%.2f", w.lastEdgeStepSeconds))s "
                 + "targetDuration=\(w.targetDurationSeconds.map { String(format: "%.2f", $0) + "s" } ?? "none") "
-                + "tolerance=\(String(format: "%.2f", w.edgeToleranceSeconds))s",
+                + "trackingCadence=\(w.trackingCadenceSeconds.map { String(format: "%.2f", $0) + "s" } ?? "none") "
+                + "tolerance=\(String(format: "%.2f", w.edgeToleranceSeconds))s "
+                + "exitAbove=\(String(format: "%.2f", w.edgeToleranceSeconds + LiveWindow.edgeExitSlack))s",
                 category: .session
             )
         }

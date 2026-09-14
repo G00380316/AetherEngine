@@ -517,6 +517,11 @@ if first == "live" {
     // `--realtime`; unpaced is a burst that ENDS. Neither covers an origin that keeps running ahead
     // for the whole session, which is what makes a live edge outrun the client that tracks it.
     let realtimeRate = takeDoubleFlag("--realtime-rate", from: &rest)
+    // --origin-lead N: how far ahead of the wall clock the paced origin is allowed to run, which is
+    // the standing distance a raw live client ends up reading behind. A tuner or a transcode route
+    // hands over seconds at a time and keeps that lead; the built-in 2 s sits exactly on the old
+    // edge tolerance and hides everything either side of it (Sodalite#104 round 2).
+    let originLead = takeDoubleFlag("--origin-lead", from: &rest)
     // --gen-highbitrate-seed: generate ~22 Mbps 1080p H.264 MPEG-TS seed for RSS-retention measurement.
     if takeFlag("--gen-highbitrate-seed", from: &rest) {
         let path = seed ?? "Fixtures/user/highbitrate-1080p.ts"
@@ -564,6 +569,7 @@ if first == "live" {
                  forceSoftware: forceSW, dropAfter: dropAfter,
                  discontinuityAt: discontinuityAt, realtime: realtime || realtimeRate != nil,
                  fastZap: fastZap, pacingPreroll: preroll, pacingRate: realtimeRate,
+                 originLead: originLead,
                  freezeAfter: freezeAfter, unfreezeAfter: unfreezeAfter,
                  rewindBeforeFreeze: rewindBeforeFreeze,
                  forceRecoveryReloadAt: forceRecoveryReloadAt,

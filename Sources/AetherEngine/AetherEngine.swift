@@ -1578,6 +1578,9 @@ public final class AetherEngine: ObservableObject {
     /// still say whether the viewer was parked in the DVR window or sitting at the edge.
     var liveBehindWhenLastAdvancing: Double = 0
     var lastPublishedLivePlayhead: Double? = nil
+    /// Sodalite#104 round 2: playhead at the last cadence sample, which rate-limits the samples to one
+    /// every half second of media. See `LiveWindow.trackingCadenceSeconds`.
+    var lastLiveCadenceSamplePlayhead: Double? = nil
     /// AE#524: when the live runway was last checked, so the check stays at 1 Hz whatever rate the
     /// clock publishes at, and whether it has already been reported as thin (one line per episode,
     /// not one per second).
@@ -4804,7 +4807,14 @@ public final class AetherEngine: ObservableObject {
                 guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
                 clock.currentTime = target
                 clock.sourceTime = target
-                state = .playing
+                // Sodalite#104 round 2: the transport this publishes is the HOST's, the same way the
+                // VOD landing below reads it off the host it just drove (#122, #292). The live branch
+                // returns early and never got that rule, so a rewind issued while paused published
+                // `.playing` over a host that `seekLiveDVR` had just anchored at rate 0: measured on
+                // the harness, five ticks of `state=playing` over a clock that did not move, and the
+                // next press then spent on a pause the host had already applied ("press Play, nothing;
+                // press it again, it plays").
+                state = (softwareHost?.isPlaying ?? true) ? .playing : .paused
                 setProgrammaticSeek(inFlight: false, target: nil)
                 closeSeekTicket(&programmaticSeekTicket, with: .landed(renderedTime: target))
                 return
@@ -6481,6 +6491,7 @@ public final class AetherEngine: ObservableObject {
         liveWindow = nil
         liveBehindWhenLastAdvancing = 0
         lastPublishedLivePlayhead = nil
+        lastLiveCadenceSamplePlayhead = nil
         clock.liveEdgeTime = 0
         clock.seekableLiveRange = nil
         clock.isAtLiveEdge = false
