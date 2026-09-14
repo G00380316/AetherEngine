@@ -78,6 +78,23 @@ jobs:
             -derivedDataPath .build/xcode-tvos \
             CODE_SIGNING_ALLOWED=NO
 
+      # The test target is the only place a platform gate in TEST code is ever checked. `swift test`
+      # on macOS compiles the macOS side of every `#if`, so a gate put around a helper instead of
+      # around the tests that call it looks complete there and costs nothing until someone builds
+      # for a simulator. That is how `AetherEngineTests` stopped compiling for iOS and tvOS without
+      # a single red run (2026-09-14, HLSOriginRelayTests).
+      #
+      # EXCLUDED_ARCHS because a generic simulator destination builds both slices and `libdovi.a`
+      # ships arm64 only, so the x86_64 link fails and says nothing about this repo.
+      - name: Build the tests for tvOS Simulator
+        run: |
+          xcodebuild build-for-testing \
+            -scheme AetherEngineTests \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath .build/xcode-tvos-tests \
+            EXCLUDED_ARCHS=x86_64 \
+            CODE_SIGNING_ALLOWED=NO
+
       # The transport probe also builds as an app-hosted test bundle, because a SwiftPM test target
       # is tool-hosted and tool-hosted testing does not exist on device destinations. That project
       # runs nowhere in CI either, and the person who discovers it stopped building is the one who
@@ -108,6 +125,17 @@ jobs:
             -scheme AetherEngine \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath .build/xcode-ios \
+            CODE_SIGNING_ALLOWED=NO
+
+      # The other half of the gate check above; see the tvOS job for why the test target needs its
+      # own build and why x86_64 is excluded.
+      - name: Build the tests for iOS Simulator
+        run: |
+          xcodebuild build-for-testing \
+            -scheme AetherEngineTests \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath .build/xcode-ios-tests \
+            EXCLUDED_ARCHS=x86_64 \
             CODE_SIGNING_ALLOWED=NO
 
   # #344: the package has declared visionOS since 6.0.0 and nothing here compiled for it, so an
