@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.89.1] - 2026-09-15
+
 ### Fixed
 
 - **A surface remounted by identity keeps the engine's picture (AE#536).** The engine held one weak
