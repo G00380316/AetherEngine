@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Return to Live on the software path no longer freezes the picture for two seconds (Sodalite#104
+  round 3).** A live seek there landed exactly at the reader's frontier, where the ring holds nothing
+  ahead of the playhead, so the pump parked the clock on the spot and resumed once
+  `rebufferResumeLeadSeconds` (2.0 s) of audio stood ahead of it. On a real-time source that lead
+  takes as long to arrive as it is deep: measured from a tuner, `lead=0.13s` to `lead=2.05s` in
+  1.92 s on every return, against 223 to 258 ms for a rewind into content the ring already held. A
+  landing nearer the frontier than that lead is now held back by it, which reaches the same distance
+  behind live with the same cushion and without the wait. Measured on the harness across three arm
+  pairs at two origin leads: 3 of 3 underrun-and-rebuffer cycles before, 0 of 3 after, the distance
+  held after the return unchanged (1.35 to 2.54 s before, 1.24 to 2.65 s after), and the edge verdict
+  AT EDGE from the first publish in every arm. A held-back landing says so in the log.
 
 ## [6.88.0] - 2026-09-15
 

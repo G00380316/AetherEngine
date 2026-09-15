@@ -602,6 +602,23 @@ extension AetherEngine {
         return (sessionTarget, clockTarget)
     }
 
+    /// Sodalite#104 round 3: where a software live seek lands, given where it was asked to land.
+    ///
+    /// The software path plays out of a ring the reader fills at the rate the source delivers, so a
+    /// landing AT the frontier has nothing ahead of it: the pump finds the ring dry, the clock parks,
+    /// and it resumes once `rebufferResumeLeadSeconds` of audio stands ahead of it. On a real-time
+    /// source that lead arrives exactly as slowly as it is deep, and the frontier moves on by the same
+    /// amount meanwhile, so the session resumes that far behind the frontier after a frozen picture
+    /// of the same length. Measured from a device on a tuner: `lead=0.13s` to `lead=2.05s` in 1.92 s
+    /// on every Return to Live, while a rewind into content the ring already held reached its first
+    /// frame in 223 to 258 ms.
+    ///
+    /// Landing the lead behind the frontier reaches the same place with the same cushion and spends
+    /// nothing on the way. A target the ring already holds that lead for is untouched.
+    nonisolated static func softwareLiveLanding(requested: Double, window: LiveWindow) -> Double {
+        window.clamp(Swift.min(requested, window.edgeTime - AudioLookaheadPolicy.rebufferResumeLeadSeconds))
+    }
+
     /// AE#454: how close the fresh item has to be to the place it was asked for before the correcting
     /// seek is not worth its cost.
     ///
