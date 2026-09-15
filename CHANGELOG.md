@@ -32,6 +32,10 @@ the public-API contract.
   main thread"). Both now run in a detached `userInitiated` task, the pattern #114 and #215 already use
   for the category declaration and the teardown release, and the load awaits it, so the session is still
   active before the host is built. A load superseded during that wait unwinds before it builds anything.
+  The activation and the #215 teardown release now share one queue: while the activation ran on the
+  main actor a `stop()` could not land inside it, and as two independent detached tasks a stop during
+  a renderer load's activation could release the session first and leave it active after a final
+  teardown.
 
 ## [6.89.0] - 2026-09-15
 

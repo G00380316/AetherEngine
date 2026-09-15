@@ -493,7 +493,8 @@ public final class AetherEngine: ObservableObject {
     /// The release runs just after the teardown rather than inside it. `setActive(false)` is an XPC round
     /// trip that takes roughly half a second on an Atmos MAT passthrough route, which inline would be half
     /// a second of frozen UI before the host's dismiss can start. A `load()` that follows cancels a release
-    /// that has not run yet, so a stop/load pair never loses its session.
+    /// that has not run yet, so a stop/load pair never loses its session, and a stop that lands while a
+    /// software or audio-only load is still activating releases the session after that activation (AE#538).
     public var deactivatesAudioSessionOnStop: Bool = false
 
     @Published public internal(set) var duration: Double = 0
@@ -3199,6 +3200,27 @@ public final class AetherEngine: ObservableObject {
     /// Pending off-main deactivation (#215). See `scheduleAudioSessionDeactivation()`.
     private var audioSessionDeactivationTask: Task<Void, Never>?
     #endif
+
+    /// The most recent off-main activation or release of the shared session. See `enqueueAudioSessionTransition`.
+    private var audioSessionTransition: Task<Void, Never>?
+
+    /// Run a session activation or release off the main actor, after every one asked for before it.
+    ///
+    /// Since AE#538 both halves are detached tasks, and two detached tasks carry no order between them.
+    /// While the renderer activation still ran synchronously on the main actor a `stop()` could not land
+    /// inside it, so the #215 release always followed it; without the queue a stop during a software or
+    /// audio-only load's activation can send `setActive(false)` first and leave the session active after a
+    /// final teardown. Each transition awaits its predecessor, including a cancelled one, which then drops
+    /// on its own guard. Not platform-gated, so the order is testable where the session does not exist.
+    func enqueueAudioSessionTransition(_ body: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        let previous = audioSessionTransition
+        let transition = Task.detached(priority: .userInitiated) {
+            await previous?.value
+            await body()
+        }
+        audioSessionTransition = transition
+        return transition
+    }
 
     #if os(iOS) || os(tvOS)
     /// Route-sharing policy the engine declares with the session category. Platform-split (#116):
@@ -6315,9 +6337,10 @@ public final class AetherEngine: ObservableObject {
     /// `loadGeneration` was bumped by the `stopInternal` that scheduled this, so any `load()` starting in
     /// the meantime bumps it again and the pending deactivation drops rather than releasing the session
     /// out from under the new item. `stopInternal` also cancels a pending task before scheduling a new one.
+    /// The release queues behind a renderer activation still in flight (AE#538), see `enqueueAudioSessionTransition`.
     private func scheduleAudioSessionDeactivation() {
         let generation = loadGeneration
-        audioSessionDeactivationTask = Task.detached(priority: .userInitiated) { [weak self] in
+        audioSessionDeactivationTask = enqueueAudioSessionTransition { [weak self] in
             guard let self else { return }
             guard !Task.isCancelled, await self.loadGeneration == generation else { return }
             AetherEngine.deactivateSharedAudioSession()
