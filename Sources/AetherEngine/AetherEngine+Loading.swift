@@ -1627,7 +1627,7 @@ extension AetherEngine {
         } else {
             nil
         }
-        await Task.detached(priority: .userInitiated) {
+        await enqueueAudioSessionTransition {
             AetherEngine.applyRendererAudioSession(sourceChannels: sourceChannels)
         }.value
         #endif
