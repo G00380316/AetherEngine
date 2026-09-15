@@ -103,29 +103,6 @@ enum LiveEdgePolicy {
     /// is answerable to.
     static let unchangedPlaylistPatienceMultiplier: Double = 1.5
 
-    /// AE#446 round 7: how long a live source may be quiet before the window it still holds is served
-    /// as a finished asset (`VideoSegmentProvider.liveOutageEndlist`).
-    ///
-    /// Deliberately NOT the patience multiplier above. That one is where the CLIENT starts saying the
-    /// source is late (`-12888`) and where the blocking-reload advert is withdrawn, both cheap and both
-    /// reversible. Closing the window is neither: an item that has read an ENDLIST never reloads its
-    /// playlist, so the source coming back is only expressible as an item swap, and the viewer pays for
-    /// it with a visible interruption at the end of the runway. Sizing an irreversible commitment by a
-    /// threshold chosen for a cheap withdrawal spent it on every hiccup one target duration long.
-    /// Measured in the field on a 1 s-segment stack (TARGETDURATION 2, so the withdrawal threshold is
-    /// 3.0 s): a 3.006 s stall in the source read committed a session that still held 14 s of runway to
-    /// a swap 17 s later, with the source delivering again 0.6 s after the decision was taken.
-    ///
-    /// The ceiling is what the client will actually sit through with the window still open, which is
-    /// far more than the closing threshold ever needed. Measured on the harness with the close
-    /// suppressed and no blocking-reload advert (which is the state this window is always in past the
-    /// patience threshold, since #446 withdraws the advert there): AVPlayer kept fetching the resident
-    /// runway for 77 s past the freeze at TARGETDURATION 6, about 13 x TD: 20 fetches, 13 `-12888`
-    /// lines across 20 polls, and it stopped on the last listed segment rather than on patience. Three is a
-    /// quarter of that ceiling and twice the client's own patience: the source gets to be late twice
-    /// over before a decision the item cannot take back is made on its behalf.
-    static let outageCloseSilenceMultiplier: Double = 3.0
-
     /// AE#523: jitter headroom on a MEASURED delivery cadence.
     ///
     /// Deliberately smaller than the 1.5 the client's patience carries, and for the reason AE#447 gives
@@ -136,34 +113,64 @@ enum LiveEdgePolicy {
     /// missed ones one.
     static let sourceCadenceJitterMargin: Double = 1.25
 
-    /// AE#523: deliveries a source may miss before the window it still holds is closed. See
-    /// `outageCloseSilenceSeconds`.
-    static let outageCloseCadenceMultiplier: Double = 2.0
+    /// AE#523 round 2: the content a close still needs in front of the consumer, as a multiple of the
+    /// served TARGETDURATION.
+    ///
+    /// Closing the window is only worth anything while the consumer can still be TOLD. An item that
+    /// walks off the end of an OPEN window does not get a `didPlayToEndTime` to hand the session a
+    /// controlled swap: it stalls at an edge that is not moving, and about half a minute later the
+    /// client rejoins forward on its own and the position is gone (measured on the harness with the
+    /// close suppressed entirely: a 30 s outage came back POSITION LOST, 4 segments skipped, against
+    /// `position held` with it). So the wait ends one poll before the content does, and not sooner.
+    ///
+    /// One poll is about `0.81 x TD` with the blocking-reload advert withdrawn, which is the state
+    /// every close candidate is in (measured over three harness runs: 31, 35 and 38 polls at a mean gap
+    /// of 4.83, 4.85 and 4.86 s against TARGETDURATION 6). A whole target duration is that poll plus a
+    /// fifth of one in margin, and it can never be less than a segment, since `EXT-X-TARGETDURATION` is
+    /// by definition the longest one the playlist carries.
+    static let outageCloseRunwayReserveMultiplier: Double = 1.0
 
-    /// AE#446 round 7: the deadline in seconds, for a session whose TARGETDURATION is this.
+    /// The reserve in seconds, for a session whose TARGETDURATION is this.
+    static func outageCloseRunwayReserveSeconds(targetDuration: Int) -> Double {
+        outageCloseRunwayReserveMultiplier * Double(targetDuration)
+    }
+
+    /// AE#446 round 7, rewritten by AE#523 round 2: the last moment at which closing the window can
+    /// still be served, for a session whose TARGETDURATION is this.
     ///
-    /// Bounded above by the producer's own patience with a source that cuts nothing
-    /// (`HLSSegmentProducer.liveSourceStarvationTimeoutSeconds`, 35 s): past that the read is given up
-    /// and handed to the host, and a window that has not been closed by then never will be. That bound
-    /// is not hypothetical at a large TARGETDURATION, which is exactly the bursty-relay source this
-    /// live path exists for (#167): a 14 s seal from an arrival cadence would put `3 x TD` at 42 s, on
-    /// the far side of an exit at 35. A patience-worth of margin is kept ahead of it, so the client has
-    /// polls left to be handed the closed playlist in.
+    /// This used to be the close's main trigger, a deadline on the silence: `3 x TD` in round 7, and
+    /// two of the source's own deliveries once AE#523 measured the source instead of the client. It is
+    /// not a trigger any more, because it was never on a different axis from the runway it was paired
+    /// with. While the source is quiet the consumer keeps walking the window, so what is left of the
+    /// clock and what is left of the content fall together and the pair has one degree of freedom: for
+    /// anyone holding more than a deadline's worth of content the clock reached zero first, every time,
+    /// and the irreversible decision was taken with the content that would have paid for the wait still
+    /// in hand. The runway bound could only ever fire at the first moment the question was asked.
     ///
-    /// Bounded below by the moment the source is late at all: a deadline under that would close the
+    /// Measured on the harness, a viewer 30 s inside the window against a 22 s freeze at TARGETDURATION
+    /// 6: late at 10.07 s of silence with 24.0 s of runway, closed at 20.10 s of silence with the same
+    /// 24.0 s of runway, item swapped, largest step 28.98 s, and the source was delivering again 2 s
+    /// after the decision. Reported from the field on 6.84.0 as 5 closes in 40 gaps of a 45 minute
+    /// session, each with 5.8 to 8.5 s of runway in hand and the source back within seconds.
+    ///
+    /// What is left is the one clock bound that is not about the content: the producer gives up a
+    /// source that cuts nothing after `HLSSegmentProducer.liveSourceStarvationTimeoutSeconds` (35 s)
+    /// and hands the session to the host, and the deferral that holds that exit off
+    /// (`VideoSegmentProvider.outageRunwayAheadOfConsumer`) only applies to a window already CLOSED. A
+    /// window not closed by then never will be. The close therefore happens a patience short of the
+    /// exit, which is what leaves the client polls to be handed the closed playlist in, and arms the
+    /// deferral before the exit can fire. The margin has to cover a poll, because the decision is only
+    /// ever taken while a playlist is being built: measured on the harness at TARGETDURATION 6, a
+    /// 26.0 s ceiling was acted on at 30.15 s of silence, 4.85 s ahead of the exit, and a patience is
+    /// `1.5 x TD` against a poll at `0.81 x TD`.
+    ///
+    /// Bounded below by the moment the source is late at all: a ceiling under that would close the
     /// window before the question can even be asked.
-    static func outageCloseSilenceSeconds(targetDuration: Int,
+    static func outageCloseCeilingSeconds(targetDuration: Int,
                                           cadenceSeconds: Double? = nil) -> Double {
-        let td = Double(targetDuration)
-        let patience = unchangedPlaylistPatienceMultiplier * td
+        let patience = unchangedPlaylistPatienceMultiplier * Double(targetDuration)
         let late = sourceLateSeconds(targetDuration: targetDuration, cadenceSeconds: cadenceSeconds)
-        // AE#523: a deadline of `3 x TD` is under two of this source's own deliveries when its rhythm is
-        // coarser than the target duration, so the deadline carries the same floor the lateness question
-        // does. Two rhythms, because one missed delivery is what lateness already means; the deadline is
-        // the point at which waiting for a second one has stopped being worth an item's runway.
-        let fromCadence = (cadenceSeconds ?? 0) * outageCloseCadenceMultiplier
-        return max(late, min(max(outageCloseSilenceMultiplier * td, fromCadence),
-                             HLSSegmentProducer.liveSourceStarvationTimeoutSeconds - patience))
+        return max(late, HLSSegmentProducer.liveSourceStarvationTimeoutSeconds - patience)
     }
 
     /// AE#523: how long THIS source may be quiet before it is called late.
@@ -192,40 +199,45 @@ enum LiveEdgePolicy {
         return min(max(patience, cadence * sourceCadenceJitterMargin), ceiling)
     }
 
-    /// AE#520: does the content in front of the consumer end the wait before the clock does?
+    /// AE#523 round 2: has the wait run out of the content it is being waited with?
     ///
-    /// Waiting is only free while there is something to wait WITH. A consumer that walks off the end of
-    /// an open window does not get a `didPlayToEndTime` to hand the session a controlled swap: it stalls
-    /// at an edge that is not moving, and past about half a minute of that the item dies and the client
-    /// rejoins forward on its own (measured on the harness with the close suppressed entirely: a 30 s
-    /// outage came back `POSITION LOST`, 4 segments skipped, against `position held` with it). So the
-    /// deadline is one bound on the wait and the runway is the other.
+    /// Waiting is only free while there is something to wait WITH, and it is only useful while the
+    /// consumer can still be TOLD. A consumer that walks off the end of an OPEN window does not get a
+    /// `didPlayToEndTime` to hand the session a controlled swap: it stalls at an edge that is not
+    /// moving, and past about half a minute of that the item dies and the client rejoins forward on its
+    /// own (measured on the harness with the close suppressed entirely: a 30 s outage came back
+    /// `POSITION LOST`, 4 segments skipped, against `position held` with it). So the window closes one
+    /// poll before the content runs out (`outageCloseRunwayReserveSeconds`), and otherwise not at all
+    /// until the producer is about to give the source up (`outageCloseCeilingSeconds`).
     ///
-    /// AE#446 round 7 wrote the second one as a CONSTANT, two target durations of content, on the
-    /// premise that a stalled client makes several polls per target duration. Both halves were wrong,
-    /// and the constant is what AE#520 reported as Atmos dropping on live:
+    /// Two earlier readings of the same bound, and why neither is the comparison:
     ///
-    /// - The client polls about ONCE per target duration, not several times. Measured over three
-    ///   harness runs with the advert withdrawn (which is the state every close candidate is in):
-    ///   31, 35 and 38 polls at a mean gap of 4.83, 4.85 and 4.86 s against TARGETDURATION 6, so
-    ///   0.81 x TD per poll. Two target durations is two and a half polls, not "a comfortable few".
-    /// - A viewer at the live edge holds the holdback, `3 x TD`, and is not asked about any of this
-    ///   until the source is late at `1.5 x TD`, by which point half of that is spent. It therefore
-    ///   stands at `1.5 x TD` and UNDER a `2 x TD` floor at the very first moment the question can be
-    ///   asked. The floor fired at once for every viewer who had not deliberately rewound, so round 7's
-    ///   `3 x TD` deadline was unreachable for exactly the viewer it was written for, and the effective
-    ///   close threshold stayed the cheap `1.5 x TD` that round set out to remove.
+    /// - AE#446 round 7 wrote it as a CONSTANT, two target durations of content, on the premise that a
+    ///   stalled client makes several polls per target duration. Both halves were wrong, and the
+    ///   constant is what AE#520 reported as Atmos dropping on live. The client polls about ONCE per
+    ///   target duration, not several times (measured over three harness runs with the advert
+    ///   withdrawn, which is the state every close candidate is in: 31, 35 and 38 polls at a mean gap
+    ///   of 4.83, 4.85 and 4.86 s against TARGETDURATION 6, so `0.81 x TD` per poll). And a viewer at
+    ///   the live edge holds the holdback, `3 x TD`, and is not asked about any of this until the
+    ///   source is late at `1.5 x TD`, by which point half of it is spent: the floor fired at once for
+    ///   every viewer who had not deliberately rewound, so round 7's `3 x TD` deadline was unreachable
+    ///   for exactly the viewer it was written for.
+    /// - AE#520 replaced the constant with the CLOCK: the wait ended when the content ahead would not
+    ///   carry it to the close deadline. That removed the reported swap (measured on the harness, same
+    ///   command line in both arms: a 12 s gap at TARGETDURATION 6 with 12.0 s of runway closed the
+    ///   window and swapped the item before, and is absorbed with no ENDLIST and no swap after, at an
+    ///   identical playhead, 89.40 s against 89.60 s of advance, largest step 1.10 s in both). But the
+    ///   deadline is not a second axis. `runway + silence` is what a quiet source holds fixed, so
+    ///   `runway <= deadline - silence` is decided the first time it is asked and never changes its
+    ///   answer afterwards: a consumer holding more than a deadline's worth of content was never closed
+    ///   on by this bound at all, and the deadline closed it instead with every second of that content
+    ///   still in hand.
     ///
-    /// So the runway is compared against the clock rather than against a number: it ends the wait only
-    /// when the content ahead will not carry it to the deadline. Both are seconds, and one of them is
-    /// already a measured, argued bound. Measured on the harness, same command line in both arms:
-    /// a 12 s gap at TARGETDURATION 6 with 12.0 s of runway closed the window and swapped the item
-    /// before, and is absorbed with no ENDLIST and no swap after, at an identical playhead (89.40 s
-    /// against 89.60 s of advance, largest step 1.10 s in both). A 30 s outage holds its position in
-    /// both arms.
-    static func outageCloseOnRunway(runwaySeconds: Double, silenceSeconds: Double,
-                                    deadlineSeconds: Double) -> Bool {
-        runwaySeconds <= max(0, deadlineSeconds - silenceSeconds)
+    /// The reading below is uniformly more patient than AE#520's, other than in the last poll before
+    /// the old deadline, where a thin runway now closes one poll earlier than a clock that was about to
+    /// close it anyway.
+    static func outageCloseOnRunway(runwaySeconds: Double, targetDuration: Int) -> Bool {
+        runwaySeconds <= outageCloseRunwayReserveSeconds(targetDuration: targetDuration)
     }
 
     /// The TARGETDURATION a measured arrival cadence requires: enough that `1.5 x TD` of patience covers
@@ -658,6 +670,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#446 round 7: whether the current late-source episode has been reported. The window now
     /// outlives a source that is merely late, so the log has to say that it did.
     private var _liveOutageSourceLateNoted = false
+    /// AE#523 round 2: how close the episode came to a close, so the line that reports an absorbed gap
+    /// can say whether it was comfortable. Without them a session that rode both bounds to the edge
+    /// reads exactly like one that was never in danger, which is the difference the next round needs.
+    private var _liveOutageEpisodeMaxSilence = 0.0
+    private var _liveOutageEpisodeMinRunway = Double.greatestFiniteMagnitude
     /// AE#454: where a rejoin wants the NEXT item to begin, addressed by CONTENT (which segment, how
     /// far into it) rather than by a clock. The window slides between arming this and the fresh item
     /// fetching the playlist that carries it, so a seconds value would name a different place by the
@@ -1766,14 +1783,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// an end. The gate is the consumer's own fetch point.
     ///
     /// AE#446 round 7: and not for a source that is merely LATE. The decision costs the item that sees
-    /// it, so it waits for `LiveEdgePolicy.outageCloseSilenceMultiplier` rather than firing the moment
-    /// the source misses its cadence, which is where the cheap and reversible half of this fix (the
-    /// blocking-reload withdrawal, `liveDeliveryStalled`) belongs.
+    /// it, so the moment the source misses its cadence is where the cheap and reversible half of this
+    /// fix belongs (the blocking-reload withdrawal, `liveDeliveryStalled`) and not this one.
     ///
-    /// AE#520: the wait's second bound, the runway, is a comparison against that deadline and not a
-    /// constant. As a constant it was shorter than what an edge viewer holds when the question is first
-    /// asked, so it decided every ordinary live session and the deadline above decided none of them.
-    /// `LiveEdgePolicy.outageCloseOnRunway` carries the measurement.
+    /// AE#523 round 2: what ends the wait is the CONTENT. The window stays live while the consumer
+    /// still holds more than one poll's worth of it ahead of its own fetch point
+    /// (`LiveEdgePolicy.outageCloseOnRunway`), whatever the clock says, and the clock keeps only the
+    /// bound it owns alone: the producer is about to give the source up
+    /// (`LiveEdgePolicy.outageCloseCeilingSeconds`). Both earlier readings, round 7's constant and
+    /// AE#520's comparison against the close deadline, are argued at those two.
     var liveOutageEndlist: Bool {
         let consumerTarget = cache.targetIndex
         // Read before the lock: the ingest's meter takes a lock of its own.
@@ -1788,26 +1806,39 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let targetDuration = liveTargetDurationSeal.value
         let late = sourceIsLateLocked(ingestCadenceSeconds: ingestCadence)
         let cadence = cadenceSecondsLocked(ingest: ingestCadence)
-        let deadline = targetDuration.map {
-            LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: $0, cadenceSeconds: cadence)
+        let ceiling = targetDuration.map {
+            LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: $0, cadenceSeconds: cadence)
         }
-        let quiet: Bool = {
-            guard let silence, let deadline else { return false }
-            return silence > deadline
+        // The clock's only remaining say: past this the producer gives the source up, so a window not
+        // closed here would never be closed at all.
+        let pastCeiling: Bool = {
+            guard let silence, let ceiling else { return false }
+            return silence > ceiling
         }()
         let runway = runwayAheadOfConsumerLocked(fetchPoint: consumerTarget)
-        // AE#520: what is left of the wait, on the same axis as the runway. Both are seconds, so the
-        // content bound is a comparison against the clock rather than a constant of its own.
-        let clockLeft = max(0, (deadline ?? 0) - (silence ?? 0))
+        // AE#523 round 2: what the close itself needs in front of the consumer to be worth serving.
+        let reserve = targetDuration.map {
+            LiveEdgePolicy.outageCloseRunwayReserveSeconds(targetDuration: $0)
+        } ?? 0
         // One line per episode, at both ends of it: a source that goes late and comes back without the
         // window ever closing is the case this round exists for, and it is otherwise invisible.
         let noteWentLate = late && !_liveOutageSourceLateNoted
         let noteCameBack = !late && _liveOutageSourceLateNoted
+        if late {
+            _liveOutageEpisodeMaxSilence = Swift.max(_liveOutageEpisodeMaxSilence, silence ?? 0)
+            _liveOutageEpisodeMinRunway = Swift.min(_liveOutageEpisodeMinRunway, runway)
+        }
+        let episodeMaxSilence = _liveOutageEpisodeMaxSilence
+        let episodeMinRunway = _liveOutageEpisodeMinRunway
+        if noteCameBack {
+            _liveOutageEpisodeMaxSilence = 0
+            _liveOutageEpisodeMinRunway = .greatestFiniteMagnitude
+        }
         _liveOutageSourceLateNoted = late
         stateLock.unlock()
 
         let hasRunway = consumerTarget >= 0 && consumerTarget + 1 < total
-        if isLive, noteWentLate, let silence, let targetDuration, let deadline {
+        if isLive, noteWentLate, let silence, let targetDuration, let ceiling {
             EngineLog.emit(
                 "[VideoSegmentProvider] #446 the source has missed its cadence "
                 + "(quiet \(String(format: "%.2f", silence))s, "
@@ -1816,44 +1847,49 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 + "); "
                 + (hasRunway
                    ? "the consumer is at \(consumerTarget) of \(total) with "
-                     + "\(String(format: "%.1f", runway))s of runway, and the window stays live until "
-                     + "\(String(format: "%.1f", deadline))s of silence, or sooner if that runway "
-                     + "would not carry the wait that far (\(String(format: "%.1f", clockLeft))s of it "
-                     + "left)"
+                     + "\(String(format: "%.1f", runway))s of runway, and the window stays live while "
+                     + "more than \(String(format: "%.1f", reserve))s of that is left to tell it in, "
+                     + "and in any case no longer than \(String(format: "%.1f", ceiling))s of silence"
                    : "the consumer is at the end of what the window holds, so there is no runway to "
                      + "serve as a finished asset"),
                 category: .session
             )
         }
-        if isLive, noteCameBack, let deadline {
+        if isLive, noteCameBack {
             EngineLog.emit(
                 "[VideoSegmentProvider] #446 the source is cutting again and the window was never "
-                + "closed (silence stayed under \(String(format: "%.1f", deadline))s); no ENDLIST, no "
-                + "item swap, nothing for the viewer to see",
+                + "closed (it was quiet for \(String(format: "%.2f", episodeMaxSilence))s at the "
+                + "widest, and the consumer never fell below "
+                + "\(String(format: "%.1f", episodeMinRunway))s of runway against the "
+                + "\(String(format: "%.1f", reserve))s a close would have needed); no ENDLIST, no item "
+                + "swap, nothing for the viewer to see",
                 category: .session
             )
         }
 
-        // The wait is bounded from both ends: by the clock, and by the content left to wait with.
+        // AE#523 round 2: the wait ends with the content, or with the producer's patience for a source
+        // that cuts nothing. Not with a deadline: that one shares the runway's axis and only ever beat
+        // it to the decision.
         let outOfRunway = late && LiveEdgePolicy.outageCloseOnRunway(
-            runwaySeconds: runway, silenceSeconds: silence ?? 0, deadlineSeconds: deadline ?? 0)
-        guard isLive, hasRunway, quiet || outOfRunway else { return false }
+            runwaySeconds: runway, targetDuration: targetDuration ?? 0)
+        guard isLive, hasRunway, pastCeiling || outOfRunway else { return false }
         stateLock.lock()
         _liveOutageEndlistLatched = true
         // The episode is accounted for by the line below; leaving it armed would have the fresh item's
         // first build after the swap report an outage that was very much closed.
         _liveOutageSourceLateNoted = false
+        _liveOutageEpisodeMaxSilence = 0
+        _liveOutageEpisodeMinRunway = .greatestFiniteMagnitude
         stateLock.unlock()
         EngineLog.emit(
             "[VideoSegmentProvider] #446 the source stopped delivering with the consumer at "
             + "\(consumerTarget) of \(total) (quiet \(String(format: "%.2f", silence ?? 0))s, "
             + "\(String(format: "%.1f", runway))s of runway left"
-            + (quiet
-               ? ", past the \(String(format: "%.1f", deadline ?? 0))s deadline for TARGETDURATION "
-                 + "\(targetDuration.map(String.init) ?? "?")s"
-               : ", which will not carry the wait to the \(String(format: "%.1f", deadline ?? 0))s "
-                 + "deadline (\(String(format: "%.1f", clockLeft))s of it left), so the wait has run "
-                 + "out of content rather than out of clock")
+            + (outOfRunway
+               ? ", at or under the \(String(format: "%.1f", reserve))s the close itself needs to reach "
+                 + "the consumer, so the wait has run out of content"
+               : ", past the \(String(format: "%.1f", ceiling ?? 0))s at which the producer gives up a "
+                 + "source that cuts nothing, so a window left open here would never be closed at all")
             + "); serving the rest of the window as a finished asset (ENDLIST) so AVPlayer keeps "
             + "fetching the runway it already holds instead of striking out on an unchanged playlist",
             category: .session
@@ -1890,9 +1926,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// so the condition that closes it has to be able to become false again. Call under stateLock.
     ///
     /// AE#446 round 7: this is the strict reading, and the close deliberately asks a second, wider
-    /// question of its own (`LiveEdgePolicy.outageCloseSilenceSeconds`) because that decision cannot be
-    /// taken back. The recovery stays here: "delivering again" has to mean the source is back on its
-    /// rhythm, not merely quieter than the close allows.
+    /// question of its own (the runway the close still needs, and the producer's own patience with a
+    /// source that cuts nothing) because that decision cannot be taken back. The recovery stays here:
+    /// "delivering again" has to mean the source is back on its rhythm, not merely quieter than the
+    /// close allows.
     ///
     /// AE#523: the rhythm is the SOURCE's, measured, floored by the client's patience. A source coarser
     /// than its advertised target duration used to be late on every ordinary delivery, and the close
