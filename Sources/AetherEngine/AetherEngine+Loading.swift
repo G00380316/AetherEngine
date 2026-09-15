@@ -876,6 +876,11 @@ extension AetherEngine {
         // #35/#93 cold-startup: let the producer read whether the first frame has landed, so its wedge
         // detector stays suspended through a slow DV-master pre-roll instead of re-anchoring and livelocking.
         session.hasStartedRenderingProvider = { [hasRenderedFirstFrameMirror] in hasRenderedFirstFrameMirror.get() }
+        // AE#520 round 2: let the outage close read how much the consumer can still play without being
+        // handed anything, off-main and without blocking a playlist build on an AVFoundation read.
+        session.consumerBufferedSecondsProvider = { [consumerContiguousBufferMirror] in
+            consumerContiguousBufferMirror.get()
+        }
         // #93 retest: let the wedge re-anchor aim the producer at a pending unlanded user seek target
         // instead of the frozen clock (same decision the nudge and stage-2 reload apply).
         session.recoverySeekTargetProvider = { [recoverySeekTargetMirror] in recoverySeekTargetMirror.get() }

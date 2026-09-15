@@ -575,6 +575,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// frozen fetch target is not a wedge, issue #65 pause false-positive).
     var playIntentProvider: (@Sendable () -> Bool)?
 
+    /// AE#520 round 2: how long the consumer can keep playing out of what it already holds, readable
+    /// off the main actor. Wired by AetherEngine to a thread-safe mirror the telemetry sampler writes,
+    /// and handed to the segment provider, whose outage close spends a depth: the segments it has not
+    /// fetched yet are only half of one. nil on the software path and between item swaps.
+    var consumerBufferedSecondsProvider: (@Sendable () -> Double?)?
+
     /// Whether AVPlayer has ever presented a frame this item (its `timeControlStatus` reached `.playing`
     /// at least once), readable off the main actor. Wired by AetherEngine to a thread-safe mirror and
     /// threaded onto every producer so the VOD backpressure wedge detector stays suspended through cold
@@ -1879,6 +1885,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             segmentServedHandler: segmentServedHandler
         )
         self.provider = prov
+        // AE#520 round 2: the close reads it on the playlist-build thread, so it is a closure over a
+        // mirror rather than a read of the item.
+        prov.consumerBufferedSecondsProvider = consumerBufferedSecondsProvider
         if isLiveSession {
             prod.onLiveSegmentFinalized = { [weak prov] index, durationSeconds, startPtsSeconds, discontinuous in
                 prov?.appendLiveSegment(index: index,

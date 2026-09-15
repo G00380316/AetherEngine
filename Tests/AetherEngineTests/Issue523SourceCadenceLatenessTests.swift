@@ -188,13 +188,13 @@ struct Issue523RunwayCarriesTheWaitTests {
 
     @Test("the reported closes do not happen any more")
     func theReportedGapsAreAbsorbed() {
-        let reserve = LiveEdgePolicy.outageCloseRunwayReserveSeconds(
+        let reserve = LiveEdgePolicy.outageCloseDepthReserveSeconds(
             targetDuration: reportedTargetDuration)
         // Every one of the five closes had more content in hand than the close needs to reach the
         // consumer, so none of them is a close any more.
         for runway in [5.8, 6.5, 7.2, 8.0, 8.5] {
             #expect(runway > reserve)
-            #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: runway,
+            #expect(!LiveEdgePolicy.outageCloseOnDepth(depthSeconds: runway,
                                                         targetDuration: reportedTargetDuration))
         }
         // And the clock that used to close them, two measured deliveries, is not a bound any more: what
@@ -214,8 +214,8 @@ struct Issue523RunwayCarriesTheWaitTests {
         // Whatever the silence has been, the same content gives the same answer. The old bound could
         // not say that: it was a comparison against a clock that falls at exactly the rate the runway
         // does, so it answered once and then never again.
-        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 24, targetDuration: 6))
-        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 4, targetDuration: 6))
+        #expect(!LiveEdgePolicy.outageCloseOnDepth(depthSeconds: 24, targetDuration: 6))
+        #expect(LiveEdgePolicy.outageCloseOnDepth(depthSeconds: 4, targetDuration: 6))
     }
 
     /// The harness arm, as the provider sees it: 6 segments of 4 s ahead of the fetch point, which is
