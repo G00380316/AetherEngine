@@ -12,6 +12,35 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.88.0] - 2026-09-15
+
+### Fixed
+
+- **A live outage close spends what the consumer can still play, not only what it has yet to fetch
+  (AE#520 round 2).** The runway it measured is the content the window LISTS above the consumer's
+  fetch point, which leaves out everything the consumer has already fetched and still holds. For a
+  viewer at the live edge that half is most of what they have: measured on the harness at
+  TARGETDURATION 6, the window closed on 4.0 s listed while AVPlayer held another 4.9 s, and the
+  source delivered again 1.84 s later. Deferring costs nothing in the seam it was avoiding, because
+  the swap lands when the consumer reaches the end of the closed window and not when the ENDLIST is
+  served (closed at +70.51, swapped at +89.5 with 0.79 s of buffer left). The depth is read off a
+  mirror the telemetry sampler writes at 1 Hz rather than off an AVFoundation call on a
+  playlist-build thread, and a session with nothing to report one, the software path or the gap
+  between two items, reads exactly as it did before. The gate that decides whether there is anything
+  to serve as a finished asset asks the same depth now: it used to ask whether SEGMENTS were listed,
+  so a consumer playing out of its own buffer could not be closed on at all, walked down to 0.1 s
+  with the window open, and rejoined forward with 4 segments skipped. Harness, same command line per
+  pair: an edge viewer's 12 s gap goes from an item swap to `gap absorbed`, its 30 s outage still
+  holds its position (closing at 16.07 s of silence on 6.0 s of depth, none of it listed), and
+  AE#520's own control, AE#523 round 2's arm and a 30 s outage at depth are all unchanged.
+
+### Added
+
+- `aetherctl live` prints `item=` (the item's own playhead) and `buf=` (how long the consumer can
+  keep playing out of what it holds) per tick. The freeze leg could only report the published
+  session clock, which is item time plus a shift, so the depth an outage decision spends was not
+  observable at all.
+
 ## [6.87.0] - 2026-09-15
 
 ### Fixed
