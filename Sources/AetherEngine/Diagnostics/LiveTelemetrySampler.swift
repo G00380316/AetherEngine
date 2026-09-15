@@ -58,6 +58,12 @@ struct NativeAVFReadings: Sendable {
     /// the tail the playhead jumps ahead of loaded media, so the clamped `forwardBufferSeconds` (>= 0)
     /// hides that the final segment has not arrived; the decision needs the true loaded end vs duration.
     var loadedRangeEndSeconds: Double? = nil
+    /// AE#520 round 2: how long this consumer can keep playing without being handed anything else, which
+    /// is the range the playhead is INSIDE and not the last one loaded. `forwardBufferSeconds` above
+    /// reads the last range's end, so on an item with a hole in front of the playhead it names content
+    /// the consumer cannot reach without stalling first. A decision that spends this depth needs the
+    /// half it can actually walk; nil when no loaded range contains the playhead at all.
+    var contiguousForwardBufferSeconds: Double? = nil
     /// Sum over all access-log events, for the [LagDiag] tick-over-tick drop delta.
     var droppedFramesLifetimeSum: Int = 0
     var currentTimeSeconds: Double = .nan
@@ -313,6 +319,9 @@ final class LiveTelemetrySampler {
                 networkThroughputMbps = readings.networkThroughputMbps
                 networkTransferredBytes = readings.networkTransferredBytes
                 forwardBufferSeconds = readings.forwardBufferSeconds
+                // AE#520 round 2: the outage close spends the depth this consumer can still walk, and
+                // it is decided on a playlist-build thread that must not hop the main actor to ask.
+                engine.consumerContiguousBufferMirror.set(readings.contiguousForwardBufferSeconds)
             } else {
                 // AE#443: an item swap has a gap where the host holds no current item, and reporting
                 // nothing through it reads as "the counter is gone" rather than "nothing new since".
@@ -320,6 +329,9 @@ final class LiveTelemetrySampler {
                 networkThroughputMbps = nil
                 networkTransferredBytes = Self.foldRetired(nil, retired: engine.nativeHost?.retiredItemTransferredBytes ?? 0)
                 forwardBufferSeconds = nil
+                // Between items there is no consumer to read a depth off, and reporting the last one
+                // would hand the close a figure about an item that is gone.
+                engine.consumerContiguousBufferMirror.set(nil)
             }
 
         case .software:
@@ -558,6 +570,16 @@ final class LiveTelemetrySampler {
                 if now.isFinite {
                     readings.forwardBufferSeconds = max(0, end - now)
                 }
+            }
+        }
+        if now.isFinite {
+            for value in item.loadedTimeRanges {
+                let range = value.timeRangeValue
+                let start = range.start.seconds
+                let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+                guard start.isFinite, end.isFinite, start <= now, end > now else { continue }
+                readings.contiguousForwardBufferSeconds = end - now
+                break
             }
         }
 

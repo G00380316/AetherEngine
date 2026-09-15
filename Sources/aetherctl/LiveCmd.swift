@@ -932,6 +932,12 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
                              (engine.seekableLiveRange?.upperBound ?? edge) - t))
             } else {
                 if firstPostFreezeT == nil { firstPostFreezeT = t }
+                // AE#520 round 2: this step is dominated by the FIXTURE on thaw, not by the session.
+                // The paced origin gates on wall clock, so it hands over everything the freeze owed at
+                // I/O speed the moment it thaws, and the client follows an edge that jumped. Measured
+                // on one arm at two prerolls, same code: 28.98 s at `--preroll 30` and 58.98 s at 60,
+                // which is enough to flip the no-rejoin verdict below. Compare arms at one preroll, and
+                // read the step as a property of the origin unless the ARMS differ at the same one.
                 maxForwardSnap = max(maxForwardSnap, t - prevT)
                 advanceAfterFreeze = t - (firstPostFreezeT ?? t)
             }
@@ -942,9 +948,18 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
         let range = engine.seekableLiveRange.map {
             String(format: "%.1f...%.1f", $0.lowerBound, $0.upperBound)
         } ?? "nil"
-        print(String(format: "  state=%@ t=%.2fs edge=%.2fs behind=%.2fs range=%@ deaths=%d rejoins=%d",
+        // AE#520 round 2: `t` is the published SESSION clock, which is item time plus the session's
+        // shift, so it says nothing on its own about how long this consumer can keep playing. The
+        // close decision spends the segments it has not fetched yet; what it can still play is those
+        // PLUS what AVPlayer already holds, and only the item can report the second half.
+        let item = await engine.nativeItemReading()
+        let buffered = engine.liveTelemetry?.forwardBufferSeconds
+        print(String(format: "  state=%@ t=%.2fs edge=%.2fs behind=%.2fs range=%@ deaths=%d rejoins=%d"
+                     + " item=%@ buf=%@",
                      "\(engine.state)", t, edge, max(0, edge - t), range,
-                     counters.itemDeaths, counters.edgeRejoins + counters.keptPlace))
+                     counters.itemDeaths, counters.edgeRejoins + counters.keptPlace,
+                     item.map { String(format: "%.2fs", $0.playhead) } ?? "none",
+                     buffered.map { String(format: "%.2fs", $0) } ?? "none"))
     }
 
     let finalState = engine.state

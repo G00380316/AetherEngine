@@ -105,16 +105,16 @@ struct Issue446OutageCloseDeadlineTests {
     @Test("the runway bound is what the close needs, not a clock and not a share of the window")
     func runwayBoundIsWhatTheCloseNeeds() {
         // 12 s of content at TARGETDURATION 6: two polls' worth, the close is not needed yet.
-        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 12, targetDuration: 6))
+        #expect(!LiveEdgePolicy.outageCloseOnDepth(depthSeconds: 12, targetDuration: 6))
         // One poll's worth is the last moment the ENDLIST still reaches a consumer with content left.
-        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 6, targetDuration: 6))
-        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 4, targetDuration: 6))
+        #expect(LiveEdgePolicy.outageCloseOnDepth(depthSeconds: 6, targetDuration: 6))
+        #expect(LiveEdgePolicy.outageCloseOnDepth(depthSeconds: 4, targetDuration: 6))
         // A deeply timeshifted viewer is never closed on by this bound, at any silence: the clock it
         // used to be compared against shares its axis and only ever beat it to the decision.
-        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 68, targetDuration: 6))
+        #expect(!LiveEdgePolicy.outageCloseOnDepth(depthSeconds: 68, targetDuration: 6))
         // The reserve is never less than a segment, since TARGETDURATION is the longest one served.
         for td in 1...30 {
-            #expect(LiveEdgePolicy.outageCloseRunwayReserveSeconds(targetDuration: td) >= Double(td))
+            #expect(LiveEdgePolicy.outageCloseDepthReserveSeconds(targetDuration: td) >= Double(td))
         }
     }
 

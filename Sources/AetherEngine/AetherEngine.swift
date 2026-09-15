@@ -1482,6 +1482,13 @@ public final class AetherEngine: ObservableObject {
     /// the $renderedTime sink. Read off-main by the producer when it re-anchors on a backpressure wedge.
     let renderedPositionMirror = AtomicDouble(0)
 
+    /// AE#520 round 2: thread-safe mirror of how long the consumer can keep playing out of what it
+    /// already holds (the loaded range the playhead is inside), written by `LiveTelemetrySampler` at
+    /// 1 Hz off the main actor. Read on the playlist-build thread by the outage close, which spends a
+    /// depth and until this existed could only see the half of it the consumer had not fetched yet.
+    /// nil while there is no native item to read one off (software path, between item swaps).
+    let consumerContiguousBufferMirror = AtomicOptionalDouble(nil)
+
     /// #65: thread-safe mirror of AVPlayer's play intent (`timeControlStatus != .paused`), updated on the main
     /// actor by the $timeControlStatus sink. Read off-main by the producer to suspend its backpressure wedge
     /// detector while the consumer is paused (a paused player issues no forward fetch, so its frozen fetch
