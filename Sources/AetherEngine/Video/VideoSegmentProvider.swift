@@ -1861,8 +1861,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 + "closed (it was quiet for \(String(format: "%.2f", episodeMaxSilence))s at the "
                 + "widest, and the consumer never fell below "
                 + "\(String(format: "%.1f", episodeMinRunway))s of runway against the "
-                + "\(String(format: "%.1f", reserve))s a close would have needed); no ENDLIST, no item "
-                + "swap, nothing for the viewer to see",
+                + "\(String(format: "%.1f", reserve))s a close would have needed); no ENDLIST and no "
+                + "item swap. A source that hands its backlog over at once on the way back can still "
+                + "step the picture, which is not this decision's to give",
                 category: .session
             )
         }
@@ -1911,6 +1912,23 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// while segments remain above it, the session is still handing out pictures and the source read
     /// must not be abandoned under it. Once the consumer has walked to the end of what the window
     /// holds, nothing is being delivered any more and the starvation exit is the honest answer again.
+    ///
+    /// The `latched` term reads like an accident, and it is not. Dropping it, so an OPEN window with
+    /// runway defers the exit too, would let the close wait for the producer's real give-up point
+    /// (the 35 s window plus six re-arms, 245 s) instead of for its first one, and on paper that
+    /// removes every swap an outage shorter than the runway costs a deeply timeshifted viewer. It was
+    /// built and measured, and it loses the thing the close exists to keep. Harness, a viewer 45 s
+    /// inside the window against a 40 s freeze, same fixture in both arms:
+    ///
+    ///     closed at 30.17s of silence, 28.0s of runway left   VERDICT: position held
+    ///     never closed, the gap was absorbed                  VERDICT: POSITION LOST (forward
+    ///                                                                  step 248.49s)
+    ///
+    /// The ENDLIST is not only what buys this deferral, it is what turns the source's return into an
+    /// item swap at the place the viewer held. Leave the window open and the return is AVPlayer's to
+    /// interpret: the tail moves again, it re-anchors to a live edge that ran on without it, and the
+    /// position is gone (AE#446 round 2 measured the same mechanism at a forward step of 117.76 s).
+    /// So the deferral is a consequence of having closed, not a reason not to.
     var outageRunwayAheadOfConsumer: Bool {
         let consumerTarget = cache.targetIndex
         stateLock.lock()
