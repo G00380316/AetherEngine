@@ -4761,9 +4761,22 @@ public final class AetherEngine: ObservableObject {
                                      itemAxisOffset: liveItemAxisOffsetSeconds)
               }
             : nil
-        let target: Double = isLive
+        var target: Double = isLive
             ? (liveLanding?.sessionTarget ?? seconds)
             : max(0, min(seconds, duration))
+        if isLive, softwareHost != nil, nativeHost == nil, let window = liveWindow {
+            let landing = Self.softwareLiveLanding(requested: target, window: window)
+            if landing < target {
+                EngineLog.emit(
+                    "[AetherEngine] #104 SW live landing held \(String(format: "%.2f", target - landing))s "
+                    + "back: requested=\(String(format: "%.2f", target))s "
+                    + "landing=\(String(format: "%.2f", landing))s "
+                    + "edge=\(String(format: "%.2f", window.edgeTime))s, "
+                    + "so the ring holds the rebuffer lead instead of the clock waiting for it",
+                    category: .engine)
+            }
+            target = landing
+        }
         // AE#446 round 4: a rejoin on a session that advertises no rewind is the one landing measured
         // against something other than what `seekableLiveRange` states, so it says so. Whether the
         // place survived is the whole question the reader of this line has, so the line answers it.
