@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.87.0] - 2026-09-15
+
+### Fixed
+
+- **A live outage closes the window when the CONTENT runs out, not when a clock that shares its
+  axis does (AE#523 round 2).** The close was bounded twice, by a deadline on the silence and by
+  the runway ahead of the consumer, and the two were never on different axes: while the source is
+  quiet the consumer keeps walking the window, so `runway + silence` is fixed and
+  `runway <= deadline - silence` is decided the first time it is asked and never changes its answer
+  afterwards. A consumer holding more than a deadline's worth of content was therefore never closed
+  on by the runway at all, and the clock took the irreversible decision with every second of that
+  content still in hand. Measured on the harness at TARGETDURATION 6, a viewer 30 s inside the
+  window against a 22 s freeze: late at 10.07 s of silence with 24.0 s of runway, closed at 20.10 s
+  with the same 24.0 s, item swapped, source delivering again 2 s later. Reported from the field on
+  6.84.0 as 5 closes in 40 delivery gaps of a 45 minute session, each with 5.8 to 8.5 s of runway
+  in hand. The wait now ends one poll before the content does (one TARGETDURATION, against a
+  measured poll interval of `0.81 x TD` with the blocking-reload advert withdrawn), which is the
+  last moment an ENDLIST still reaches a consumer with something to play out; the clock keeps only
+  the bound it owns alone, the 35 s at which the producer gives up a source that cuts nothing, less
+  a patience so the close is served before that exit fires. Harness, same command line per pair:
+  the reported shape goes from an item swap to `gap absorbed`, AE#520's control and an edge viewer
+  are unchanged, and a genuine 30 s outage holds its position at three rewind depths.
+
+- **The all-clear line says how close the episode came.** A gap that was absorbed now reports the
+  widest silence and the lowest runway it reached against the reserve a close would have needed, so
+  a comfortable session can be told apart from a near miss without another round of captures.
+
 ## [6.86.0] - 2026-09-14
 
 ### Fixed
