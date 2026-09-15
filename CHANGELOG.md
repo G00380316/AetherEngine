@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A surface remounted by identity keeps the engine's picture (AE#536).** The engine held one weak
+  reference to its bound view. A host that keys `AetherPlayerSurface` with `.id(...)` and keeps the
+  engine across the swap (a next-episode flow) gets the incoming view made and bound first, and SwiftUI
+  then still updates the outgoing view on its way out, which rebinds to it through #188's rebind, before
+  dismantling it. The engine was left bound to nothing, and the next `load()` built a layer that
+  reported `isReadyForDisplay` with no superlayer and a zero frame: audio over a black picture,
+  measured on an iPhone 16e, iOS 26.7. The engine now keeps every bound surface weakly in bind order
+  and presents on the most recently bound one still alive, so when the presenting view is unbound or
+  released the layer moves to the next one. `AetherPlayerSurface` unbinds synchronously on dismantle
+  instead of detaching in a `Task`, and a view taken over by another engine drops out of the previous
+  engine's fallbacks. An `AetherPlayerView` now removes a previously hosted layer only while that
+  layer still sits in it, so a layer an engine has moved to another surface is not pulled back out.
+  No public API changed.
 
 ## [6.88.0] - 2026-09-15
 
