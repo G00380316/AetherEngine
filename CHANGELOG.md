@@ -35,6 +35,20 @@ _Nothing yet._
   the reported shape goes from an item swap to `gap absorbed`, AE#520's control and an edge viewer
   are unchanged, and a genuine 30 s outage holds its position at three rewind depths.
 
+- **A seek keeps the axis AVPlayer never rebuilt (AE#534, first half).** The sub-second axis snap
+  asked how BIG the standing axis was. What AVPlayer discards an offset at is a seek that makes it
+  rebuild its timeline, and a seek landing in what it already holds rebuilds nothing, so it keeps
+  the displacement and the rule has to keep it too. The size test fitted the earlier arms only
+  because all of them left the buffer. The placement is now read off `AVPlayerItem.loadedTimeRanges`
+  and off nothing else: the producer's own buffered frontier disagrees with it in both directions on
+  these very arms (95.62 against a placed 84.337, and 75.62 against a placed 80.343), because a
+  fetch is not a placement. Measured on `tc-cues-lie.mkv` over a 600 kbps / 300 ms origin, 3 runs
+  per arm: a held landing goes from `capErr -0.400` to `-0.025`, the unheld control is untouched,
+  and the 600 s offset twin is unchanged. The read costs 0.10 ms median and 0.70 ms worst over 215
+  seeks, and an item that answers nothing reads as not placed, so a failed read costs the axis and
+  never the session. Expressing the test on the displacement rather than on the axis is the second
+  half and is not in this release.
+
 - **The all-clear line says how close the episode came.** A gap that was absorbed now reports the
   widest silence and the lowest runway it reached against the reserve a close would have needed, so
   a comfortable session can be told apart from a near miss without another round of captures.
