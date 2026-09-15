@@ -1386,24 +1386,67 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - View binding
 
-    /// Weak: dropping the view reference must not leak the surface through the engine singleton.
-    private weak var boundView: AetherPlayerView?
+    /// Every surface bound and not yet unbound, in bind order. Weak: dropping the view reference must
+    /// not leak the surface through the engine singleton, and a released view drops out on its own.
+    ///
+    /// One reference was not enough (AE#536). A host that remounts its surface by identity while
+    /// keeping the engine gets the incoming view made and bound first, and SwiftUI then still updates
+    /// the OUTGOING view on its way out, which rebinds to it (the #188 rebind), before dismantling it.
+    /// With a single weak reference the engine ended up bound to a view that was about to go, then to
+    /// nothing, and the next session's fresh layer attached nowhere: audio over a black picture. The
+    /// list keeps the incoming view as the fallback that takes over when the outgoing one leaves.
+    private var boundSurfaces: [BoundSurface] = []
+
+    private struct BoundSurface {
+        weak var view: AetherPlayerView?
+    }
+
+    /// The surface the layer is presented on: the most recently bound one that is still alive.
+    private var boundView: AetherPlayerView? {
+        boundSurfaces.last { $0.view != nil }?.view
+    }
 
     /// Bind a render surface. Attaches the active layer immediately; re-attaches on session swaps.
-    /// Binding a different view detaches the old one.
+    /// Binding a different view detaches the old one, which stays the fallback until it is unbound or
+    /// released. A view another engine held is taken over from that engine.
     public func bind(view: AetherPlayerView) {
+        if let previousEngine = view.bindingEngine, previousEngine !== self {
+            previousEngine.surfaceWasTakenOver(view)
+        }
+        view.bindingEngine = self
         if let existing = boundView, existing !== view {
             existing.detach()
         }
-        boundView = view
+        boundSurfaces.removeAll { $0.view == nil || $0.view === view }
+        boundSurfaces.append(BoundSurface(view: view))
         presentCurrentLayer()
     }
 
-    /// Unbind a view. Idempotent.
+    /// Unbind a view. Idempotent. Unbinding the surface the layer is on detaches it and presents the
+    /// layer on the most recently bound surface that is still alive, if any.
     public func unbind(view: AetherPlayerView) {
-        guard boundView === view else { return }
+        guard boundSurfaces.contains(where: { $0.view === view }) else { return }
+        let wasPresenting = boundView === view
+        boundSurfaces.removeAll { $0.view == nil || $0.view === view }
+        if view.bindingEngine === self {
+            view.bindingEngine = nil
+        }
+        guard wasPresenting else { return }
         view.detach()
-        boundView = nil
+        presentCurrentLayer()
+    }
+
+    /// Another engine bound `view` (#188's engine swap on a reused view). It is no longer ours to
+    /// present on or to fall back to. Detached before our layer moves to a remaining surface: the view
+    /// would otherwise still record the layer as its own, and the new engine's attach would pull it
+    /// back out of the surface it just moved to. Both happen inside the new engine's bind, in one
+    /// run-loop turn, so the view shows no gap.
+    private func surfaceWasTakenOver(_ view: AetherPlayerView) {
+        let wasPresenting = boundView === view
+        boundSurfaces.removeAll { $0.view == nil || $0.view === view }
+        guard wasPresenting else { return }
+        view.detach()
+        presentCurrentLayer()
     }
 
     /// Attaches nativeHost.playerLayer or softwareHost.displayLayer to the bound view. No-op when no host.

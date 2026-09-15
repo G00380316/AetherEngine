@@ -375,8 +375,8 @@ let player = try AetherEngine()
 | `AetherEngine()` | `public init() throws`, `@MainActor`, an `ObservableObject`. One engine per playback surface, and several against one origin cost that origin one long-lived request each (see `maxConcurrentSourceRequests`). The audio-session category is declared off-main and never activated here, because AVKit activates per playback and that is what lets tvOS negotiate the HDMI route (#24). |
 | `AetherPlayerSurface(engine:)` | SwiftUI view. Drop it in the tree; it mounts and binds an `AetherPlayerView` for you. |
 | `AetherPlayerView` | UIKit / AppKit view (`PlatformBaseView` is `UIView` or `NSView`). Hosts the engine's layer. |
-| `bind(view:)` | Attach a view. The engine swaps the hosted `CALayer` per session (`AVPlayerLayer` or `AVSampleBufferDisplayLayer`), so a bound host needs no per-route branch. |
-| `unbind(view:)` | Detach. The engine holds the view weakly, so this is for hosts that reuse one engine across surfaces. |
+| `bind(view:)` | Attach a view. The engine swaps the hosted `CALayer` per session (`AVPlayerLayer` or `AVSampleBufferDisplayLayer`), so a bound host needs no per-route branch. The layer is presented on the most recently bound view that is still alive; an earlier view stays a fallback until it is unbound or released, which is what keeps the picture when a surface is remounted by identity on the same engine (AE#536). |
+| `unbind(view:)` | Detach. The engine holds its views weakly, so this is for hosts that reuse one engine across surfaces. Unbinding the view the layer is on moves the layer to the most recently bound view still alive. |
 
 ## Loading
 
