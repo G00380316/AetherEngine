@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The renderer paths activate the audio session off the main actor (AE#538).**
+  `activateRendererAudioSession()`, which the software and audio-only loads call because AVKit is not
+  there to do it, ran `setActive(true)` and the channel preference synchronously on the main actor, and
+  iOS/tvOS 27 flag that as a hang risk ("This method can lead to UI unresponsiveness if called on the
+  main thread"). Both now run in a detached `userInitiated` task, the pattern #114 and #215 already use
+  for the category declaration and the teardown release, and the load awaits it, so the session is still
+  active before the host is built. A load superseded during that wait unwinds before it builds anything.
 
 ## [6.88.0] - 2026-09-15
 
