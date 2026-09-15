@@ -83,15 +83,16 @@ struct Issue523SourceCadenceLatenessTests {
         }
     }
 
-    @Test("a source that misses two of its own deliveries still closes the window")
+    @Test("a source that stops for good still closes the window")
     func arealOutageStillCloses() {
         let cadence = meter(fieldIntervals).cadenceSeconds
         let late = LiveEdgePolicy.sourceLateSeconds(targetDuration: 4, cadenceSeconds: cadence)
-        let deadline = LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: 4, cadenceSeconds: cadence)
-        #expect(deadline > late)
-        // One missed delivery is late; two is the deadline.
-        #expect(2 * 6.85 >= deadline)
-        #expect(30.0 > deadline)
+        let ceiling = LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: 4, cadenceSeconds: cadence)
+        #expect(ceiling > late)
+        // AE#523 round 2: the close is not a deadline on the silence any more, so what this pins is
+        // the one clock bound left, the producer's own patience with a source that cuts nothing.
+        #expect(abs(ceiling - 29.0) < 0.001)
+        #expect(ceiling <= HLSSegmentProducer.liveSourceStarvationTimeoutSeconds)
     }
 
     @Test("one outage does not teach the meter to be patient with the next")
@@ -123,8 +124,8 @@ struct Issue523SourceCadenceLatenessTests {
         for td in 1...30 {
             #expect(LiveEdgePolicy.sourceLateSeconds(targetDuration: td, cadenceSeconds: nil)
                     == LiveEdgePolicy.unchangedPlaylistPatienceMultiplier * Double(td))
-            #expect(LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: td, cadenceSeconds: nil)
-                    == LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: td))
+            #expect(LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: td, cadenceSeconds: nil)
+                    == LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: td))
         }
     }
 
@@ -149,11 +150,11 @@ struct Issue523SourceCadenceLatenessTests {
         for cadence in stride(from: 1.0, through: 60.0, by: 0.5) {
             for td in [2, 4, 6, 14] {
                 let late = LiveEdgePolicy.sourceLateSeconds(targetDuration: td, cadenceSeconds: cadence)
-                let deadline = LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: td,
+                let ceiling = LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: td,
                                                                        cadenceSeconds: cadence)
                 #expect(late >= LiveEdgePolicy.unchangedPlaylistPatienceMultiplier * Double(td))
-                #expect(deadline >= late)
-                #expect(deadline <= HLSSegmentProducer.liveSourceStarvationTimeoutSeconds)
+                #expect(ceiling >= late)
+                #expect(ceiling <= HLSSegmentProducer.liveSourceStarvationTimeoutSeconds)
             }
         }
     }
@@ -164,5 +165,95 @@ struct Issue523SourceCadenceLatenessTests {
         // The upstream switches to handing over one segment at a time, every two seconds.
         for _ in 0..<SourceDeliveryCadenceMeter.sampleCount { m.note(intervalSeconds: 2.0) }
         #expect(abs((m.cadenceSeconds ?? 0) - 2.0) < 0.001)
+    }
+}
+
+/// AE#523 round 2: the same source, judged by its own rhythm since round 1, still lost its window to a
+/// clock while the content that would have paid for the wait was in hand.
+///
+/// Reported on 6.84.0 after a 45 minute session: about 35 of 40 delivery gaps absorbed silently, and 5
+/// closes, each one with the silence just past the deadline (two measured deliveries, 7.6 s), 5.8 to
+/// 8.5 s of runway still ahead of the consumer, and the source delivering again within a few seconds.
+/// Every close cost a visible item swap.
+///
+/// The mechanism, measured on the harness at TARGETDURATION 6 with a viewer 30 s inside the window
+/// against a 22 s freeze: late at 10.07 s of silence holding 24.0 s of runway, closed at 20.10 s of
+/// silence holding the same 24.0 s, swapped, and the source was back 2 s after the decision.
+@Suite("AE#523 round 2 the content ends the wait, not the clock")
+struct Issue523RunwayCarriesTheWaitTests {
+
+    /// The reporter's session: a source delivering every 3.8 s, sealed at TARGETDURATION 2.
+    private let reportedCadence = 3.8
+    private let reportedTargetDuration = 2
+
+    @Test("the reported closes do not happen any more")
+    func theReportedGapsAreAbsorbed() {
+        let reserve = LiveEdgePolicy.outageCloseRunwayReserveSeconds(
+            targetDuration: reportedTargetDuration)
+        // Every one of the five closes had more content in hand than the close needs to reach the
+        // consumer, so none of them is a close any more.
+        for runway in [5.8, 6.5, 7.2, 8.0, 8.5] {
+            #expect(runway > reserve)
+            #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: runway,
+                                                        targetDuration: reportedTargetDuration))
+        }
+        // And the clock that used to close them, two measured deliveries, is not a bound any more: what
+        // is left is the producer's own patience, which is four times further away.
+        let ceiling = LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: reportedTargetDuration,
+                                                              cadenceSeconds: reportedCadence)
+        #expect(ceiling == 32.0)
+        #expect(ceiling > 2 * reportedCadence)
+    }
+
+    /// The structural half of the round, and the reason AE#520's reading could not have worked: while
+    /// the source is quiet the consumer keeps walking the window, so `runway + silence` is fixed and
+    /// `runway <= deadline - silence` is decided the first time it is asked. The bound that replaces it
+    /// does not read the clock at all.
+    @Test("the content bound does not read the clock at all")
+    func theBoundIsOnTheRunwaysOwnAxis() {
+        // Whatever the silence has been, the same content gives the same answer. The old bound could
+        // not say that: it was a comparison against a clock that falls at exactly the rate the runway
+        // does, so it answered once and then never again.
+        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 24, targetDuration: 6))
+        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 4, targetDuration: 6))
+    }
+
+    /// The harness arm, as the provider sees it: 6 segments of 4 s ahead of the fetch point, which is
+    /// the 24.0 s the measured run held at both ends of its outage.
+    @Test("the harness arm that closed at 20.10s of silence holds its window")
+    func theHarnessArmIsAbsorbed() {
+        let cache = SegmentCache(forwardWindow: 40, backwardWindow: 40)
+        let provider = VideoSegmentProvider(
+            cache: cache,
+            segments: [],
+            codecsString: "avc1.640029,mp4a.40.2",
+            supplementalCodecs: nil,
+            resolution: (1920, 1080),
+            videoRange: .sdr,
+            frameRate: 25,
+            hdcpLevel: nil,
+            sourceBitrate: 8_000_000,
+            isLive: true,
+            liveWindowSizing: LiveWindowSizing(targetSegmentDurationSeconds: 4.0,
+                                               dvrWindowSeconds: 1800)
+        )
+        for i in 0..<20 { provider.appendLiveSegment(index: i, startSeconds: Double(i) * 4.0,
+                                                     durationSeconds: 4.0) }
+        #expect(provider.liveTargetDurationSeconds(maxSegmentDuration: 4.0) == 6)
+        cache.declareTarget(13) // 6 segments / 24.0 s of runway, the measured arm
+        provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 10.07) // late, as measured
+
+        // The same content at every silence the measured arm passed through, including the 20.10 s at
+        // which it used to close. `runway + silence` is fixed while the source is quiet, so a bound
+        // that reads the clock has already decided; this one has not.
+        #expect(!provider.liveOutageEndlist)
+        for step in [5.0, 5.03, 5.0] { // 15.07, 20.10, 25.10 s of silence
+            provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: step)
+            #expect(!provider.liveOutageEndlist)
+        }
+        #expect(!provider.liveOutageEndlistLatched)
+        // And the producer's own patience still ends it, with the content untouched.
+        provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 1.5) // 26.60 s, past 35 - 9
+        #expect(provider.liveOutageEndlist)
     }
 }

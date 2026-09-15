@@ -54,62 +54,68 @@ struct Issue446OutageCloseDeadlineTests {
         #expect(!provider.liveOutageEndlistLatched)
     }
 
-    @Test("past the close deadline the window is served as a finished asset")
-    func quietSourceClosesTheWindow() {
+    /// AE#523 round 2: the same silence with the content still in hand closes nothing. What used to
+    /// close here was the `3 x TD` deadline, with 68 s of runway ahead of the consumer.
+    @Test("past the old close deadline a consumer that still holds content is not closed on")
+    func quietSourceWithRunwayKeepsTheWindowLive() {
         let (provider, cache) = makeLiveProvider(segments: 20)
-        cache.declareTarget(2)
+        cache.declareTarget(2) // 17 segments / 68 s of runway
         provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 18.5) // > 3 x TD
 
+        #expect(!provider.liveOutageEndlist)
+        #expect(!provider.liveOutageEndlistLatched)
+        // Past the producer's own patience with a source that cuts nothing it closes anyway: a window
+        // left open there would never be closed at all, whatever the consumer is still holding.
+        provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 8.0) // 26.5 s, past 35 - 9
         #expect(provider.liveOutageEndlist)
         #expect(provider.liveOutageEndlistLatched)
     }
 
-    @Test("a runway that cannot reach the deadline closes at once")
+    @Test("a runway too thin to carry the close to the consumer closes at once")
     func shallowRunwayClosesAtOnce() {
         let (provider, cache) = makeLiveProvider(segments: 20)
-        cache.declareTarget(18) // 1 segment / 4 s left against 8 s of clock: it does not reach
+        cache.declareTarget(18) // 1 segment / 4 s left, under the 6 s the close needs to be told in
         provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 10.0) // late, nowhere near quiet
 
         #expect(provider.liveOutageEndlist)
     }
 
-    /// AE#520, the reporter's shape: a viewer near the live edge, a gap the deadline was built to
-    /// absorb, and a runway that the old `2 x TD` constant called shallow. Three segments is 12 s,
-    /// exactly the old floor, and 12 s of content against 8 s of remaining clock reaches the deadline
-    /// with room to spare, so nothing may be closed and no item may be swapped.
-    @Test("a runway that outlasts the deadline waits it out instead of closing")
-    func runwayThatReachesTheDeadlineIsNotClosedOn() {
+    /// AE#520's reporter shape: a viewer near the live edge, a gap the wait was built to absorb, and a
+    /// runway that the old `2 x TD` constant called shallow. Three segments is 12 s, exactly the old
+    /// floor, and twice what the close needs to reach the consumer, so nothing may be closed and no
+    /// item may be swapped. AE#523 round 2: nor when the clock runs on past the old deadline.
+    @Test("a runway the close does not need yet waits the source out instead of closing")
+    func runwayAboveTheReserveIsNotClosedOn() {
         let (provider, cache) = makeLiveProvider(segments: 20)
         cache.declareTarget(16) // 3 segments / 12 s ahead of the fetch point
         provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 10.0) // 1.7 x TD, late not quiet
 
         #expect(!provider.liveOutageEndlist)
         #expect(!provider.liveOutageEndlistLatched)
-        // And the clock still closes it when the source really is gone, on the same runway.
-        provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 8.6) // 18.6 s total, past 18 s
+        // Past the old `3 x TD` deadline, and the content is still what decides.
+        provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 8.6) // 18.6 s of silence
+        #expect(!provider.liveOutageEndlist)
+        // The consumer walks the window while the source is quiet, and the close lands one poll before
+        // the content runs out, which is the last moment the ENDLIST can still reach it.
+        cache.declareTarget(18) // 4 s left
         #expect(provider.liveOutageEndlist)
     }
 
     /// The bound in isolation, so the rule is readable without a provider around it.
-    @Test("the runway bound is the clock, not a constant")
-    func runwayBoundIsMeasuredAgainstTheClock() {
-        // 12 s of content, 18 s deadline, 10 s of silence: 8 s of clock left, the content reaches it.
-        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 12, silenceSeconds: 10,
-                                                    deadlineSeconds: 18))
-        // The same content one poll later does not.
-        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 7, silenceSeconds: 10,
-                                                   deadlineSeconds: 18))
-        // Equal closes: arriving at the deadline with nothing left is not carrying the wait to it.
-        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 8, silenceSeconds: 10,
-                                                   deadlineSeconds: 18))
-        // Past the deadline this bound has nothing left to say (no clock to fail to reach), and it
-        // does not have to: `quiet` is what closes the window there. Pinned so the pair is not read
-        // as a gap.
-        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 40, silenceSeconds: 25,
-                                                    deadlineSeconds: 18))
-        // A deeply timeshifted viewer waits the whole deadline out on any silence under it.
-        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 68, silenceSeconds: 0.1,
-                                                   deadlineSeconds: 18))
+    @Test("the runway bound is what the close needs, not a clock and not a share of the window")
+    func runwayBoundIsWhatTheCloseNeeds() {
+        // 12 s of content at TARGETDURATION 6: two polls' worth, the close is not needed yet.
+        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 12, targetDuration: 6))
+        // One poll's worth is the last moment the ENDLIST still reaches a consumer with content left.
+        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 6, targetDuration: 6))
+        #expect(LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 4, targetDuration: 6))
+        // A deeply timeshifted viewer is never closed on by this bound, at any silence: the clock it
+        // used to be compared against shares its axis and only ever beat it to the decision.
+        #expect(!LiveEdgePolicy.outageCloseOnRunway(runwaySeconds: 68, targetDuration: 6))
+        // The reserve is never less than a segment, since TARGETDURATION is the longest one served.
+        for td in 1...30 {
+            #expect(LiveEdgePolicy.outageCloseRunwayReserveSeconds(targetDuration: td) >= Double(td))
+        }
     }
 
     @Test("a source that has not missed its cadence closes nothing, however little runway is left")
@@ -130,47 +136,47 @@ struct Issue446OutageCloseDeadlineTests {
         #expect(!provider.liveOutageEndlist)
     }
 
-    @Test("the recovery reading stays on the strict cadence, not on the close deadline")
+    @Test("the recovery reading stays on the strict cadence, not on what closed the window")
     func recoveryIsStillTheStrictReading() {
-        let (provider, cache) = makeLiveProvider(segments: 20)
-        cache.declareTarget(2)
-        provider.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 18.5)
-        #expect(provider.liveOutageEndlist)
-
-        // 12 s of silence is under the close deadline but past the cadence: a window that is already
-        // closed must NOT read as recovered there, or the swap lands in a window whose source is dead.
+        // 26.5 s of silence with a thick runway: past the ceiling, so the window is closed.
         let (stillQuiet, stillQuietCache) = makeLiveProvider(segments: 20)
         stillQuietCache.declareTarget(2)
-        stillQuiet.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 18.5)
+        stillQuiet.backdateLastLiveSegmentFinalizeForTesting(bySeconds: 26.5)
         #expect(stillQuiet.liveOutageEndlist)
+        // A window that is already closed must NOT read as recovered while the source is still quiet,
+        // or the swap lands in a window whose source is dead.
         #expect(!stillQuiet.liveOutageProductionResumed)
     }
 
-    @Test("the deadline never waits past the producer's own patience with a silent source")
-    func deadlineStaysInsideTheStarvationExit() {
-        // The ordinary case: three target durations, nowhere near the exit.
-        #expect(LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: 2) == 6.0)
-        #expect(LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: 6) == 18.0)
-        // A bursty relay seals its TARGETDURATION from an arrival cadence, and 3 x TD then lands past
-        // the 35 s starvation exit, where the window would never be closed at all. The deadline is
-        // pulled back in front of it, and never below the moment the source is late.
+    @Test("the clock bound never waits past the producer's own patience with a silent source")
+    func ceilingStaysInsideTheStarvationExit() {
+        // The ordinary case: the exit at 35 s, less a patience so the client still has polls left to
+        // be handed the closed playlist in.
+        #expect(LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: 2) == 32.0)
+        #expect(LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: 6) == 26.0)
+        // A bursty relay seals its TARGETDURATION from an arrival cadence, and the ceiling then lands
+        // at the moment the source is late at all: below that it would close the window before the
+        // question could even be asked.
         for td in 1...30 {
-            let deadline = LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: td)
+            let ceiling = LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: td)
             let late = LiveEdgePolicy.unchangedPlaylistPatienceMultiplier * Double(td)
-            #expect(deadline >= late)
-            #expect(deadline <= max(late, HLSSegmentProducer.liveSourceStarvationTimeoutSeconds - late))
+            #expect(ceiling >= late)
+            #expect(ceiling <= max(late, HLSSegmentProducer.liveSourceStarvationTimeoutSeconds - late))
         }
-        #expect(LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: 14) == 21.0)
+        #expect(LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: 14) == 21.0)
     }
 
-    @Test("the close deadline is strictly later than the client's own patience")
+    @Test("the close is strictly more patient than the client's own patience")
     func theTwoThresholdsAreNotTheSameNumber() {
-        // The defect in one line: an irreversible decision sized by a threshold chosen for a
-        // withdrawal that costs nothing.
-        #expect(LiveEdgePolicy.outageCloseSilenceMultiplier
-                > LiveEdgePolicy.unchangedPlaylistPatienceMultiplier)
+        // The round 7 defect in one line: an irreversible decision sized by a threshold chosen for a
+        // withdrawal that costs nothing. The close now outlives the withdrawal at every seal.
+        for td in 1...30 {
+            let patience = LiveEdgePolicy.unchangedPlaylistPatienceMultiplier * Double(td)
+            #expect(LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: td) >= patience)
+        }
         // And the wait stays well inside what the client will sit through: measured at 13 x TD with
-        // the window open and the advert withdrawn.
-        #expect(LiveEdgePolicy.outageCloseSilenceMultiplier <= 4.0)
+        // the window open and the advert withdrawn, against a ceiling of 35 s at any seal.
+        #expect(LiveEdgePolicy.outageCloseCeilingSeconds(targetDuration: 6)
+                <= HLSSegmentProducer.liveSourceStarvationTimeoutSeconds)
     }
 }
