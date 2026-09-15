@@ -1609,14 +1609,13 @@ extension AetherEngine {
     }
 
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
-    private func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) {
+    ///
+    /// The session calls run off the main actor and the load awaits them, so the session is active before the
+    /// host that plays into it is built, as before. `setActive(true)` is an XPC round trip to mediaserverd, and
+    /// iOS/tvOS 27 flag it as a hang risk on the main thread (AE#538): the same reasoning that moved `setCategory` off-main
+    /// in #114 and the teardown deactivation in #215. Only the track lookup, which reads published state, stays here.
+    private func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
         #if os(iOS) || os(tvOS)
-        let session = AVAudioSession.sharedInstance()
-        do { try session.setActive(true) }
-        catch {
-            EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
-        }
-        
         // Resolve the active audio track's channel count from the already-published track list.
         // so the HDMI / AirPlay link negotiates at the correct channel count.
         // Accept an explicit stream index parameter because during a reload (track change)
@@ -1628,13 +1627,27 @@ extension AetherEngine {
         } else {
             nil
         }
-        
-        let maxCh = session.maximumOutputNumberOfChannels
-        let prefCh = min(sourceChannels ?? maxCh, maxCh)
-        try? session.setPreferredOutputNumberOfChannels(prefCh) 
-        EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+        await Task.detached(priority: .userInitiated) {
+            AetherEngine.applyRendererAudioSession(sourceChannels: sourceChannels)
+        }.value
         #endif
     }
+
+    #if os(iOS) || os(tvOS)
+    /// The blocking half of `activateRendererAudioSession`: activation, then the channel preference, which
+    /// only takes effect on an active session. Captures no engine state.
+    nonisolated static func applyRendererAudioSession(sourceChannels: Int?) {
+        let session = AVAudioSession.sharedInstance()
+        do { try session.setActive(true) }
+        catch {
+            EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
+        }
+        let maxCh = session.maximumOutputNumberOfChannels
+        let prefCh = min(sourceChannels ?? maxCh, maxCh)
+        try? session.setPreferredOutputNumberOfChannels(prefCh)
+        EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+    }
+    #endif
 
     func loadSoftware(
         url: URL,
@@ -1665,7 +1678,8 @@ extension AetherEngine {
             }
         }
 
-        activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        try checkLoadCurrent(generation)
         // Drop the previous session's sinks BEFORE anything wires this one's. Standing further down,
         // between two groups of `.store(in:)` calls, this cancelled everything wired above it: the
         // SW-PiP cue mirror never delivered a cue after the frame compositor was armed. Both halves
@@ -1822,7 +1836,8 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer?,
         generation: UInt64
     ) async throws {
-        activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        try checkLoadCurrent(generation)
         let host = AudioPlaybackHost()
         self.audioHost = host
         applyDesiredVolume(to: host)
@@ -1894,7 +1909,8 @@ extension AetherEngine {
         generation: UInt64
     ) async throws {
         // Reuse the persistent host (MPNowPlayingSession survives across tracks). host.load() swaps the item via replaceCurrentItem.
-        activateRendererAudioSession()
+        await activateRendererAudioSession()
+        try checkLoadCurrent(generation)
         let host = audioAVPlayerHost ?? AudioAVPlayerHost()
         self.audioAVPlayerHost = host
         applyDesiredVolume(to: host)
