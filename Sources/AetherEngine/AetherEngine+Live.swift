@@ -666,20 +666,30 @@ extension AetherEngine {
 
     /// Seek to the current live edge. No-op when not live.
     public func seekToLiveEdge() async {
-        guard isLive, let w = liveWindow else { return }
+        // Sodalite#104 round 3: both early exits discard a press the viewer made, so both say so, the
+        // same way `seek(to:)` logs its refusals. Silence here reads exactly like a press that never
+        // arrived.
+        guard isLive, let w = liveWindow else {
+            EngineLog.emit("[AetherEngine] seekToLiveEdge() ignored: no live session (state=\(state), live=\(isLive))",
+                           category: .engine)
+            return
+        }
         // Live-only (no DVR window): seek(to:) refuses; drive native host directly to seekableEnd as the recovery move after eviction.
         guard w.windowSeconds != nil else {
-            if let host = nativeHost {
-                let clockTarget = max(0, host.seekableEnd)
-                EngineLog.emit(
-                    "[AetherEngine] live-only edge snap: clockTarget=\(String(format: "%.1f", clockTarget))",
-                    category: .engine
-                )
-                await host.seek(to: clockTarget)
-                nativeClockSeconds = clockTarget
-                clock.currentTime = clockTarget + playlistShiftSeconds
-                clock.sourceTime = currentTime
+            guard let host = nativeHost else {
+                EngineLog.emit("[AetherEngine] seekToLiveEdge() ignored: live-only session with no native item to snap",
+                               category: .engine)
+                return
             }
+            let clockTarget = max(0, host.seekableEnd)
+            EngineLog.emit(
+                "[AetherEngine] live-only edge snap: clockTarget=\(String(format: "%.1f", clockTarget))",
+                category: .engine
+            )
+            await host.seek(to: clockTarget)
+            nativeClockSeconds = clockTarget
+            clock.currentTime = clockTarget + playlistShiftSeconds
+            clock.sourceTime = currentTime
             return
         }
         await seek(to: w.edgeTime)
