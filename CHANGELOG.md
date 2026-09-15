@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.89.0] - 2026-09-15
+
 ### Fixed
 
 - **Return to Live on the software path no longer freezes the picture for two seconds (Sodalite#104
@@ -23,6 +27,10 @@ the public-API contract.
   pairs at two origin leads: 3 of 3 underrun-and-rebuffer cycles before, 0 of 3 after, the distance
   held after the return unchanged (1.35 to 2.54 s before, 1.24 to 2.65 s after), and the edge verdict
   AT EDGE from the first publish in every arm. A held-back landing says so in the log.
+- **`seekToLiveEdge()` says when it ignores a press (Sodalite#104 round 3).** Both early exits, no
+  live session and a live-only session with no native item to snap, returned without a word while
+  every refusal in `seek(to:)` logs one, so a device capture could not tell them from a press that
+  never reached the engine.
 
 ## [6.88.0] - 2026-09-15
 
