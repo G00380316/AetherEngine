@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.0.0] - 2026-09-16
+
 ### Changed
 
 - **BREAKING: the platform floor is iOS 18, tvOS 18 and macOS 15, up from iOS 16, tvOS 17 and macOS

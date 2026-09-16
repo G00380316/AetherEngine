@@ -340,7 +340,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.89.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.0.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -580,10 +580,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.89.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.0.0")
 ```
 
-Pin to `.upToNextMinor(from: "6.89.1")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.0.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
@@ -595,6 +595,8 @@ Pin to `.upToNextMinor(from: "6.89.1")` for stricter teams that prefer to opt in
 | visionOS | 1.0 |
 | Swift | 6.0 |
 | Xcode | 16.0 |
+
+The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that still supports those pins the 6.x line with `.upToNextMajor(from: "6.89.1")`.
 
 ## Support
 
