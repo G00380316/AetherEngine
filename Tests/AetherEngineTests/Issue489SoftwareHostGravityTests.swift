@@ -14,12 +14,14 @@ import AVFoundation
 @Suite("Software host is built on the engine's videoGravity (#489)")
 struct Issue489SoftwareHostGravityTests {
 
+    @MainActor
     @Test("a renderer built with no gravity keeps the aspect-fit default")
     func rendererDefaultsToAspect() {
         let renderer = SampleBufferRenderer()
         #expect(renderer.displayLayer.videoGravity == .resizeAspect)
     }
 
+    @MainActor
     @Test("a renderer carries the gravity it was built with")
     func rendererCarriesGravity() {
         #expect(SampleBufferRenderer(videoGravity: .resizeAspectFill)
