@@ -69,6 +69,7 @@ struct Issue491SeekWindowTests {
     /// is lower and leaves it standing, and the cushion reads the seek distance until the next
     /// flush. That is the reporter's `vLead=2301.93` on a 2297 s backward jump.
     @Test("one stale frame past the target owns the frontier for the rest of the session")
+    @MainActor
     func staleFrameOwnsTheFrontierPermanently() {
         let renderer = SampleBufferRenderer()
         Self.hand(renderer, seconds: [2468.55, 2470.51, 2470.55])
@@ -90,6 +91,7 @@ struct Issue491SeekWindowTests {
 
     /// Without that packet, the same landing reports the cushion it actually has.
     @Test("with the window closed the frontier is the landing's own")
+    @MainActor
     func landingOwnsTheFrontier() {
         let renderer = SampleBufferRenderer()
         Self.hand(renderer, seconds: [2468.55, 2470.51, 2470.55])

@@ -10,7 +10,29 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **BREAKING: the platform floor is iOS 18, tvOS 18 and macOS 15, up from iOS 16, tvOS 17 and macOS
+  14.** visionOS stays at 1.0. The raise is what lets the software renderer stop touching
+  `AVSampleBufferDisplayLayer` off the main actor (see Fixed): below the new floor the queue target
+  was the layer itself, and its `status`, `error` and `flushAndRemoveImage()` exist only on the layer,
+  with no counterpart on `AVQueuedSampleBufferRendering` that a decode thread could reach instead.
+  Availability checks the new floor makes always true are gone with it: the VideoToolbox
+  require-hardware decoder specification and the per-frame HDR metadata propagation are now
+  unconditional, and the tvOS 17 display-criteria guard is removed. No public symbol was added,
+  removed or renamed. A consumer that has to stay below the floor pins `.upToNextMajor(from: "6.89.1")`.
+
+### Fixed
+
+- **The engine builds without main-actor isolation diagnostics against the 27 SDKs (#351).** The 27
+  SDKs annotate `AVSampleBufferDisplayLayer` as `@MainActor`, and the software path reached it from
+  the decode thread at twelve sites, among them `displayLayer.sampleBufferRenderer` on every
+  back-pressure check. `SampleBufferRenderer` now takes the layer's `sampleBufferRenderer` once, on the
+  main actor at construction, and the decode thread enqueues, flushes and reads status only through
+  that renderer; the synchronizer is handed the same renderer. The layer and the renderer are both
+  fixed for the renderer's lifetime (HDR output switches `preferredDynamicRange` on the same layer),
+  so the stored reference cannot drift. Measured on Xcode 27.0 (27A266a): `swift build --build-tests`
+  went from 12 warnings to none. The calls on 18 and later are the same calls on the same objects.
 
 ## [6.89.1] - 2026-09-15
 
