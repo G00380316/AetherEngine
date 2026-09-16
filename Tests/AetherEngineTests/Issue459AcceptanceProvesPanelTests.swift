@@ -45,7 +45,7 @@ struct Issue459AcceptanceProvesPanelTests {
     @Test("Proving the panel does not invent HDR for an SDR source")
     func sdrSourceStaysSDR() {
         #expect(AetherEngine.presentedVideoFormat(
-            effectiveFormat: .sdr, panelPresentsHDR: true, sourceVideoFormat: .sdr) == .sdr)
+            effectiveFormat: .sdr, panelPresentsHDR: true, sourceCarriesHDR10Plus: false) == .sdr)
     }
 
     /// The P8.4 that produced this round: HLG base on a display whose table reported HLG absent, served as
@@ -53,8 +53,8 @@ struct Issue459AcceptanceProvesPanelTests {
     @Test("A proven panel publishes the HLG a Profile 8.4 actually resolved to")
     func profile84PublishesHLG() {
         #expect(AetherEngine.presentedVideoFormat(
-            effectiveFormat: .hlg, panelPresentsHDR: true, sourceVideoFormat: .dolbyVision) == .hlg)
+            effectiveFormat: .hlg, panelPresentsHDR: true, sourceCarriesHDR10Plus: false) == .hlg)
         #expect(AetherEngine.presentedVideoFormat(
-            effectiveFormat: .hlg, panelPresentsHDR: false, sourceVideoFormat: .dolbyVision) == .sdr)
+            effectiveFormat: .hlg, panelPresentsHDR: false, sourceCarriesHDR10Plus: false) == .sdr)
     }
 }

@@ -937,6 +937,13 @@ public enum VideoFormat: Sendable, Equatable {
     case hlg
 }
 
+/// A Dolby Vision profile rewrite the engine applies to the served stream (`AetherEngine.dolbyVisionConversion`).
+public enum DolbyVisionConversion: Sendable, Equatable {
+    /// Dual-layer Profile 7 rewritten per packet to single-layer Profile 8.1 for a display presenting Dolby
+    /// Vision. The enhancement layer is discarded: a MEL carries next to nothing, a FEL loses its refinement.
+    case profile7ToProfile81
+}
+
 /// One-shot container + stream metadata from `AetherEngine.probe(url:options:)`. No HLS server, no decoders.
 public struct SourceProbe: Sendable {
     public let url: URL

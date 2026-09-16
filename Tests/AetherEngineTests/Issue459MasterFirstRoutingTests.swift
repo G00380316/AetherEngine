@@ -75,7 +75,7 @@ struct Issue459MasterFirstRoutingTests {
     func attemptDoesNotMoveTheLabel() {
         #expect(AetherEngine.sessionPanelPresentsHDR(hostAsserts: false, criteriaReadout: false) == false)
         #expect(AetherEngine.presentedVideoFormat(
-            effectiveFormat: .hdr10, panelPresentsHDR: false, sourceVideoFormat: .hdr10Plus) == .sdr)
+            effectiveFormat: .hdr10, panelPresentsHDR: false, sourceCarriesHDR10Plus: true) == .sdr)
     }
 
     // MARK: - Live
