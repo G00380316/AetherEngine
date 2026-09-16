@@ -10,7 +10,22 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`AetherEngine.dolbyVisionConversion`** publishes the Dolby Vision profile rewrite applied to the served
+  stream, a `DolbyVisionConversion?`. `.profile7ToProfile81` is a Profile 7 source on a display presenting
+  Dolby Vision, which the engine has always served as Profile 8.1 without saying so anywhere but the
+  manifest, so an info panel reading `sourceDVProfile` next to `videoFormat` could only print "Dolby Vision
+  P7" (AE#459).
+
+### Fixed
+
+- **A Dolby Vision source carrying an HDR10+ layer is labelled HDR10+ where its HDR10 base is presented.**
+  The T.35 detection upgraded `sourceVideoFormat` only for an HDR10 source, and the late panel proof
+  (6.82.0) rebuilt the label from that field, so on a display without Dolby Vision whose panel was proven by
+  master acceptance, a Blu-ray Profile 7 or a Profile 8.1 remuxed from one read "Dolby Vision -> HDR10"
+  while the stream carried HDR10+ to the TV. The evidence is now latched per session whatever the source
+  format (AE#459).
 
 ## [7.0.0] - 2026-09-16
 

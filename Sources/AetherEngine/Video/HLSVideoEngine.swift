@@ -1983,6 +1983,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         self.servingMasterPlaylist = useMasterPlaylist
         self.servedSourceIsHDR = videoRange != .sdr
+        self.servedDolbyVisionConversion = convertP7ToProfile81 ? .profile7ToProfile81 : nil
         EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(videoRange != .sdr || effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant) audioLang=\(servedAudioLanguage ?? "none"))")
         return url
     }
@@ -2079,6 +2080,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Internal on purpose: it feeds the engine's own AirPlay routing, and hosts read the consequence
     /// (`AetherEngine.nativeSubtitleRenditionsServed`) rather than the input.
     private(set) var servedSourceIsHDR: Bool = false
+
+    /// The Dolby Vision rewrite the producer applies to every served video packet, nil when it serves the
+    /// source's own profile. Read after `start()`; published as `AetherEngine.dolbyVisionConversion`.
+    private(set) var servedDolbyVisionConversion: DolbyVisionConversion?
 
     /// The loopback server's media (single-variant) playlist URL, for the reactive master->media
     /// fallback (#98). Nil before the server starts.

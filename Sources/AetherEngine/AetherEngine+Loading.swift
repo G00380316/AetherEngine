@@ -1134,6 +1134,7 @@ extension AetherEngine {
         // pins to 0 and `declaredDurationSeconds` measures.
         displayAxisIsItemAxis = session.sequentialOriginPinsProducerToZero
         nativeSubtitleRenditionsServed = served.subtitleRenditionsServed
+        dolbyVisionConversion = session.servedDolbyVisionConversion
         extractorYieldState.activate(session: session)
 
         // #15: the stores were created before start() (above) so the VideoSegmentProvider got the references at
@@ -2406,9 +2407,10 @@ extension AetherEngine {
         }
     }
 
-    /// Called once per session on T.35 detection. Only upgrades .hdr10 states: a DV / HLG / SDR-clamped session that carries HDR10+ metadata stays on its current format (no evidence the panel is rendering an HDR10 base layer).
+    /// Called once per session on T.35 detection. Only upgrades .hdr10 states: a DV / HLG / SDR-clamped session that carries HDR10+ metadata stays on its current format (no evidence the panel is rendering an HDR10 base layer). A Dolby Vision source clamped to its HDR10 base does read `.hdr10`, so it is upgraded too: that base is where the payload rides.
     @MainActor
-    private func handleHDR10PlusDetected() {
+    func handleHDR10PlusDetected() {
+        sourceCarriesHDR10PlusMetadata = true
         // sourceVideoFormat upgrade is unconditional: a T.35 payload is a source property even when the panel clamps the output to SDR.
         if sourceVideoFormat == .hdr10 {
             sourceVideoFormat = .hdr10Plus

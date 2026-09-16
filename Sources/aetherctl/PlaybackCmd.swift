@@ -599,7 +599,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
           + "fps=\(engine.sourceVideoFrameRate.map { String(format: "%.3f", $0) } ?? "nil") "
           + "bitrate=\(engine.sourceVideoBitrate) "
           + "fmt=\(engine.sourceVideoFormat)"
-          + (engine.sourceDVProfile.map { " dvProfile=\($0)" } ?? ""))
+          + (engine.sourceDVProfile.map { " dvProfile=\($0)" } ?? "")
+          + (engine.dolbyVisionConversion.map { " dvConversion=\($0)" } ?? ""))
 
     // Mimic host-app post-load calls (AetherPlayer openInternal order) to reproduce
     // host-triggered transport races the bare harness would miss.

@@ -524,6 +524,16 @@ public final class AetherEngine: ObservableObject {
     /// `sourceVideoFormat` for Stats-for-Nerds labels ("Dolby Vision P5"); read from the dvcC record.
     @Published public internal(set) var sourceDVProfile: Int? = nil
 
+    /// The Dolby Vision profile rewrite applied to the served stream, nil when the session serves the source's
+    /// own profile (or no Dolby Vision). `.profile7ToProfile81` on a Profile 7 source played on a display
+    /// presenting Dolby Vision, where `videoFormat` reads `.dolbyVision` and `sourceDVProfile` keeps 7.
+    @Published public internal(set) var dolbyVisionConversion: DolbyVisionConversion? = nil
+
+    /// A HDR10+ (ST 2094-40) T.35 payload was seen in this session's video, whatever the source's format.
+    /// `sourceVideoFormat` records it only for an HDR10 source, so a Dolby Vision source carrying both kinds
+    /// of dynamic metadata would otherwise lose it the moment a late panel proof republishes the label.
+    var sourceCarriesHDR10PlusMetadata = false
+
     /// AE#461: base-layer signal compatibility ID from the same dvcC/dvvC record as `sourceDVProfile`
     /// (0 = IPT-only, no compatible base layer). Kept because a decode-path correction has to decide
     /// whether the software path can represent this source BEFORE it tears the session down, and by
@@ -3564,6 +3574,8 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        dolbyVisionConversion = nil
+        sourceCarriesHDR10PlusMetadata = false
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
@@ -4147,7 +4159,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = Self.presentedVideoFormat(
             effectiveFormat: effectiveFormat,
             panelPresentsHDR: panelHDRAfterHandshake,
-            sourceVideoFormat: sourceVideoFormat)
+            sourceCarriesHDR10Plus: sourceCarriesHDR10PlusMetadata)
         #endif
         // #361: the handshake above is the second stretch a host cannot see, and on a real SDR->HDR
         // switch it is seconds long. Recorded on every branch, including the ones with nothing to
@@ -5549,6 +5561,8 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        dolbyVisionConversion = nil
+        sourceCarriesHDR10PlusMetadata = false
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
@@ -5763,11 +5777,11 @@ public final class AetherEngine: ObservableObject {
     /// the same question, and three call sites composing `presentedVideoFormat` themselves is how the
     /// published format and the served stream drift apart.
     @MainActor
-    private func republishPanelPresentsHDR(effectiveFormat: VideoFormat, because reason: String) {
+    func republishPanelPresentsHDR(effectiveFormat: VideoFormat, because reason: String) {
         let corrected = Self.presentedVideoFormat(
             effectiveFormat: effectiveFormat,
             panelPresentsHDR: true,
-            sourceVideoFormat: sourceVideoFormat)
+            sourceCarriesHDR10Plus: sourceCarriesHDR10PlusMetadata)
         guard corrected != videoFormat else { return }
         EngineLog.emit(
             "[AetherEngine] republishing videoFormat \(videoFormat) -> \(corrected): \(reason) (#459)",
@@ -6429,6 +6443,7 @@ public final class AetherEngine: ObservableObject {
         nativeVideoSession?.stop()
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false
+        dolbyVisionConversion = nil
         airPlayProgressWatchdog?.cancel()
         airPlayProgressWatchdog = nil
         displayModeDiagnostic?.cancel()
