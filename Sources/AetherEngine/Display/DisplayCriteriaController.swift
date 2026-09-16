@@ -709,10 +709,6 @@ final class DisplayCriteriaController {
         // Reset up front so a skipped apply (Match Content off, no window)
         // can't leave a prior HDR session's flag for waitForSwitch to read.
         lastCriteriaWasHDR = false
-        guard #available(tvOS 17.0, *) else {
-            EngineLog.emit("[DisplayCriteria] skipped: tvOS < 17", category: .engine)
-            return .applied
-        }
 
         guard let window = resolveWindow() else {
             EngineLog.emit("[DisplayCriteria] skipped: no window", category: .engine)

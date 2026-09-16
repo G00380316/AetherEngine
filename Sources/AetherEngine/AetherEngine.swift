@@ -698,9 +698,9 @@ public final class AetherEngine: ObservableObject {
     /// `phase == .playing/.paused && isSessionReady` therefore lift the cover onto black.
     ///
     /// What backs it: `AVPlayerLayer.isReadyForDisplay` on the native path,
-    /// `AVSampleBufferDisplayLayer.isReadyForDisplay` on the software one (below tvOS/iOS 17.4 and
-    /// macOS 14.4, where that property does not exist, the software path falls back to the first
-    /// frame handed to the renderer, one hop earlier than presentation). Audio-only sessions have
+    /// `AVSampleBufferDisplayLayer.isReadyForDisplay` on the software one (on visionOS 1.0, where that
+    /// property does not exist, the software path falls back to the first frame handed to the
+    /// renderer, one hop earlier than presentation). Audio-only sessions have
     /// nothing to display and leave it false.
     ///
     /// Two things it does NOT claim:

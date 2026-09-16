@@ -589,9 +589,9 @@ Pin to `.upToNextMinor(from: "6.89.1")` for stricter teams that prefer to opt in
 
 | | Min |
 | --- | --- |
-| iOS | 16.0 |
-| tvOS | 17.0 |
-| macOS | 14.0 |
+| iOS | 18.0 |
+| tvOS | 18.0 |
+| macOS | 15.0 |
 | visionOS | 1.0 |
 | Swift | 6.0 |
 | Xcode | 16.0 |

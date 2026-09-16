@@ -54,7 +54,7 @@ Source URL ──► Demuxer ──┬─► SoftwareVideoDecoder (dav1d) ──
                                               AVR / speakers
 ```
 
-A seek holds the last frame on screen rather than blanking it. `SampleBufferRenderer.flush()` takes a `removingDisplayedImage` flag (`DisplayFlushOp` is the pure decision split out for testing): stop/teardown clears the visible frame (the default), but `SoftwarePlaybackHost.seek()` passes `false`, so the previous frame stays up until the post-seek keyframe decodes instead of flashing black on slow sources like MPEG-2. This matches the native/AVPlayer path, which holds the frame through a seek (#90).
+A seek holds the last frame on screen rather than blanking it. `SampleBufferRenderer.flush()` takes a `removingDisplayedImage` flag and hands it straight to `AVSampleBufferVideoRenderer.flush(removingDisplayedImage:)`: stop/teardown clears the visible frame (the default), but `SoftwarePlaybackHost.seek()` passes `false`, so the previous frame stays up until the post-seek keyframe decodes instead of flashing black on slow sources like MPEG-2. This matches the native/AVPlayer path, which holds the frame through a seek (#90).
 
 **The channel layout on that same format description has to name the order the resampler wrote** (#401). `AudioDecoder` resamples into `makeResamplerOutputLayout`'s layout and stamps `audioChannelLayoutTag`'s tag, and if the two disagree the renderer places audio where the decoder never put it: measured per channel, the earlier pairing moved every channel of a 7.1 track and placed the LFE hard left at full gain, put a 4.0 centre hard left, and mixed a 2.1 LFE into both channels instead of dropping it. Only 5.0 and 5.1 lined up, which is why it went unseen. The two functions therefore live side by side and a test holds them against each other, once structurally and once by rendering each channel through a real downmix. 6.1 is the single count CoreAudio has no matching tag for, so the resampler is pointed at 6.1(back) rather than leaving the well-trodden tags for a `UseChannelDescriptions` layout.
 
@@ -394,7 +394,7 @@ Sources/AetherEngine/
 ├── Network/
 │   └── HLSLocalServer.swift                 Native path: local HTTP server (127.0.0.1) serving playlist + segments
 ├── Renderer/
-│   ├── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments; `flush(removingDisplayedImage:)` holds the last frame through a seek (`DisplayFlushOp`, #90)
+│   ├── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments; `flush(removingDisplayedImage:)` holds the last frame through a seek (#90); the decode thread reaches the layer only through its `sampleBufferRenderer`, taken once on the main actor (#351)
 │   └── SubtitleFrameCompositor.swift        Composites active cues into decoded software-path frames while PiP is active, since the system PiP window renders only the sample-buffer layer; playback wins, every failure path returns the original buffer untouched
 ├── Subtitles/
 │   ├── ASSScriptBuilder.swift               Reassembles raw ASS event cues + TrackInfo.assHeader into a complete script for whole-file renderers

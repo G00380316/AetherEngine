@@ -448,15 +448,16 @@ final class SoftwarePlaybackHost {
 
     /// #315: publish the renderer layer's own `readyForDisplay` as `isVideoReadyForDisplay`.
     /// AVFoundation posts a notification for it rather than supporting KVO, and it arrived in
-    /// tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1, below the engine's own floor. Where it is missing
-    /// the fallback is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which
-    /// is one hop earlier than presentation and is documented as such on the public property.
+    /// tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1. Only visionOS still has a floor below that (1.0).
+    /// Where it is missing the fallback is the first frame handed to the renderer
+    /// (`disarmedFallbackFirstFrame`), which is one hop earlier than presentation and is documented as
+    /// such on the public property.
     ///
     /// #344: visionOS has to be named. Falling through to `*` resolves it to the package's declared
     /// visionOS floor, which is 1.0, and that is a compile error rather than a runtime fallback.
     private func armReadyForDisplayObserver() {
         disarmReadyForDisplayObserver()
-        guard #available(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1, *) else { return }
+        guard #available(visionOS 1.1, *) else { return }
         let layer = renderer.displayLayer
         readyForDisplayObserver = NotificationCenter.default.addObserver(
             forName: .AVSampleBufferDisplayLayerReadyForDisplayDidChange,
@@ -483,12 +484,12 @@ final class SoftwarePlaybackHost {
         }
     }
 
-    /// #315 fallback below tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1: no `readyForDisplay` on the
-    /// layer, so the first frame the decoder hands the renderer is the closest observable. Called
-    /// off-main. Mirrors the observer's list exactly: a platform named there and not here would get
-    /// neither the notification nor the fallback, so it would never publish readiness at all.
+    /// #315 fallback below visionOS 1.1, the one floor that predates `readyForDisplay` on the layer,
+    /// so the first frame the decoder hands the renderer is the closest observable. Called off-main.
+    /// Mirrors the observer's list exactly: a platform named there and not here would get neither the
+    /// notification nor the fallback, so it would never publish readiness at all.
     nonisolated private func noteFirstFrameEnqueuedForDisplayFallback() {
-        guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1) else { return }
+        guard #unavailable(visionOS 1.1) else { return }
         Task { @MainActor [weak self] in self?.isVideoReadyForDisplay = true }
     }
 
@@ -918,7 +919,7 @@ final class SoftwarePlaybackHost {
             }
         }
         if !demuxLoopStarted, let aOut = audioOutput {
-            aOut.attachVideoLayer(renderer.displayLayer)
+            aOut.attachVideoRenderer(renderer.videoRenderer)
         }
         if !demuxLoopStarted {
             demuxLoopStarted = true
@@ -1324,7 +1325,7 @@ final class SoftwarePlaybackHost {
 
         if let aOut = audioOutput {
             aOut.stop()
-            aOut.detachVideoLayer(renderer.displayLayer)
+            aOut.detachVideoRenderer(renderer.videoRenderer)
         }
         audioOutput = nil
         audioDecoder?.close()
@@ -2756,7 +2757,7 @@ final class SoftwarePlaybackHost {
             let r4d: String
             // #344: `*` is visionOS's declared floor (1.0), not "anything newer", and
             // isReadyForDisplay arrived in 1.1. Name the platform or the visionOS build breaks.
-            if #available(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1, *) {
+            if #available(visionOS 1.1, *) {
                 r4d = layer.isReadyForDisplay ? "y" : "n"
             } else {
                 r4d = "-"
