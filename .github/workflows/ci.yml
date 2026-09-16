@@ -163,20 +163,22 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
   # The Xcode 27 lane. Every job above resolves `latest-stable` on macos-15, which is Xcode 26.3,
-  # while the engine is consumed and released from Xcode 27. Both toolchain drifts found on the
-  # first 27 build (2026-09-16) were invisible to that: macOS 27's ICU names `com` (Comanche), which
-  # failed an AE#458 test, and Swift 6.4 tightened isolation checks that 6.3 accepted. So the two
-  # checks that caught them run here too: `swift test` on the 27 runtime, and the test target
-  # against the tvOS 27 SDK. The older lane stays, because a consumer on Xcode 26 is still a
-  # consumer, and the two toolchains have disagreed in both directions before.
+  # while the engine is consumed and released from Xcode 27, and Swift 6.4 rejects isolation shapes
+  # 6.3 accepted (the Sodalite test target stopped compiling on exactly that, 2026-09-16). These two
+  # jobs compile the package and both test targets against the 27 toolchain, for macOS and for the
+  # tvOS 27 SDK.
   #
-  # `xcode-27` is GitHub's preview image: Xcode 27 is its only and default Xcode, so there is
-  # nothing to select, but it can queue and carries no SLA. When a GA macOS 27 image ships, move
-  # these jobs to its label; the preview label disappearing then fails them loudly, not silently.
+  # They build and do not run the tests, on purpose. `xcode-27` is GitHub's preview image and runs a
+  # BETA macOS 27 (26A5406e) under Xcode 27 beta 6: measured on two attempts of the first run, Vision
+  # text recognition returns nil there and the loopback-origin tests starve (a global-queue block not
+  # scheduled within 30 s, a TLS relay request timing out), a different set of network tests each
+  # time, while all 2983 pass on macOS 27 GA on a Mac. A lane that is red for its image teaches
+  # everyone to ignore red. Run `swift test` here once a GA macOS 27 image ships, and that is also
+  # the point to move to its label; the preview label disappearing fails these jobs loudly first.
   # This lane replaces the weekly beta SDK watcher, whose one subject (#351) the 7.0 platform floor
   # closed.
-  test-macos-xcode27:
-    name: swift test (macOS, Xcode 27)
+  build-macos-xcode27:
+    name: swift build --build-tests (macOS, Xcode 27)
     runs-on: xcode-27
     timeout-minutes: 30
     steps:
@@ -187,11 +189,8 @@ jobs:
           swift --version
           xcodebuild -version
 
-      - name: swift build
-        run: swift build
-
-      - name: swift test
-        run: swift test
+      - name: swift build --build-tests
+        run: swift build --build-tests
 
   build-tvos-xcode27:
     name: xcodebuild (tvOS Simulator, Xcode 27)
