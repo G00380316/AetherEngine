@@ -162,6 +162,62 @@ jobs:
             -derivedDataPath .build/xcode-visionos \
             CODE_SIGNING_ALLOWED=NO
 
+  # The Xcode 27 lane. Every job above resolves `latest-stable` on macos-15, which is Xcode 26.3,
+  # while the engine is consumed and released from Xcode 27. Both toolchain drifts found on the
+  # first 27 build (2026-09-16) were invisible to that: macOS 27's ICU names `com` (Comanche), which
+  # failed an AE#458 test, and Swift 6.4 tightened isolation checks that 6.3 accepted. So the two
+  # checks that caught them run here too: `swift test` on the 27 runtime, and the test target
+  # against the tvOS 27 SDK. The older lane stays, because a consumer on Xcode 26 is still a
+  # consumer, and the two toolchains have disagreed in both directions before.
+  #
+  # `xcode-27` is GitHub's preview image: Xcode 27 is its only and default Xcode, so there is
+  # nothing to select, but it can queue and carries no SLA. When a GA macOS 27 image ships, move
+  # these jobs to its label; the preview label disappearing then fails them loudly, not silently.
+  # This lane replaces the weekly beta SDK watcher, whose one subject (#351) the 7.0 platform floor
+  # closed.
+  test-macos-xcode27:
+    name: swift test (macOS, Xcode 27)
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: swift build
+        run: swift build
+
+      - name: swift test
+        run: swift test
+
+  build-tvos-xcode27:
+    name: xcodebuild (tvOS Simulator, Xcode 27)
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build for tvOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme AetherEngine \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath .build/xcode-tvos \
+            CODE_SIGNING_ALLOWED=NO
+
+      # See the tvOS job above for why the test target needs its own build and why x86_64 is excluded.
+      - name: Build the tests for tvOS Simulator
+        run: |
+          xcodebuild build-for-testing \
+            -scheme AetherEngineTests \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath .build/xcode-tvos-tests \
+            EXCLUDED_ARCHS=x86_64 \
+            CODE_SIGNING_ALLOWED=NO
+
   # The docs site (aetherengine-website) validates every heading anchor at build time, but it
   # lives in another repo and only builds AFTER a push to main, so a broken anchor ships first
   # and is found second: `docs/api.md` linked `formats.md#dolby-vision` against a heading that
