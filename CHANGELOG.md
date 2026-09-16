@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.1.0] - 2026-09-16
+
 ### Added
 
 - **`AetherEngine.dolbyVisionConversion`** publishes the Dolby Vision profile rewrite applied to the served
