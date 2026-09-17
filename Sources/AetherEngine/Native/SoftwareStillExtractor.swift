@@ -72,7 +72,7 @@ final class SoftwareStillExtractor: @unchecked Sendable {
                                       reorderTail: limits.reorderTail),
               !run.isEmpty else { return nil }
 
-        let collector = FrameCollector()
+        let collector = FrameCollector(target: targetPts)
         decoder.onFrame = { pixelBuffer, pts, _ in
             collector.append(pixelBuffer: pixelBuffer, seconds: pts.seconds)
         }
@@ -83,7 +83,7 @@ final class SoftwareStillExtractor: @unchecked Sendable {
             feed(packet)
         }
 
-        guard let best = collector.best(for: targetPts) else { return nil }
+        guard let best = collector.best else { return nil }
         return Self.image(from: best, maxWidth: maxWidth)
     }
 
@@ -110,29 +110,43 @@ final class SoftwareStillExtractor: @unchecked Sendable {
 
     // MARK: - Frame selection
 
-    /// Collects what the decoder emits during one run. `onFrame` is `@Sendable` and the decoder may
-    /// call it from its own drain, so the box is locked even though the run itself is serial.
+    /// Keeps the best candidate as the run decodes rather than every frame it produced. The buffers
+    /// come out of the decoder's own pool, so holding a whole GOP of them would starve the pool the
+    /// next run has to draw from. Two are enough: the one the target asks for, and the oldest as the
+    /// fallback below.
+    ///
+    /// `onFrame` is `@Sendable` and the decoder calls it from its own drain, so the box is locked
+    /// even though the run itself is serial.
     private final class FrameCollector: @unchecked Sendable {
         private let lock = NSLock()
-        private var frames: [(pixelBuffer: CVPixelBuffer, seconds: Double)] = []
+        private let target: Double
+        private var atOrBefore: (pixelBuffer: CVPixelBuffer, seconds: Double)?
+        private var earliest: (pixelBuffer: CVPixelBuffer, seconds: Double)?
+
+        init(target: Double) {
+            self.target = target
+        }
 
         func append(pixelBuffer: CVPixelBuffer, seconds: Double) {
+            guard seconds.isFinite else { return }
             lock.lock()
             defer { lock.unlock() }
-            frames.append((pixelBuffer, seconds))
+            if earliest == nil || seconds < earliest!.seconds {
+                earliest = (pixelBuffer, seconds)
+            }
+            guard seconds <= target else { return }
+            if atOrBefore == nil || seconds > atOrBefore!.seconds {
+                atOrBefore = (pixelBuffer, seconds)
+            }
         }
 
         /// The newest frame at or before the target. Falling back to the oldest rather than to
         /// nothing matters at the live edge, where the target can sit a fraction past every frame
         /// the run produced.
-        func best(for target: Double) -> CVPixelBuffer? {
+        var best: CVPixelBuffer? {
             lock.lock()
             defer { lock.unlock() }
-            guard !frames.isEmpty else { return nil }
-            let atOrBefore = frames
-                .filter { $0.seconds.isFinite && $0.seconds <= target }
-                .max(by: { $0.seconds < $1.seconds })
-            return (atOrBefore ?? frames.min(by: { $0.seconds < $1.seconds }))?.pixelBuffer
+            return (atOrBefore ?? earliest)?.pixelBuffer
         }
     }
 

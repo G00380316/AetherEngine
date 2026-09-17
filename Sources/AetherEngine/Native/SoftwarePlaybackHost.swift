@@ -1413,8 +1413,12 @@ final class SoftwarePlaybackHost {
         vodPacketReadAhead = nil
         renderer.subtitleCompositor.reset()
 
-        stillExtractor?.close()
-        stillExtractor = nil
+        if let extractor = stillExtractor {
+            stillExtractor = nil
+            // Torn down ON the still queue, so a decode already in flight finishes against a codec
+            // context that is still open rather than one freed out from under it.
+            stillQueue.async { extractor.close() }
+        }
         dvrRing?.close()
         dvrRing = nil
         liveEdgeLock.lock()
