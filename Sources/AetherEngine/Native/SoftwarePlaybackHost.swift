@@ -703,15 +703,15 @@ final class SoftwarePlaybackHost {
             category: .swPlayback
         )
 
-        // HEVC -> VTDecompressionSession (HW) when VideoToolbox can HW-decode this exact format; everything
-        // else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder requires a
-        // HW decoder and has no software fallback, so an HEVC Rext (4:2:2/4:4:4/12-bit) stream routed here on
-        // hardware without a HW decoder (Intel Macs / older Apple TV) would fail VT session creation and show a
-        // black screen. Route those to libavcodec instead, which decodes them. Apple Silicon HW-decodes them,
-        // so the probe keeps HardwareVideoDecoder there.
+        // HEVC -> VTDecompressionSession (HW) when VideoToolbox PROVABLY HW-decodes this exact format;
+        // everything else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder
+        // requires a HW decoder and has no software fallback, so an HEVC Rext stream on hardware without a
+        // HW decoder must go to libavcodec. AE#461: so must every format the probe cannot classify (in-band
+        // parameter sets, Annex-B extradata), which the routing gate reads as "keep native" but which
+        // HardwareVideoDecoder, building from the hvcC alone, can never open.
         if let codecpar = vStream.pointee.codecpar,
            codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
-           VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) {
+           VTCapabilityProbe.hardwareDecodeVerdict(codecpar: codecpar).opensHardwareDecoder {
             videoDecoder.close()
             videoDecoder = HardwareVideoDecoder()
             EngineLog.emit(
