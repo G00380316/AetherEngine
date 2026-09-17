@@ -12,6 +12,34 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.2.0] - 2026-09-17
+
+### Added
+
+- **A live session on the software path decodes its scrub still from the DVR packet ring.** The scrub
+  preview has always been a `SegmentCache` feature, gated on `nativeVideoSession != nil`, which a software
+  session never has. So every live channel the box cannot decode in hardware scrubbed against an empty card,
+  and on an ATSC tuner that is all of them: MPEG-2 has no hardware decoder on Apple TV. There was no fallback
+  either, because a live source is forward-only and a second demuxer cannot seek it. `liveScrubThumbnail`
+  grows a second arm that decodes out of the ring the scrubber is already seeking within, through the same
+  `sessionStartPts` conversion the DVR rewind uses, so a still and a commit cannot name two different
+  moments. It drives a real `SoftwareVideoDecoder`, so an interlaced 704x480 SAR 10:11 broadcast frame comes
+  back deinterlaced and 4:3 rather than combed and stretched. Hosts need no change: a caller already asking
+  `liveScrubThumbnail` starts getting frames.
+- **`aetherctl play --host-calls still`** asks for a still at three aims and writes each to a PNG, so the
+  file is the verdict and not the hit count.
+
+### Fixed
+
+- **`SoftwareVideoDecoder.flush(resetFilterGraph:)`.** A flush tears down the deinterlace graph, which is
+  right across a seek and wrong sixteen times a second: rebuilding it means a fresh Metal pipeline, a fresh
+  full-resolution hwframes pool and an unconditional log line, and a host's diagnostic ring is 300 lines.
+  The still path keeps the graph.
+- **`aetherctl dvr` paces its origin.** The matrix asserts liveness and built an unpaced fixture, so the
+  producer ran hundreds of segments ahead, `live window slid past the consumer` fired 1485 times in a run,
+  and three of its five checks had been failing on `main` for as long as anyone had run it. None of it was
+  playback: the same invariants against a paced origin pass.
+
 ## [7.1.3] - 2026-09-17
 
 ### Changed
