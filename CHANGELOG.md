@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A decode-path correction onto software no longer ends an HEVC session the probe cannot classify.**
+  `SoftwarePlaybackHost` asked the routing gate's `canHardwareDecode`, which answers "keep native" for in-band
+  parameter sets, Annex-B extradata and a missing config record, and read that as "open `HardwareVideoDecoder`".
+  That decoder builds from the hvcC alone and has no software fallback, so `preferredDecodePath = .software`
+  (at load or through `reloadAtCurrentPosition(applying:)`) tore the session down and threw
+  `sessionCreationFailed(status: -4)`. The probe now returns a three-valued verdict: the routing gate still
+  keeps native on an unclassifiable format, the software host opens the hardware decoder only on a proven
+  session and hands everything else to libavcodec. The verdict names its reason in the log (AE#461).
 
 ## [7.1.0] - 2026-09-16
 
