@@ -617,6 +617,9 @@ final class NativeAVPlayerHost {
                         )
                         self.avPlayer.play()
                     }
+                    if self.timeControlStatus == .playing {
+                        self.startLiveJoinImmediatelyIfHolding(waitingReason: "-")
+                    }
                     // #168: publish the item's real dynamic range for the probe-free remote-HLS badge.
                     await self.publishDetectedVideoFormat(from: item)
                     guard self.sessionID == sid else { return }
@@ -1234,7 +1237,9 @@ final class NativeAVPlayerHost {
     private func startLiveJoinImmediatelyIfHolding(waitingReason: String) {
         guard liveJoinStartsImmediately, !liveJoinImmediateStartSpent else { return }
         if timeControlStatus == .playing {
-            liveJoinImmediateStartSpent = true
+            if Self.playingSpendsLiveJoinOneShot(itemIsReadyToPlay: playerItem?.status == .readyToPlay) {
+                liveJoinImmediateStartSpent = true
+            }
             return
         }
         // The free guards first, so the reading below is only ever taken on a hold that could actually
@@ -1312,6 +1317,18 @@ final class NativeAVPlayerHost {
             )
             self.avPlayer.playImmediately(atRate: rate)
         }
+    }
+
+    /// Whether a `.playing` transport status is this item's rate rolling, the event that spends the
+    /// AE#440 one-shot.
+    ///
+    /// An in-place swap reuses a player that is still `.playing`, and that status reaches the fresh
+    /// item as its first edge, before the item can play anything. Spent there, the one-shot was gone
+    /// before the join's own `ToMinimizeStalls` hold began, so a #446 rejoin produced no decision and no
+    /// line. An item cannot roll before it is ready, so readiness is what separates the carry from the
+    /// roll. The readyToPlay sink asks again, for a carry that never changes status on its way to motion.
+    nonisolated static func playingSpendsLiveJoinOneShot(itemIsReadyToPlay: Bool) -> Bool {
+        itemIsReadyToPlay
     }
 
     /// AE#440 round 3: what a refused hold did next, reported and never acted on.
