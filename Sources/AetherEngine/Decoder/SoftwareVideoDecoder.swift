@@ -431,14 +431,24 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         onFrame?(pixelBuffer, cmPTS, hdr10PlusData)
     }
 
+    /// #544: `resetFilterGraph: false` keeps the deinterlace graph across the flush. The still
+    /// extractor flushes before every run, and rebuilding the graph means a fresh Metal pipeline, a
+    /// fresh full-resolution hwframes pool AND an unconditional `[Deinterlace] engaged` line, about
+    /// sixteen times a second while a viewer holds the scrub. That line alone overwrites a host's
+    /// whole diagnostic ring in half a minute. A still run decodes a full GOP and returns the frame
+    /// at its target, so the filter has context from this position by the time that frame is made.
     func flush() {
+        flush(resetFilterGraph: true)
+    }
+
+    func flush(resetFilterGraph: Bool) {
         lock.lock()
         defer { lock.unlock() }
         // AE#492: retires every packet a caller had already decided to send. Bumped under the lock,
         // so a feed that has not reached `avcodec_send_packet` yet is refused from here on.
         _feedEpoch &+= 1
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
-        deinterlacer.teardown()
+        if resetFilterGraph { deinterlacer.teardown() }
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
     }

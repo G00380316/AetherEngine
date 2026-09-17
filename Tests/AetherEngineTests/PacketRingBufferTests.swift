@@ -117,10 +117,11 @@ final class PacketRingStillRunTests: XCTestCase {
                       firstSeq: Int = 0,
                       maxPackets: Int = 1000,
                       maxSpanSeconds: Double = 30,
-                      reorderTail: Int = 0) -> ClosedRange<Int>? {
+                      reorderTail: Int = 0,
+                      indexReachesEnd: Bool = true) -> ClosedRange<Int>? {
         PacketRingBuffer.stillRunSpan(target: target, index: index, firstSeq: firstSeq,
                                       maxPackets: maxPackets, maxSpanSeconds: maxSpanSeconds,
-                                      reorderTail: reorderTail)
+                                      reorderTail: reorderTail, indexReachesEnd: indexReachesEnd)
     }
 
     /// Starts at the newest keyframe at or before the target, ends at the first video packet reaching it.
@@ -192,5 +193,19 @@ final class PacketRingStillRunTests: XCTestCase {
     /// An index with no video at all (audio-only stretch) has no still in it.
     func testNoVideoIsNil() {
         XCTAssertNil(span([audio(0), audio(1)], target: 1))
+    }
+
+    /// A window the CALLER truncated must not be read as the ring ending. Clamping there would
+    /// return a picture from before the requested time and present it as the answer.
+    func testTruncatedWindowRefusesInsteadOfClamping() {
+        let index = [video(0, key: true), video(1), video(2)]
+        XCTAssertNil(span(index, target: 9.5, indexReachesEnd: false))
+        XCTAssertEqual(span(index, target: 9.5, indexReachesEnd: true), 0...2)
+    }
+
+    /// A target the window DOES reach is unaffected by where the window ends.
+    func testTruncatedWindowStillAnswersATargetItCovers() {
+        let index = [video(0, key: true), video(1), video(2)]
+        XCTAssertEqual(span(index, target: 2, indexReachesEnd: false), 0...2)
     }
 }

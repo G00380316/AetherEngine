@@ -191,6 +191,28 @@ final class SoftwarePlaybackHost {
     /// loops, so a preview frame never costs playback a packet.
     private var stillExtractor: SoftwareStillExtractor?
     private let stillQueue = DispatchQueue(label: "engine.sw.still", qos: .userInitiated)
+    private let stillRequests = StillRequestCounter()
+
+    /// Newest-wins ticket for still requests. A held scrub asks about sixteen times a second and the
+    /// queue is serial, so without a ticket the queue takes work faster than it retires it: the card
+    /// falls further behind the thumb with every request, and the decoding outlives the commit.
+    final class StillRequestCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 0
+
+        func next() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            value &+= 1
+            return value
+        }
+
+        var latest: UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
 
     /// Disk-spooled DVR rewind ring; non-nil for live sessions with dvrWindowSeconds set. Demux-thread appended (internally locked).
     nonisolated(unsafe) private var dvrRing: PacketRingBuffer?
@@ -1302,8 +1324,15 @@ final class SoftwarePlaybackHost {
             return sessionStartPts.isFinite ? sessionStartPts : 0
         }()
         let targetSource = startPts + seconds
+        let requests = stillRequests
+        let ticket = requests.next()
         return await withCheckedContinuation { continuation in
             stillQueue.async {
+                guard ticket == requests.latest else {
+                    // Superseded while it waited: decoding it would only push the newer one later.
+                    continuation.resume(returning: nil)
+                    return
+                }
                 continuation.resume(
                     returning: extractor.still(from: ring, targetPts: targetSource, maxWidth: maxWidth))
             }

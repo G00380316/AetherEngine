@@ -76,7 +76,7 @@ final class SoftwareStillExtractor: @unchecked Sendable {
         decoder.onFrame = { pixelBuffer, pts, _ in
             collector.append(pixelBuffer: pixelBuffer, seconds: pts.seconds)
         }
-        decoder.flush()
+        decoder.flush(resetFilterGraph: false)
         defer { decoder.onFrame = nil }
 
         for packet in run {
@@ -91,9 +91,10 @@ final class SoftwareStillExtractor: @unchecked Sendable {
 
     private func feed(_ packet: PacketRingBuffer.Packet) {
         guard !packet.bytes.isEmpty else { return }
-        guard let p = av_packet_alloc() else { return }
+        // Through the tracked pair, so the still path stays visible to PacketBalanceTracker.
+        guard let p = trackedPacketAlloc() else { return }
         var pkt: UnsafeMutablePointer<AVPacket>? = p
-        defer { av_packet_free(&pkt) }
+        defer { trackedPacketFree(&pkt) }
 
         guard av_new_packet(p, Int32(packet.bytes.count)) >= 0 else { return }
         packet.bytes.withUnsafeBytes { raw in
@@ -140,9 +141,13 @@ final class SoftwareStillExtractor: @unchecked Sendable {
             }
         }
 
-        /// The newest frame at or before the target. Falling back to the oldest rather than to
-        /// nothing matters at the live edge, where the target can sit a fraction past every frame
-        /// the run produced.
+        /// The newest frame at or before the target.
+        ///
+        /// The fallback is not the live edge: a run opens on a keyframe at or before the target, so
+        /// a frame at or before it normally exists. It covers the eviction race, where that opening
+        /// keyframe was dropped between the index snapshot and the disk read and the run therefore
+        /// begins AFTER the target. Returning the earliest frame there is a picture from up to one
+        /// GOP late, which is a better answer than an empty card.
         var best: CVPixelBuffer? {
             lock.lock()
             defer { lock.unlock() }
@@ -165,8 +170,11 @@ final class SoftwareStillExtractor: @unchecked Sendable {
 
         let (dstW, dstH) = FrameDecodeContext.displayDimensions(
             srcW: srcW, srcH: srcH, sar: sampleAspect(of: pixelBuffer), targetWidth: maxWidth)
-        if dstW == srcW && dstH == srcH { return source }
 
+        // Always drawn into an owned bitmap, even at 1:1. VideoToolbox documents the CGImage as
+        // backed by the CVPixelBuffer it was made from, and that buffer goes back to the decoder's
+        // pool the moment this run lets go of it, so handing the source out would let the next run
+        // repaint a picture the host is still showing.
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: dstW, height: dstH,
                                   bitsPerComponent: 8, bytesPerRow: 0, space: space,

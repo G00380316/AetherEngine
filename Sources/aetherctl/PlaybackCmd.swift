@@ -914,9 +914,21 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             if tick >= 6 { rateHoldAtEnd = Issue436RateHold.observedRate(engine) }
         }
         if hostCalls.contains("still"), [15, 20, 25].contains(tick) {
-            let offset: Double = tick == 15 ? 20 : (tick == 20 ? 5 : 0)
-            let label = tick == 15 ? "playhead-20" : (tick == 20 ? "playhead-5" : "edge")
-            let target = max(0, engine.currentTime - offset)
+            // The third aim is the live EDGE itself, not the playhead: a target a fraction past the
+            // newest packet is the clamp case, and it is where a live viewer sits most.
+            let target: Double
+            let label: String
+            switch tick {
+            case 15:
+                target = max(0, engine.currentTime - 20)
+                label = "playhead-20"
+            case 20:
+                target = max(0, engine.currentTime - 5)
+                label = "playhead-5"
+            default:
+                target = engine.seekableLiveRange?.upperBound ?? engine.currentTime
+                label = "edge"
+            }
             let started = Date()
             let image = await engine.liveScrubThumbnail(atSessionSeconds: target, maxWidth: 320)
             let ms = Int(Date().timeIntervalSince(started) * 1000)
@@ -924,9 +936,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             if let image {
                 stillHits += 1
                 let path = "/tmp/aetherctl-still-\(tick).png"
-                _ = writeStillPNG(image, to: path)
+                let written = writeStillPNG(image, to: path)
                 print(String(format: "  HOSTCALL still(at: %.2f, %@) -> %dx%d in %d ms  %@",
-                             target, label, image.width, image.height, ms, path))
+                             target, label, image.width, image.height, ms,
+                             written ? path : "(png write failed)"))
             } else {
                 print(String(format: "  HOSTCALL still(at: %.2f, %@) -> MISS in %d ms", target, label, ms))
             }
