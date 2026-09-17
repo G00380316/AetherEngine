@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.1.1] - 2026-09-17
+
 ### Fixed
 
 - **A decode-path correction onto software no longer ends an HEVC session the probe cannot classify.**
