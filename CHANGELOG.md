@@ -12,6 +12,18 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.1.3] - 2026-09-17
+
+### Changed
+
+- **A reader walking forward logs one `conn start` per ten seconds instead of one per range.** On a LAN a
+  bounded reader starts a 32 MiB range every 0.29 s at gigabit, and the #151 subtitle prefetcher walks up to
+  270 s of lead that way when an OCR worker is armed (69 to 138 ranges for a UHD remux, per track pick and per
+  seek). A host log buffer of 300 lines held about 275 of them from one 40 s playback. A start that continues
+  exactly where the previous range ended now logs at most once per ten seconds, and the next line that logs
+  carries `(+N contiguous ranges since the last line)`. Every other start (first connection, seek, reconnect
+  mid-range, refill after backpressure, held connections) logs as before (Sodalite#117).
+
 ## [7.1.2] - 2026-09-17
 
 ### Fixed
