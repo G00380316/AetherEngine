@@ -1,8 +1,21 @@
 import Foundation
 import Combine
+import CoreGraphics
 import CoreMedia
 import AVFoundation
+import ImageIO
+import UniformTypeIdentifiers
 import AetherEngine
+
+/// #544: the still drill writes what it decoded, because a hit count says the call returned an image
+/// and only the file says it is the right picture.
+private func writeStillPNG(_ image: CGImage, to path: String) -> Bool {
+    guard let dest = CGImageDestinationCreateWithURL(
+        URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil
+    ) else { return false }
+    CGImageDestinationAddImage(dest, image, nil)
+    return CGImageDestinationFinalize(dest)
+}
 
 // MARK: - play
 
@@ -627,12 +640,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // exists (the foreground retune's hold-paused policy). Resumed at tick 8.
             print("  HOSTCALL pause() right after load")
             engine.pause()
-        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold":
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -795,6 +808,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         return parts.count == 2 ? (Int(parts[1]) ?? 15) : 15
     }
 
+    // #544: scrub stills on the software live path, decoded out of the DVR packet ring. Three aims
+    // per run (deep in the window, just behind the playhead, and at the edge), because the edge is the
+    // one a live viewer sits on and the one a clamp has to cover.
+    var stillAttempts = 0
+    var stillHits = 0
+
     let ticks = max(1, Int(seconds))
     // Sodalite#104: where the playhead stood when the pause-and-hold drill parked it, so the run can
     // say whether it moved.
@@ -893,6 +912,37 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // switch, a live reload) builds a fresh host, and whether the speed crosses that seam is
             // the other half of the report.
             if tick >= 6 { rateHoldAtEnd = Issue436RateHold.observedRate(engine) }
+        }
+        if hostCalls.contains("still"), [15, 20, 25].contains(tick) {
+            // The third aim is the live EDGE itself, not the playhead: a target a fraction past the
+            // newest packet is the clamp case, and it is where a live viewer sits most.
+            let target: Double
+            let label: String
+            switch tick {
+            case 15:
+                target = max(0, engine.currentTime - 20)
+                label = "playhead-20"
+            case 20:
+                target = max(0, engine.currentTime - 5)
+                label = "playhead-5"
+            default:
+                target = engine.seekableLiveRange?.upperBound ?? engine.currentTime
+                label = "edge"
+            }
+            let started = Date()
+            let image = await engine.liveScrubThumbnail(atSessionSeconds: target, maxWidth: 320)
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            stillAttempts += 1
+            if let image {
+                stillHits += 1
+                let path = "/tmp/aetherctl-still-\(tick).png"
+                let written = writeStillPNG(image, to: path)
+                print(String(format: "  HOSTCALL still(at: %.2f, %@) -> %dx%d in %d ms  %@",
+                             target, label, image.width, image.height, ms,
+                             written ? path : "(png write failed)"))
+            } else {
+                print(String(format: "  HOSTCALL still(at: %.2f, %@) -> MISS in %d ms", target, label, ms))
+            }
         }
         if hostCalls.contains("seekback"), tick == 15 {
             let target = max(0, engine.currentTime - 20)
@@ -1103,6 +1153,17 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     if case .error(let message) = endState {
         print("VERDICT: session ended in error: \(message)")
         return 2
+    }
+    if hostCalls.contains("still") {
+        print("#544 scrub stills: \(stillHits) of \(stillAttempts) hit")
+        if stillAttempts == 0 {
+            print("VERDICT: #544 drill inconclusive (session ended before the first still tick)")
+            return 5
+        }
+        if stillHits == 0 {
+            print("VERDICT: #544 reproduced (the live scrub preview has no frame to show)")
+            return 6
+        }
     }
     if hostCalls.contains("ratehold") {
         let observed = rateHoldAfterResume

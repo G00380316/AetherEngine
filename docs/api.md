@@ -508,7 +508,7 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `seekToLiveEdge()` | `async`. |
 | `liveSourceReset` | The retune contract above. |
 | `liveResumeClamped`, `LiveResumeClamp` | A resume that found the playhead outside the window and moved it; see above. |
-| `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | Cache-backed still on the live session axis. |
+| `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | Still on the live session axis, decoded from what the session already holds. A native session reads its DVR segment cache; a software session reads its DVR packet ring (#544), so a tuner channel the box decodes in software has a scrub preview too. |
 | `$playlistShiftSeconds` | Seconds the producer subtracted from source PTS. Published values already fold it back; exposed for hosts pairing their own samples against AVPlayer's raw clock. |
 | `HLSLiveIngestReader(playlistURL:)`, `HLSLiveIngestReader(playlistURL:httpHeaders:)` | The ready-made `IOReader` for ingesting an upstream HLS playlist directly, with AES-128 clear-key and SSAI handling. The headers ride the playlist, every segment and every AES key, which is what a tokenized IPTV origin enforces per request. Unsupported shapes surface a typed `HLSIngestError`. |
 
@@ -657,8 +657,8 @@ reports an intention rather than an outcome.
 | Symbol | Notes |
 | --- | --- |
 | `scrubThumbnail(atSeconds:maxWidth:)` | Cache-backed still for the active native session, live or VOD. Decodes bytes already produced, so it opens no second connection and works on single-connection sources (debrid / torrent links) where a second demuxer is refused. |
-| `vodScrubThumbnail(atSeconds:maxWidth:)`, `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | The two arms, for callers that know which axis they hold. |
-| `supportsCacheBackedStills` | True while a native session exists. Gate the scrub-preview affordance on it: it reports capability, not per-frame availability, so a transient nil from `scrubThumbnail` while a segment is still being produced is expected and means "time only, no image". |
+| `vodScrubThumbnail(atSeconds:maxWidth:)`, `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | The two arms, for callers that know which axis they hold. The live arm also serves software sessions, out of the DVR packet ring rather than a segment cache (#544). |
+| `supportsCacheBackedStills` | True while a native session exists, which is what the SEGMENT CACHE needs. Gate the scrub-preview affordance on it: it reports capability, not per-frame availability, so a transient nil from `scrubThumbnail` while a segment is still being produced is expected and means "time only, no image". It stays false on a software session, and a live one nonetheless serves stills from its packet ring, so a live caller asks `liveScrubThumbnail` rather than this flag. |
 
 ## Certificate trust
 
