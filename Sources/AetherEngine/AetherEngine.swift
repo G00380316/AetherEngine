@@ -547,6 +547,14 @@ public final class AetherEngine: ObservableObject {
     /// source after the probe that measured it is gone.
     var sourceDolbyVisionRPUProfile: Int? = nil
 
+    /// AE#541: the two load-time terms of the HDR route that a reload cannot take again. The criteria
+    /// readout is only an answer around the handshake, and an in-place rebuild runs none, so an audio
+    /// pick that routed from the raw `panelIsInHDRMode` alone dropped an HDR title from the master to
+    /// the media playlist on the panel the load had just proven. nil readout means suppressed, as at
+    /// the load.
+    var sessionPanelHDRReadout: Bool? = nil
+    var sessionDisplayEligibleForHDR = false
+
     /// Whether the loaded source's Dolby Vision has a base layer `LoadOptions.dolbyVisionHandling =
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
     /// on the probe stream for the same reason as `sourceDVBLCompatID`: a correction that turns the
@@ -3579,6 +3587,8 @@ public final class AetherEngine: ObservableObject {
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
+        sessionPanelHDRReadout = nil
+        sessionDisplayEligibleForHDR = false
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -4124,6 +4134,8 @@ public final class AetherEngine: ObservableObject {
             attemptWhenUnproven: options.attemptsHDRMasterOnUnprovenPanel && !options.isLive,
             displayEligibleForHDR: observedDisplayCaps.supportsHDR,
             panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
+        sessionPanelHDRReadout = criteriaPanelReadout
+        sessionDisplayEligibleForHDR = observedDisplayCaps.supportsHDR
         if routingPanelHDR != panelHDRAfterHandshake {
             EngineLog.emit(
                 "[DisplayCriteria] panel unproven but HDR-eligible: serving the master and letting "
@@ -5566,6 +5578,8 @@ public final class AetherEngine: ObservableObject {
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
+        sessionPanelHDRReadout = nil
+        sessionDisplayEligibleForHDR = false
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil

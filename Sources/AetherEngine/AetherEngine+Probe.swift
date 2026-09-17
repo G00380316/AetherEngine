@@ -739,6 +739,28 @@ extension AetherEngine {
         return attemptWhenUnproven && displayEligibleForHDR && !panelRefusedHDRMaster
     }
 
+    /// AE#541: the HDR route of an in-place rebuild, composed from the same two decisions the load makes.
+    ///
+    /// The readout and the display's eligibility are the load's, because the rebuild runs no handshake to
+    /// take them again. The host's assertion and the attempt lever are the session's current options, so a
+    /// `reloadAtCurrentPosition(applying:)` correction still moves the route. The refusal latch is read
+    /// now rather than carried: a master the panel refused after the load must not be served again.
+    nonisolated static func reloadRoutesAsHDRPanel(
+        hostAsserts: Bool,
+        criteriaReadoutAtLoad: Bool?,
+        attemptWhenUnproven: Bool,
+        isLive: Bool,
+        displayEligibleForHDR: Bool,
+        panelRefusedHDRMaster: Bool
+    ) -> Bool {
+        sessionRoutesAsHDRPanel(
+            panelPresentsHDR: sessionPanelPresentsHDR(
+                hostAsserts: hostAsserts, criteriaReadout: criteriaReadoutAtLoad),
+            attemptWhenUnproven: attemptWhenUnproven && !isLive,
+            displayEligibleForHDR: displayEligibleForHDR,
+            panelRefusedHDRMaster: panelRefusedHDRMaster)
+    }
+
     private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {
         let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
         guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {

@@ -2217,6 +2217,21 @@ extension AetherEngine {
                 // swapped item, which happens inside loadNative. Arm before it, or the gate below is again
                 // reading a flag for a switch whose notifications it was not registered for.
                 if loadedOptions.suppressDisplayCriteria { displayCriteria.armSwitchObservation() }
+                let reloadRoutingPanelHDR = Self.reloadRoutesAsHDRPanel(
+                    hostAsserts: loadedOptions.panelIsInHDRMode,
+                    criteriaReadoutAtLoad: sessionPanelHDRReadout,
+                    attemptWhenUnproven: loadedOptions.attemptsHDRMasterOnUnprovenPanel,
+                    isLive: loadedOptions.isLive,
+                    displayEligibleForHDR: sessionDisplayEligibleForHDR,
+                    panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
+                if reloadRoutingPanelHDR != loadedOptions.panelIsInHDRMode {
+                    EngineLog.emit(
+                        "[DisplayCriteria] AE#541 reload routes on the load's panel answer: panelIsHDR="
+                        + "\(reloadRoutingPanelHDR) (hostAsserts=\(loadedOptions.panelIsInHDRMode) readoutAtLoad="
+                        + (sessionPanelHDRReadout.map { "\($0)" } ?? "suppressed")
+                        + " eligible=\(sessionDisplayEligibleForHDR) refusedLatch=\(Self.panelRefusedHDRMaster))",
+                        category: .session)
+                }
                 try await loadNative(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
@@ -2231,7 +2246,7 @@ extension AetherEngine {
                     // changed and the probe that could answer it is gone.
                     dolbyVisionRPUProfile: sourceDolbyVisionRPUProfile,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
-                    panelIsInHDRMode: loadedOptions.panelIsInHDRMode,
+                    panelIsInHDRMode: reloadRoutingPanelHDR,
                     audioBridgeMode: loadedOptions.audioBridgeMode,
                     // isLive required: without it the reload rebuilds as VOD and HLSVideoEngine fails "cannot build segment plan" (device repro: KiKA).
                     isLive: loadedOptions.isLive,
