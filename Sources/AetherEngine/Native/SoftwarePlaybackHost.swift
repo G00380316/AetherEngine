@@ -186,6 +186,12 @@ final class SoftwarePlaybackHost {
 
     // MARK: - Live / DVR
 
+    /// #544: decodes a scrub still out of `dvrRing`. Built beside the playback decoder so it never
+    /// holds a stream pointer of its own, and driven only from `stillQueue`, off the demux and feed
+    /// loops, so a preview frame never costs playback a packet.
+    private var stillExtractor: SoftwareStillExtractor?
+    private let stillQueue = DispatchQueue(label: "engine.sw.still", qos: .userInitiated)
+
     /// Disk-spooled DVR rewind ring; non-nil for live sessions with dvrWindowSeconds set. Demux-thread appended (internally locked).
     nonisolated(unsafe) private var dvrRing: PacketRingBuffer?
 
@@ -786,6 +792,20 @@ final class SoftwarePlaybackHost {
                 )
             }
         }
+        if isLive, dvrRing != nil {
+            do {
+                stillExtractor = try SoftwareStillExtractor(
+                    stream: vStream,
+                    videoStreamIndex: videoStreamIndex,
+                    timeBaseSeconds: videoTimeBaseSeconds,
+                    deinterlace: deinterlaceConfig)
+            } catch {
+                // A session without scrub stills still plays; the preview just stays empty.
+                EngineLog.emit("[SWHost] #544 still extractor unavailable (\(error))", category: .swPlayback)
+                stillExtractor = nil
+            }
+        }
+
         videoDecoder.onFirstHDR10PlusDetected = { [weak self] in
             self?.onFirstHDR10PlusDetected?()
         }
@@ -1268,6 +1288,28 @@ final class SoftwarePlaybackHost {
         return outcome
     }
 
+    /// #544: a scrub still for the live DVR window, decoded out of the packet ring.
+    ///
+    /// Takes the session axis, exactly as `seek` does, and converts it with the same `sessionStartPts`
+    /// the rewind uses, so the still and the commit can never name two different moments. Runs on its
+    /// own queue: the ring is internally locked and safe to read alongside the feeder, but decoding on
+    /// the demux or feed loop would make the viewer pay for the preview in dropped packets.
+    func liveScrubStill(atSessionSeconds seconds: Double, maxWidth: Int) async -> CGImage? {
+        guard isLive, let ring = dvrRing, let extractor = stillExtractor else { return nil }
+        let startPts: Double = {
+            liveEdgeLock.lock()
+            defer { liveEdgeLock.unlock() }
+            return sessionStartPts.isFinite ? sessionStartPts : 0
+        }()
+        let targetSource = startPts + seconds
+        return await withCheckedContinuation { continuation in
+            stillQueue.async {
+                continuation.resume(
+                    returning: extractor.still(from: ring, targetPts: targetSource, maxWidth: maxWidth))
+            }
+        }
+    }
+
     /// Live DVR rewind: reseeds decoder from the ring (source PTS axis; maps via sessionStartPts) without touching the live demuxer. After return, the loop reads new packets forward and plays back to live.
     private func seekLiveDVR(to targetSession: Double, ring: PacketRingBuffer, wasPlaying: Bool) async {
         let startPts: Double = {
@@ -1371,6 +1413,8 @@ final class SoftwarePlaybackHost {
         vodPacketReadAhead = nil
         renderer.subtitleCompositor.reset()
 
+        stillExtractor?.close()
+        stillExtractor = nil
         dvrRing?.close()
         dvrRing = nil
         liveEdgeLock.lock()

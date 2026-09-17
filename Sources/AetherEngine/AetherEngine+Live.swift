@@ -3,9 +3,24 @@ import CoreGraphics
 
 extension AetherEngine {
 
-    /// Frame from the DVR segment cache at `atSessionSeconds` (seekableLiveRange axis). No network: converts session time to raw output via seam history, then decodes locally. nil when no native live session, time outside resident window, or decode fails.
+    /// Frame from the live DVR window at `atSessionSeconds` (seekableLiveRange axis), decoded
+    /// locally with no network.
+    ///
+    /// Two sessions can answer, and both read a buffer the session already holds rather than opening
+    /// a second connection (a live source is forward-only, so a second demuxer could not seek it).
+    /// A native session decodes from its DVR segment cache after converting session time to raw
+    /// output via seam history. A software session has no such cache, so it decodes out of its own
+    /// packet ring (#544), which is the same buffer the scrubber seeks within. nil when neither is
+    /// live, when the time is outside the resident window, or when the decode fails.
     public func liveScrubThumbnail(atSessionSeconds seconds: Double, maxWidth: Int = 320) async -> CGImage? {
-        guard isLive, let session = nativeVideoSession else { return nil }
+        guard isLive else { return nil }
+        guard let session = nativeVideoSession else {
+            guard let host = softwareHost else { return nil }
+            let gen = loadGeneration
+            let image = await host.liveScrubStill(atSessionSeconds: seconds, maxWidth: maxWidth)
+            // A zap between the request and the frame would hand the new channel the old one's picture.
+            return loadGeneration == gen ? image : nil
+        }
         // seekableLiveRange is output-time + seam shift; segment table and tfdt live on raw output. Resolve newest seam (inverts $currentTime fold).
         let outputSeconds: Double
         outputSeconds = presentationAxis.itemSeconds(forSourceSeconds: seconds)
