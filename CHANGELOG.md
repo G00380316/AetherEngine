@@ -12,6 +12,18 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.3.0] - 2026-09-18
+
+### Added
+
+- **`AetherEngine.version`, the engine's own account of which release it is.** A host could not work
+  this out: SwiftPM resolves a package to a revision rather than to a tag, so an About panel or the
+  header of a handed-over diagnostic log had nothing to read, and a report analysed without it got
+  the engine version guessed from an older thread. The constant is pinned in the test suite to the
+  three statements of the same number a release already rewrites (the README install snippet, the
+  Examples dependency step, the newest entry in this file), so a forgotten bump fails the build
+  rather than shipping a log line that lies about it.
+
 ## [7.2.0] - 2026-09-17
 
 ### Added
