@@ -12,6 +12,23 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.1.2] - 2026-09-17
+
+### Fixed
+
+- **An audio pick keeps an HDR title on the master playlist.** `reloadWithAudioOverride` handed `loadNative` the
+  raw `panelIsInHDRMode` option, while a fresh load hands it the route composed from the criteria readout, the
+  display's HDR eligibility, `attemptsHDRMasterOnUnprovenPanel` and the refusal latch. The rebuild runs no
+  handshake, so a panel proven through the readout alone (and, since 6.82.0, an unproven but eligible VOD panel)
+  dropped to the media playlist on the pick and lost its AUDIO rendition, the only place AVFoundation reads an
+  HLS language from. The load now keeps the readout and the eligibility, and the reload composes its route from
+  those plus the session's current options and the latch read at reload time (AE#541).
+- **A live rejoin after an item swap reaches its stall-policy decision again.** An in-place swap reuses a player
+  that is still `.playing`, and that status arrived on the fresh item 1 ms after the load, before it was ready.
+  The live-join lever read it as the rate rolling on its own and silently spent its one-shot, so the
+  `ToMinimizeStalls` hold that followed on a #446 rejoin decided nothing and logged nothing. The spend now
+  requires readiness (AE#440).
+
 ## [7.1.1] - 2026-09-17
 
 ### Fixed
