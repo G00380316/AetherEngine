@@ -817,6 +817,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// (live sources, and any source whose total size is not resolved yet). winCond-guarded.
     private var connRangeEnd: Int64?
 
+    /// Sodalite#117: contiguous range starts are summarised instead of logged one by one.
+    /// winCond-guarded.
+    private var connStartLogGate = ConnStartLogGate()
+
     /// #220: set when the connection ended because its range was delivered in full. That is a
     /// planned end, not a failure, and must not be charged to the reconnect budgets. Mirrors
     /// `connEndedByBackpressure`; cleared by `startPersistentConnection`.
@@ -2718,6 +2722,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connEndedAtRangeEnd = false
         postEndDeliveryBytes = 0
         postEndOvershootLogged = false
+        let skippedConnStarts = connStartLogGate.admit(
+            continuesPrevious: connRangeEnd.map { offset == $0 + 1 } ?? false,
+            now: TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000)
         connRangeEnd = resolvedBound.map { offset + $0 - 1 }
         connStatus = 0
         connRetryAfter = 0
@@ -2818,11 +2825,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // #240: not DEBUG-only any more, and it names its reader. This is the line a field report
         // needs to answer "who is on the link": with bounded ranges every 32 MiB refill starts a
         // generation, so an unlabelled sequence of them reads like several concurrent connections
-        // when it is one reader walking forward. One line per range is a line every few seconds.
+        // when it is one reader walking forward. On a fast link that walk is a range every few
+        // hundred milliseconds, so contiguous ranges are summarised (see ConnStartLogGate).
+        guard let skippedConnStarts else { return }
         EngineLog.emit(
             "[AVIOReader] \(label) conn start gen=\(generation) offset=\(offset)"
             + (resolvedBound.map { " len=\($0 / 1024 / 1024)MB" } ?? " open-ended")
             + (heldConnectionEnabled ? " held" : "")
+            + (skippedConnStarts > 0 ? " (+\(skippedConnStarts) contiguous ranges since the last line)" : "")
             + reResolveNote(),
             category: .demux)
     }
