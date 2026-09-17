@@ -20,6 +20,13 @@ the public-API contract.
   `sessionCreationFailed(status: -4)`. The probe now returns a three-valued verdict: the routing gate still
   keeps native on an unclassifiable format, the software host opens the hardware decoder only on a proven
   session and hands everything else to libavcodec. The verdict names its reason in the log (AE#461).
+- **A software session paused before its first frame shows that frame instead of black.** The demux and feeder
+  loops park on a paused transport, so a `pause()` that arrived before anything was decoded (a host holding a
+  fresh load paused, as Sodalite's foreground retune did) left the layer empty under a stopped clock for as long
+  as the session stayed paused, and `startup 8/8 presenting` never came. Until the first frame is in, a pause now
+  stops the clock and not the loops: the clock arms at rate 0, the frame is handed straight to the layer and the
+  stopped clock moves onto it. The same change closes a race where a transport call between a clock arming and
+  being marked armed was lost, which left a VOD clock running under `state=paused` (Sodalite#104).
 
 ## [7.1.0] - 2026-09-16
 
