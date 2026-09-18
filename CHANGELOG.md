@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.5.0] - 2026-09-18
+
 ### Fixed
 
 - **A session reads the display once, and every route it builds answers to that one table.** A native
