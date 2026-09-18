@@ -121,6 +121,28 @@ struct SourcePrewarmAdoptionTests {
         #expect(read(reader, 32 * 1024) == 32 * 1024)
     }
 
+    /// A source that fits entirely inside the budget leaves nothing for a data connection to
+    /// fetch, so none is opened. The guard matters because a connection asked for the range past
+    /// the last byte is a 416, and the open would then look like a refusal.
+    @Test("a fully warmed source opens without any connection at all")
+    func fullyWarmedSourceOpensWithNoConnection() async throws {
+        SourcePrewarmStore.shared.clear()
+        let small: Int64 = 40 * 1024
+        let server = try #require(ThrottledOriginServer(totalSize: small))
+        defer { server.stop() }
+        await warm(server, bytes: 1 << 20)
+        let warmRequests = server.rangeRequestCount
+
+        let reader = AVIOReader(url: url(server))
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        #expect(read(reader, Int(small)) == Int32(small))
+
+        #expect(reader.resolvedByteSize == small)
+        #expect(server.rangeRequestCount == warmRequests,
+                "the open connected for a source it already held whole: \(server.requestedRanges)")
+    }
+
     /// A source nobody warmed keeps the cold path exactly as it was, byte for byte.
     @Test("an unwarmed source still opens from byte zero")
     func coldOpenIsUnchanged() async throws {
