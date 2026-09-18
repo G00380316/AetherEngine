@@ -10,6 +10,45 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.6.0] - 2026-09-18
+
+### Fixed
+
+- **A renderer path resumes a clock it did not stop.** An AirPlay route switch arrives as an audio
+  session interruption, and on the software and audio-only paths the session never came back: the
+  engine's auto-resume ran and said so (`autoResume=true`), and the field log's master clock stood at
+  10.81 s for the remaining two minutes with 3.79 s of decoded video in hand. The interruption path was
+  written for the native one, where AVPlayer owns both the audio session and the clock and AVFoundation
+  restores them; a renderer path owns both itself and nothing recovered either. Three gaps, all in the
+  same direction: `play()` re-rated the synchronizer only inside `if pausedByHost`, and a system
+  interruption never goes through `pause()`; the audio session was activated once per load and never
+  again; and `AVSampleBufferAudioRenderer`, which throws its queue away when the route changes under it,
+  posted that fact to nobody. A host pause, a rebuffer and an end-of-media park each keep their own
+  resume, an un-anchored clock is still never rate-changed, and a clock stopped by nothing on this side
+  is re-anchored where it stands. `[SWDiag]` now carries the synchronizer rate, because a stopped clock
+  and a running one whose timebase stalled under a deactivated session are the same `dclk=0.00` and two
+  different defects. ([#549](https://github.com/superuser404notfound/AetherEngine/issues/549))
+
+- **Only the native backend claims to hand a picture to an external screen.** External playback is an
+  AVPlayer feature and the wireless half of it is this engine serving its loopback to the receiver, so a
+  software session's picture cannot leave the device; its audio reaches a receiver only because
+  `AVSampleBufferAudioRenderer` follows the audio route. `externalPlaybackHoldsThePicture` read the route
+  alone, so such a session announced an external screen and latched the first-frame promise on it while
+  the picture was still on the phone. The property asks the backend first, and the routing line says what
+  a wireless route means on that backend, which is the sentence the person hearing a film they cannot see
+  needs. ([#550](https://github.com/superuser404notfound/AetherEngine/issues/550))
+
+- **The cue prewarm no longer runs where a seek is a linear read.** It seeks into the middle of the file
+  so libavformat loads the container index, priced as a byte-range read plus a seek that fails fast where
+  it cannot; but on a non-seekable pb libavformat implements a forward seek by reading and discarding.
+  Measured against a range-less HTTPS origin with `sequentialOrigin`: the prewarm reported success after
+  2.5 s having read the entire 30.9 MB file, the single unranged GET was spent, and the session died on
+  `VOD pump reached eof without producing anything`. With it skipped the same source plans on uniform
+  stride and plays. The planner already skipped its IRAP spacing scan two blocks below for this exact
+  reason. ([#550](https://github.com/superuser404notfound/AetherEngine/issues/550))
+
 ### Added
 
 - **One line per load naming what AVFoundation resolved from the audio the engine served.** The serving
