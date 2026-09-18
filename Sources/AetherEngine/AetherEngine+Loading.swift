@@ -682,6 +682,7 @@ extension AetherEngine {
         dolbyVisionRPUProfile: Int? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
+        sessionDisplayCaps: DisplayCapabilities,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
@@ -733,11 +734,11 @@ extension AetherEngine {
         } else {
             ingestReopenFactory = nil
         }
-        // AE#493: the same session table the format clamp used in `load`, so the label and the served
-        // route answer to one display. The host's Dolby Vision assertion is part of it on the platforms
-        // that have no per-mode capability API to read.
-        let sessionDisplayCaps = Self.displayCapabilities
-            .assertingDolbyVision(loadedOptions.panelPresentsDolbyVision)
+        // AE#493 / AE#535: the session table arrives as a parameter because it has to be the ONE the
+        // caller composed. This line used to re-read `Self.displayCapabilities`, and the comment above it
+        // claimed it was the table the format clamp had used; two reads of a property that answers at call
+        // time are not one table. Measured 203 ms apart on a device, they disagreed, and an HDR10+ title
+        // whose load had read `dv=true` was served media-direct with its master withheld.
         let session = HLSVideoEngine(
             url: url,
             sourceHTTPHeaders: sourceHTTPHeaders,
@@ -2232,6 +2233,24 @@ extension AetherEngine {
                         + " eligible=\(sessionDisplayEligibleForHDR) refusedLatch=\(Self.panelRefusedHDRMaster))",
                         category: .session)
                 }
+                let reloadDisplayCaps = Self.reloadDisplayCapabilities(
+                    observedAtLoad: sessionObservedDisplayCaps,
+                    hostAssertsDolbyVision: loadedOptions.panelPresentsDolbyVision,
+                    readNow: { Self.displayCapabilities })
+                // Read a second time for the log alone, never for the route: this is the one place the
+                // revoked answer can be SEEN, and without the line a rebuild that kept its HDR route looks
+                // the same as one that never met the window.
+                let displayCapsNow = Self.displayCapabilities
+                    .assertingDolbyVision(loadedOptions.panelPresentsDolbyVision)
+                if displayCapsNow != reloadDisplayCaps {
+                    EngineLog.emit(
+                        "[DisplayCapabilities] AE#535 rebuild routes on the load's table: hdr="
+                        + "\(reloadDisplayCaps.supportsHDR) hdr10=\(reloadDisplayCaps.supportsHDR10) "
+                        + "hlg=\(reloadDisplayCaps.supportsHLG) dv=\(reloadDisplayCaps.supportsDolbyVision) "
+                        + "(reading now: hdr=\(displayCapsNow.supportsHDR) hdr10=\(displayCapsNow.supportsHDR10) "
+                        + "hlg=\(displayCapsNow.supportsHLG) dv=\(displayCapsNow.supportsDolbyVision))",
+                        category: .session)
+                }
                 try await loadNative(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
@@ -2247,6 +2266,8 @@ extension AetherEngine {
                     dolbyVisionRPUProfile: sourceDolbyVisionRPUProfile,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
                     panelIsInHDRMode: reloadRoutingPanelHDR,
+                    // AE#535: the load's table, for the same reason as the panel answer above.
+                    sessionDisplayCaps: reloadDisplayCaps,
                     audioBridgeMode: loadedOptions.audioBridgeMode,
                     // isLive required: without it the reload rebuilds as VOD and HLSVideoEngine fails "cannot build segment plan" (device repro: KiKA).
                     isLive: loadedOptions.isLive,
