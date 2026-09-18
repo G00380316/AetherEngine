@@ -6783,6 +6783,17 @@ public final class AetherEngine: ObservableObject {
                     EngineLog.emit("[AetherEngine] AVAudioSession interruption ENDED shouldResume=\(shouldResume) otherAudio=\(session.isOtherAudioPlaying) resumeArmed=\(self.resumeAfterInterruption) autoResume=\(firing)", category: .engine)
                     if firing {
                         self.resumeAfterInterruption = false
+                        // AE#549: the native path gets its session back from AVFoundation, the renderer
+                        // paths own theirs and nothing reactivated it for them. An interrupted session
+                        // that is not made active again stops the audio device, and with it the
+                        // synchronizer timebase every software and audio-only session reads as its
+                        // master clock: the field log resumed on paper (`autoResume=true`) and stood
+                        // still for two minutes. Awaited, so the session is active before play() runs.
+                        if self.softwareHost != nil || self.audioHost != nil {
+                            EngineLog.emit("[AetherEngine] AE#549: reactivating the renderer audio session before the resume",
+                                           category: .engine)
+                            await self.activateRendererAudioSession()
+                        }
                         self.play()
                     }
                 }
