@@ -977,12 +977,23 @@ final class SoftwarePlaybackHost {
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
         // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
-        if pausedByHost {
+        switch RendererClockResume.onPlay(
+            hostPaused: pausedByHost,
+            clockArmed: clockArmed,
+            synchronizerRate: audioOutput?.rate ?? 0,
+            rebuffering: demuxDiag.snapshot.rebuffering,
+            parkedAtEndOfMedia: didParkClockAtEnd
+        ) {
+        case .resumeHostPause:
             pausedByHost = false
             _ = takePausedBeforeFirstFrame()
             if clockArmed {
                 audioOutput?.setRate(lastRate)
             }
+        case .restartStalledClock:
+            restartStalledClock()
+        case .none:
+            break
         }
         if !demuxLoopStarted, let aOut = audioOutput {
             aOut.attachVideoRenderer(renderer.videoRenderer)
@@ -1037,6 +1048,36 @@ final class SoftwarePlaybackHost {
                                        sourceVideoHeight: h > 0 ? h : 1080,
                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap,
                                        teletextPage: teletextPageForSubtitleTap)
+    }
+
+    #if DEBUG
+    /// AE#549 drill: stop the master clock the way an interrupted audio session does, leaving
+    /// `pausedByHost` alone. Nothing outside the drill may do this.
+    func stallClockForTesting() -> Bool {
+        guard let aOut = audioOutput, clockArmed else { return false }
+        aOut.pause()
+        return true
+    }
+
+    var clockRateForTesting: Float? { audioOutput?.rate }
+    #endif
+
+    /// AE#549: re-anchor a master clock that stopped without a pause of ours, where it stands.
+    ///
+    /// The one re-anchor this path can make: the demuxer is an audio lead ahead of the clock by now
+    /// and the sources this happens to are the ones that cannot seek backwards, so moving the clock
+    /// anywhere but onto itself would either skip content or ask for a rewind the source refuses.
+    /// The rate and the flush count go in the line because they are what the next field log needs to
+    /// separate a zeroed rate from a timebase that stalled under a deactivated audio session.
+    private func restartStalledClock() {
+        guard let aOut = audioOutput else { return }
+        EngineLog.emit(
+            "[SWHost] AE#549: the clock stopped without a pause of ours; restarting at "
+            + "\(String(format: "%.3f", aOut.currentTimeSeconds))s rate=\(lastRate) "
+            + "(was \(aOut.rate), renderer self-flushes=\(aOut.automaticFlushCount))",
+            category: .swPlayback
+        )
+        aOut.seekClock(to: aOut.currentTime, rate: lastRate)
     }
 
     func pause() {
@@ -2914,6 +2955,9 @@ final class SoftwarePlaybackHost {
             EngineLog.emit(
                 "[SWDiag] clk=\(String(format: "%.2f", clock)) "
                 + "dclk=\(dclk.isFinite ? String(format: "%.2f", dclk) : "-") "
+                // AE#549: a stopped clock and a running one whose timebase stalled under a
+                // deactivated audio session are the same "dclk=0.00" and different defects.
+                + "rate=\(String(format: "%.2f", self.audioOutput?.rate ?? 0)) "
                 + "aLead=\(lead.isFinite ? String(format: "%.2f", lead) : "-") "
                 + "vLead=\(videoLead.map { String(format: "%.2f", $0) } ?? "-") "
                 + "parkedPkts=\(d.parked) rebuf=\(d.rebuffering ? "y" : "n") "

@@ -1615,11 +1615,14 @@ extension AetherEngine {
 
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
     ///
+    /// Called once per load, and again when an interruption ends on a renderer path (AE#549): these
+    /// paths own the session, so nobody else hands it back to them.
+    ///
     /// The session calls run off the main actor and the load awaits them, so the session is active before the
     /// host that plays into it is built, as before. `setActive(true)` is an XPC round trip to mediaserverd, and
     /// iOS/tvOS 27 flag it as a hang risk on the main thread (AE#538): the same reasoning that moved `setCategory` off-main
     /// in #114 and the teardown deactivation in #215. Only the track lookup, which reads published state, stays here.
-    private func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
+    func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
         #if os(iOS) || os(tvOS)
         // Resolve the active audio track's channel count from the already-published track list.
         // so the HDMI / AirPlay link negotiates at the correct channel count.

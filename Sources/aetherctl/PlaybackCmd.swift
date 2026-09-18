@@ -640,18 +640,23 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // exists (the foreground retune's hold-paused policy). Resumed at tick 8.
             print("  HOSTCALL pause() right after load")
             engine.pause()
-        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still":
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still", "stallclock":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
 
     var rateHoldAfterResume: Float?
     var rateHoldAtEnd: Float?
+    // AE#549: the clock at the stall, just before the resume, and at the last tick.
+    var stallClockStalled = false
+    var stallClockAtStall: Double?
+    var stallClockBeforeResume: Double?
+    var stallClockAtEnd: Double?
     var monitor: AudioContinuityMonitor?
     var tapTask: Task<Void, Never>?
     if audioStats {
@@ -1013,6 +1018,25 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                 engine.play()
             }
         }
+        // AE#549: stop the master clock behind the host's back at tick 4, the way an interrupted audio
+        // session does, then let a plain play() try to bring it back. The interruption itself cannot be
+        // staged on macOS; its outcome can.
+        if hostCalls.contains("stallclock") {
+            if tick == 4 {
+                stallClockStalled = engine.stallRendererClockForTesting()
+                stallClockAtStall = engine.currentTime
+                print(String(format: "  HOSTCALL AE#549 stopped the master clock behind the host's back at %.2f%@",
+                             engine.currentTime,
+                             stallClockStalled ? "" : " -- NO renderer clock on this backend"))
+            }
+            if tick == 6 { stallClockBeforeResume = engine.currentTime }
+            if tick == 7 {
+                print(String(format: "  HOSTCALL play() on the stalled clock (playhead %.2f, rate %.2f)",
+                             engine.currentTime, engine.rendererClockRateForTesting ?? -1))
+                engine.play()
+            }
+            if tick >= 9 { stallClockAtEnd = engine.currentTime }
+        }
         if hostCalls.contains("pausestart"), tick == 8 {
             print(String(format: "  HOSTCALL play() after the start pause (playhead %.2f)", engine.currentTime))
             engine.play()
@@ -1192,6 +1216,24 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         if let atEnd = rateHoldAtEnd, abs(atEnd - Issue436RateHold.rate) > 0.01 {
             print(String(format: "VERDICT: #436 held across the resume but lost later (%.2f at the last tick); "
                          + "a rebuild in between dropped it", atEnd))
+            return 4
+        }
+    }
+    if hostCalls.contains("stallclock") {
+        guard stallClockStalled, let atStall = stallClockAtStall,
+              let beforeResume = stallClockBeforeResume, let atEnd = stallClockAtEnd else {
+            print("VERDICT: AE#549 drill inconclusive (no renderer clock to stall, "
+                  + "or the session ended before the resume)")
+            return 5
+        }
+        print(String(format: "AE#549 stalled clock: %.2f at the stall, %.2f before the resume, %.2f at the last tick",
+                     atStall, beforeResume, atEnd))
+        if beforeResume > atStall + 0.25 {
+            print("VERDICT: AE#549 drill inconclusive (the clock kept running through the stall)")
+            return 5
+        }
+        if atEnd <= beforeResume + 0.25 {
+            print("VERDICT: AE#549 reproduced (play() could not restart a clock the host did not stop)")
             return 4
         }
     }
