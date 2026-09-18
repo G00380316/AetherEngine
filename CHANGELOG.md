@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **One line per load naming what AVFoundation resolved from the audio the engine served.** The serving
+  line has always carried the first half of the exchange (`audioLang=`, the master's
+  `EXT-X-MEDIA:TYPE=AUDIO` tag); the second half, the audible media-selection group AVKit reads its audio
+  menu from, was never read here (every `loadMediaSelectionGroup` in the engine asks for `.legible`), so a
+  report of "Not Specified" could only be answered as far as our own manifest, which is the half that was
+  never in doubt. The readback runs after readiness, never selects anything, and compares the two tags
+  through the engine's ISO-synonym table, because AVFoundation normalizes what it is handed (matroska
+  "ger" reads back as "de") and a raw compare would flag every second German title:
+  `[AetherEngine] AE#458 audible readback: served=deu, master, options=1, resolved="German" (deu)`.
+  A declared rendition that comes back as no group names the consequence a viewer sees; a media-direct
+  session with nothing declared reads `no audible group, as declared` and is not a finding.
+  ([#458](https://github.com/superuser404notfound/AetherEngine/issues/458))
 
 ## [7.5.0] - 2026-09-18
 
