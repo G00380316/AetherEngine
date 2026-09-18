@@ -178,6 +178,15 @@ func printUsage() {
                      in-place media-playlist fallback (-11868 / -11848),
                      not the item.
 
+    Flags (play only, AE#551):
+      --prewarm      Warm the source before loading it, the way a host
+                     warms the next episode. Takes the engine's default
+                     budget (8 MB).
+      --prewarm-bytes N
+                     Warm N bytes instead. Measure this against a REAL
+                     origin: on loopback the round trip it removes costs
+                     nothing, which is the trap #281 was built out of.
+
     Flags (serve / seektest):
       --throttle-kbps N
                      TEST-ONLY slow-CDN simulation: cap source-IO
@@ -810,6 +819,12 @@ if first == "play" {
         playHeaders[String(spec[..<colon]).trimmingCharacters(in: .whitespaces)] =
             String(spec[spec.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
     }
+    // AE#551: warm the source before loading it, which is what a host does for the next episode.
+    // Bare `--prewarm` takes the engine's default budget, `--prewarm-bytes N` names one. Measuring
+    // this needs a real origin: against loopback the round trip it removes costs nothing to begin
+    // with, which is the trap #281 was built out of.
+    let prewarmRequested = takeFlag("--prewarm", from: &rest)
+    let prewarmBytes = takeIntFlag("--prewarm-bytes", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -825,6 +840,25 @@ if first == "play" {
         // The blunt answer the engine documents, which is the one a harness wants: every origin.
         EngineTLS.serverTrustEvaluator = { _ in true }
         print("[aetherctl] AE#495: accepting any server certificate for this run")
+    }
+    if prewarmRequested || prewarmBytes != nil {
+        let target = parseSourceURL(urlArg)
+        let budget = prewarmBytes ?? AetherEngine.defaultPrewarmByteBudget
+        let started = Date()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            let report = await AetherEngine.prewarm(url: target, httpHeaders: playHeaders,
+                                                    byteBudget: budget)
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            if let declined = report.declined {
+                print("[aetherctl] prewarm declined after \(ms)ms: \(declined)")
+            } else {
+                print("[aetherctl] prewarm retained \(report.retainedBytes)B of "
+                      + "\(report.contentLength.map(String.init) ?? "?")B in \(ms)ms")
+            }
+            done.signal()
+        }
+        done.wait()
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars,

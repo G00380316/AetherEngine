@@ -414,6 +414,32 @@ try await player.reloadAtCurrentPosition()
 | `AetherEngine.probeDetectingAtmos(url:options:atmosDetection:)` | `probe` plus a bounded decode pass that authoritatively resolves E-AC-3 JOC for an Atmos badge. Strictly more expensive; never on the playback-start path. Decode-side failures degrade to "not confirmed" rather than throwing. |
 | `AetherEngine.externalSubtitleTrackIDBase` | `100_000`. Synthetic ids of external subtitle tracks start here. |
 
+### Warming a source before it is loaded
+
+```swift
+await AetherEngine.prewarm(url: nextEpisodeURL, httpHeaders: headers)
+```
+
+A cold open is not free. On a non-fast-start MP4 it is two to three sequential round trips before the first sample read, and on a slow origin the first byte of the data connection is the whole perceived start time. A host whose UI knows what is coming next can spend those seconds in advance.
+
+| Symbol | Contract |
+| --- | --- |
+| `AetherEngine.prewarm(url:httpHeaders:byteBudget:)` | `nonisolated static async -> SourcePrewarmReport`. Discardable. Fetches the opening bytes of a source the engine is not playing, so the next `load()` of that exact URL adopts them instead of fetching them. No engine instance, no audio session, no layer: a host warms while its player is still on the current item. Cancelling the task cancels the fetch and stores nothing. |
+| `AetherEngine.isPrewarmed(url:)` | `nonisolated static -> Bool`. Whether that URL is warm right now, without consuming it. False again after the load that adopted it. |
+| `AetherEngine.discardPrewarmedSources()` | `nonisolated static`. Drops every warmed source, for a host leaving the context they were made for. |
+| `AetherEngine.defaultPrewarmByteBudget` | `8 * 1024 * 1024`. A byte budget and not a duration, because a duration needs the bitrate, which is known only after the probe this is trying to get ahead of. |
+| `SourcePrewarmReport` | `retainedBytes`, `contentLength`, `declined`, `isWarm`. `declined` is one sentence naming why nothing was retained, and the engine logs it either way. |
+
+What it fetches: one ranged GET from byte zero for the budget, plus a second one for the trailing object only where the head says a cold open would go looking for it (an MP4 whose `moov` sits behind the media). Matroska is never given a second request, because it reads no cues at open whether they sit at the front or the back.
+
+Three limits are part of the contract rather than implementation detail:
+
+- **It never queues for the origin.** A warm takes a request slot only if one is free right now, and declines when the origin is metered down to one request at a time or is pacing the engine (`maxConcurrentSourceRequests`, #377). A prewarm that would have to wait for the playing session's uplink has stopped helping.
+- **The bytes live in memory and only until they are used.** They do not survive the app, and the first `load()` of that URL takes them rather than copying them. This is a head start, not an offline download, and there is no disk cache behind it.
+- **`LoadOptions.nativeRemoteHLS` is out of scope.** On that route AVPlayer issues the requests and the engine sees none of them, so there is nothing to adopt. Warming helps the paths the engine fetches on itself: the loopback native path, the software host, and the side demuxers.
+
+The URL is the key, matched exactly. A signed URL warmed under one signature is not adopted under another, which is the only reading that cannot serve the wrong bytes.
+
 `IOReader` is the custom-source protocol: `read`, `seek`, `close` are required; `cancel()`, `makeIndependentReader()` and `discImageProbeEnabled` have defaults that unlock teardown-unblocking, embedded subtitles plus scrub stills, and ISO/UDF probing respectively. Calls arrive on the engine's demux thread, each inside an autorelease pool the engine opens, so a reader built on `FileHandle` or `NSData` does not strand one autoreleased object per read for the length of a session. Full contract in [formats.md](formats.md).
 
 ## Transport

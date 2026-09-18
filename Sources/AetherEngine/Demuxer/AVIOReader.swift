@@ -1088,16 +1088,40 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             winCond.lock()
             openPhaseActive = true
             winCond.unlock()
+            // #551: bytes a host warmed for this source before anything asked to play it. When
+            // they are here, this open owes the origin nothing for the span they cover.
+            let warm = adoptPrewarmedSource()
             // #281: issued BEFORE the data connection so it overlaps the round trip that follows,
             // rather than queueing behind it. It asks for a suffix range, which needs no size and
-            // therefore needs nothing this open has learned yet.
-            startTailPrefetch()
+            // therefore needs nothing this open has learned yet. A warm that already carries the
+            // trailing object has no use for it.
+            if warm?.tail == nil {
+                startTailPrefetch()
+            }
             // Playback path. The persistent connection's `Range: bytes=0-` request is itself
             // the size probe: its 206 Content-Range is folded into fileSize by
             // persistentReceivedResponse (issue #70), so the common case skips the dedicated
             // probeFileSize() round-trip (and its HEAD fallback, the request some origins 429).
-            startPersistentConnection(at: 0, boundedTo: boundedInitialFetch)
-            let gotData = awaitFirstPersistentData()
+            //
+            // #551: a warm open moves that connection to the warm frontier rather than skipping it.
+            // Playback needs the bytes behind the head either way, and issuing it here is what
+            // overlaps its round trip with the parse that the warm bytes are already serving.
+            let warmFrontier = warm?.head.end ?? 0
+            let gotData: Bool
+            let openPrefix: [UInt8]
+            if let warm {
+                if warmFrontier < warm.contentLength {
+                    startPersistentConnection(at: warmFrontier, boundedTo: boundedInitialFetch)
+                }
+                // The open has its first bytes in hand, so there is nothing to wait for. Waiting
+                // anyway would spend the round trip this whole feature exists to remove.
+                gotData = true
+                openPrefix = Array(warm.head.data.prefix(16))
+            } else {
+                startPersistentConnection(at: 0, boundedTo: boundedInitialFetch)
+                gotData = awaitFirstPersistentData()
+                openPrefix = firstWindowPrefix()
+            }
             // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. A live origin serves the
             // finite #EXTM3U body at HTTP 200 and closes the connection; the endless-feed reader then
             // re-fetches that body forever. Those reconnects look PRODUCTIVE (a full body at 200, and every
@@ -1106,7 +1130,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // terminal state. Fail closed here, before the reconnect loop is ever entered: a raw media
             // container never begins with '#' (TS syncs on 0x47; MP4/MKV open with binary box/EBML markers),
             // so an #EXTM3U prefix is an unambiguous misroute. The host is pointed at the HLS entry points.
-            if isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(firstWindowPrefix()) {
+            if isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(openPrefix) {
                 EngineLog.emit("[AVIOReader] HLS playlist body on the raw live path (AE#140); stopping here. A URL source is routed onto the live ingest by load() (AE#363); a custom reader keeps the typed rejection.", category: .demux)
                 markClosed()
                 close()
@@ -1116,7 +1140,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // neither probe an m3u8 behind a custom pb (no extension / MIME hint reaches the hls
             // probe) nor fetch a variant, so avformat_open_input dies with AVERROR_INVALIDDATA.
             // Fail typed instead; load() reroutes the URL onto the native remote-HLS bypass.
-            if !isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(firstWindowPrefix()) {
+            if !isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(openPrefix) {
                 EngineLog.emit("[AVIOReader] HLS playlist body on the VOD loopback path (AE#154); rerouting to the native remote-HLS bypass.", category: .demux)
                 markClosed()
                 close()
@@ -2444,6 +2468,35 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     // MARK: - Cold-start spans (#281)
+
+    /// #551: take whatever a host warmed for this source and install it as this open's resident
+    /// bytes.
+    ///
+    /// Head, tail and size travel together because the open needs all three to stay off the
+    /// network: the spans answer the parse reads, and the size is what keeps `resolveOptimisticOpen`
+    /// from falling back to the probe ladder, which would spend the round trip the warm just saved.
+    ///
+    /// A take, not a copy. The bytes are this reader's from here on, and leaving a second copy in
+    /// the store would hold megabytes for a source that is now playing.
+    private func adoptPrewarmedSource() -> PrewarmedSource? {
+        guard !isLive else { return nil }
+        guard let warm = SourcePrewarmStore.shared.take(for: url) else { return nil }
+        // The head is the one span an open cannot do without, and it is only usable where it says
+        // it starts: at zero, which is where the parse begins.
+        guard warm.head.start == 0, !warm.head.isEmpty, warm.contentLength > 0 else { return nil }
+        winCond.lock()
+        headSpan = warm.head.data
+        if let tail = warm.tail { tailSpan = tail }
+        fileSize = warm.contentLength
+        winCond.unlock()
+        SourceContentLengthCache.store(warm.contentLength, for: url)
+        EngineLog.emit(
+            "[AVIOReader] \(label) adopted a prewarmed source: head=\(warm.head.data.count)B "
+            + "tail=\(warm.tail?.data.count ?? 0)B of \(warm.contentLength)B; "
+            + "the data connection starts at \(warm.head.end) (#551)",
+            category: .demux)
+        return warm
+    }
 
     /// Fire-and-forget suffix fetch for the last `tailPrefetchBytes` of the source, running
     /// alongside the open connection.
