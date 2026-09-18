@@ -12,6 +12,23 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.4.0] - 2026-09-18
+
+### Fixed
+
+- **Dolby Vision over AV1 could not be muxed at all, and Profile 10.1 was packaged as if it had no
+  base layer.** Profile 10.0 is the AV1 counterpart of HEVC Profile 5: IPT-PQ-c2 with no compatible
+  base layer, so its sample entry has to be the `dav1` that MP4RA registers for it. FFmpeg carries
+  that tag in neither of its two mp4 tables, so `avformat_write_header` refused the requested tag
+  with EINVAL and the route never produced an init segment; the same gap made a `dav1` MP4 probe as
+  "unknown codec" on the way in. FFmpegBuild 3.4.0 adds both rows and the engine pins it. Profile
+  10.1 carries an HDR10-compatible base layer and is now packaged the way Apple's HLS authoring spec
+  asks and the way this engine already packaged 10.4: an `av01` sample entry with
+  `SUPPLEMENTAL-CODECS="dav1.10.XX/db1p"` and `VIDEO-RANGE=PQ`, rather than a bare `dav1` that left a
+  client which cannot read Dolby Vision with nothing to fall back to. Affects hosts with hardware AV1
+  decode; on a device without it an AV1 Profile 10.0 source still fails fast rather than rendering
+  green. ([#547](https://github.com/superuser404notfound/AetherEngine/issues/547))
+
 ## [7.3.0] - 2026-09-18
 
 ### Added
