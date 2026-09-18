@@ -180,4 +180,52 @@ struct SourcePrewarmAdoptionTests {
         #expect(opened.contains(where: { $0.start == 0 }),
                 "the second open adopted bytes the first one had already taken: \(opened)")
     }
+
+    /// The URL is only half the request. An origin that varies on Referer or Authorization answers
+    /// a different body under the same URL, and nothing about the bytes would show it, so a session
+    /// whose headers differ from the warm's opens cold rather than adopting someone else's response.
+    @Test("a warm fetched with different headers is not adopted")
+    func headerMismatchOpensCold() async throws {
+        SourcePrewarmStore.shared.clear()
+        let server = try #require(ThrottledOriginServer(totalSize: fileSize))
+        defer { server.stop() }
+        _ = await SourcePrewarmFetcher.warm(url: url(server),
+                                            extraHeaders: ["Referer": "http://portal.example/"],
+                                            byteBudget: warmBytes, into: .shared)
+        let warmRequests = server.rangeRequestCount
+
+        let reader = AVIOReader(url: url(server))   // no headers: a different request
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        await waitForRequest(server, startingAt: 0)
+
+        let opened = Array(server.requestedRanges.dropFirst(warmRequests))
+        #expect(opened.contains(where: { $0.start == 0 }),
+                "the open adopted a warm fetched under different headers: \(opened)")
+    }
+
+    /// The one adopted fact that could be wrong and could never be corrected: the size. The
+    /// write-once rule treats any positive `fileSize` as settled, so a warm that belongs to a
+    /// different response would fix a wrong EOF point for the whole session. The connection that is
+    /// actually serving the session gets to overrule it.
+    @Test("a connection that states a different size drops the warm")
+    func sizeMismatchDropsTheWarm() async throws {
+        SourcePrewarmStore.shared.clear()
+        let server = try #require(ThrottledOriginServer(totalSize: fileSize))
+        defer { server.stop() }
+        await warm(server, bytes: warmBytes)
+        // The source is not what it was when it was warmed.
+        let restated: Int64 = 32 * 1024 * 1024
+        server.setTotalSize(restated)
+
+        let reader = AVIOReader(url: url(server))
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        for _ in 0..<100 where reader.resolvedByteSize != restated {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        #expect(reader.resolvedByteSize == restated,
+                "the session kept the warm's size over the one its own connection stated")
+    }
 }

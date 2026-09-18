@@ -906,6 +906,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var tailPrefetchStartedAt = DispatchTime.now()
 
     /// One log line per span per open, not per serve. winCond-guarded (set from the read loop).
+    /// #551: the size this open took from a warm rather than from a response header. A size that
+    /// came from a DIFFERENT response than the one now serving the session is the one adopted fact
+    /// that could be wrong and could never be corrected, because the write-once rule below treats
+    /// any positive `fileSize` as settled. Remembered so the frontier connection's own
+    /// `Content-Range` can be checked against it, once.
+    private var adoptedWarmSize: Int64?
     private var headSpanServeLogged = false
     private var headSpanPlaybackServeLogged = false
     private var tailSpanServeLogged = false
@@ -1192,6 +1198,29 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                             EngineLog.emit("[AVIOReader] Persistent open (post-probe): no data within 15s, proceeding to read-loop reconnect", category: .demux)
                         }
                     }
+                }
+            }
+            // #551: a warm open asserts `gotData` instead of observing it, which is the whole point
+            // (nothing waits on a first byte), and the cost is that the open-time refusal ladder
+            // above never runs for it. A source whose token expired between the warm and the play
+            // would then parse happily out of warm bytes and die several seconds later as an
+            // untyped read failure instead of as the 401 it is.
+            //
+            // Checked, not waited for: if the refusal has already landed by the time the open gets
+            // here, it is thrown typed exactly as the cold path throws it, and if it has not, the
+            // read loop's ladder still ends the session correctly, just later and less precisely.
+            // The alternative, waiting for the answer, is the round trip this feature removes.
+            if warm != nil {
+                winCond.lock()
+                let refusal = (connEnded && Self.isResolvedExpiryStatus(connStatus)) ? connStatus : 0
+                winCond.unlock()
+                if refusal != 0 {
+                    EngineLog.emit(
+                        "[AVIOReader] \(label) the warm open found the source already refused: "
+                        + "HTTP \(refusal); failing the open typed (#551)", category: .demux)
+                    markClosed()
+                    close()
+                    throw AVIOReaderError.httpStatus(refusal)
                 }
             }
             if !tookFallback && !gotData {
@@ -2484,10 +2513,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // The head is the one span an open cannot do without, and it is only usable where it says
         // it starts: at zero, which is where the parse begins.
         guard warm.head.start == 0, !warm.head.isEmpty, warm.contentLength > 0 else { return nil }
+        // The URL is only half the request. An origin that varies on Referer, User-Agent or
+        // Authorization answers a different body, and a different size, under the same URL, and
+        // nothing about the bytes themselves would show it. A session whose headers differ from the
+        // warm's opens cold instead.
+        guard warm.requestHeaders == extraHeaders else {
+            EngineLog.emit(
+                "[AVIOReader] \(label) a warm exists for this URL but was fetched with different "
+                + "headers; opening cold (#551)", category: .demux)
+            return nil
+        }
         winCond.lock()
         headSpan = warm.head.data
         if let tail = warm.tail { tailSpan = tail }
         fileSize = warm.contentLength
+        adoptedWarmSize = warm.contentLength
         winCond.unlock()
         SourceContentLengthCache.store(warm.contentLength, for: url)
         EngineLog.emit(
@@ -3184,6 +3224,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // (fileSize <= 0), current-gen only, and never for live (whose length is
         // non-authoritative). The response precedes any body and no read() reads fileSize
         // until open() returns, so this write is ordered behind winCond just like the data.
+        // #551: the warm's size meets the connection that is actually serving this session. They
+        // disagree only when the warm belongs to a different response, and then the warm is the
+        // wrong one: these bytes are the ones being played. Drop the whole warm rather than keep
+        // spans whose offsets belong to another body, and let the write-once rule below take the
+        // real size.
+        if generation == connGeneration, !isLive, let adopted = adoptedWarmSize,
+           let total = Self.sizeFromResponse(http, requestedOffset: requestedOffset), total != adopted {
+            EngineLog.emit(
+                "[AVIOReader] \(label) the warm said \(adopted)B, this connection says \(total)B; "
+                + "dropping the prewarmed bytes (#551)", category: .demux)
+            headSpan = Data()
+            tailSpan = nil
+            fileSize = 0
+            adoptedWarmSize = nil
+        }
         if generation == connGeneration, !isLive, fileSize <= 0,
            let total = Self.sizeFromResponse(http, requestedOffset: requestedOffset) {
             fileSize = total

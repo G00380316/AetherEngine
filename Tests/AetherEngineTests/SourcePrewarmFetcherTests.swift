@@ -129,4 +129,46 @@ struct SourcePrewarmFetcherTests {
         #expect(report.retainedBytes == Int(small))
         #expect(report.contentLength == small)
     }
+
+    /// The other half of the runaway-download door. The 200 check stops an origin that ignores
+    /// `Range` outright; this stops the one that answers 206 with MORE than was asked for, which is
+    /// what an edge that rounds a range up to its own chunk boundary does. Without the check the
+    /// body is buffered to whatever the header claimed, which on a film is the film.
+    @Test("a 206 wider than the request is refused at the header")
+    func overServingOriginIsRefused() async throws {
+        let wide = ThrottledOriginServer(totalSize: fileSize, ignoreRangeEnd: true)
+        let server = try #require(wide)
+        defer { server.stop() }
+        let store = SourcePrewarmStore(totalByteCap: 8 << 20)
+
+        let report = await SourcePrewarmFetcher.warm(
+            url: url(server), extraHeaders: [:], byteBudget: 128 * 1024, into: store)
+
+        #expect(!report.isWarm)
+        #expect(report.declined?.contains("asked for") == true, "declined: \(report.declined ?? "nil")")
+        #expect(store.retainedBytes == 0)
+    }
+
+    /// A warm whose task was cancelled before it ever ran must return, not hang. The cancellation
+    /// handler fires on the spot in that case, so the fetch can end before the caller has installed
+    /// the handler that resumes it, and an outcome dropped there would strand the caller forever
+    /// and hold the origin slot with it.
+    @Test("a warm that starts already cancelled returns instead of hanging")
+    func alreadyCancelledWarmReturns() async throws {
+        let server = try #require(ThrottledOriginServer(totalSize: fileSize))
+        defer { server.stop() }
+        let store = SourcePrewarmStore(totalByteCap: 8 << 20)
+        let target = url(server)
+
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            return await SourcePrewarmFetcher.warm(
+                url: target, extraHeaders: [:], byteBudget: 128 * 1024, into: store)
+        }
+        task.cancel()
+        let report = await task.value
+
+        #expect(!report.isWarm)
+        #expect(store.retainedBytes == 0)
+    }
 }

@@ -37,6 +37,18 @@ enum SourcePrewarmFetcher {
         delegate: EngineTLS.sessionDelegate,
         delegateQueue: nil)
 
+    /// One warm at a time, process-wide.
+    ///
+    /// The origin slot a warm takes is held for its whole body, not just for the round trip, so a
+    /// host warming three items ahead would otherwise hold three slots through three multi-second
+    /// transfers while a session is playing.
+    ///
+    /// Queued and not declined, which looks like a contradiction of the rule this path follows
+    /// everywhere else and is not: waiting here costs the origin nothing, because a queued warm
+    /// holds no slot and has issued no request. What must never queue is a REQUEST against the
+    /// origin, and that rule is untouched below.
+    private static let queue = WarmQueue()
+
     static func warm(url: URL,
                      extraHeaders: [String: String],
                      byteBudget: Int,
@@ -48,11 +60,13 @@ enum SourcePrewarmFetcher {
         guard !OriginRequestBudget.shared.requiresSerialRequests(url) else {
             return decline(url, "this origin is down to one request at a time (#377)")
         }
+        await queue.acquire()
+        defer { Task { await queue.release() } }
 
         let head: RangeFetch.Result
         do {
             head = try await RangeFetch.run(url: url, extraHeaders: extraHeaders,
-                                            range: "bytes=0-\(budget - 1)",
+                                            requestedStart: 0, requestedLength: budget,
                                             label: "prewarm head", session: session)
         } catch let error as PrewarmDecline {
             return decline(url, error.reason)
@@ -70,7 +84,7 @@ enum SourcePrewarmFetcher {
             let start = head.total - Int64(tailBytes)
             if let fetched = try? await RangeFetch.run(
                 url: url, extraHeaders: extraHeaders,
-                range: "bytes=\(start)-\(head.total - 1)",
+                requestedStart: start, requestedLength: tailBytes,
                 label: "prewarm tail", session: session),
                fetched.range.start == start {
                 tail = ResidentSpan(start: start, data: fetched.body)
@@ -83,7 +97,8 @@ enum SourcePrewarmFetcher {
 
         let warmed = PrewarmedSource(head: ResidentSpan(start: 0, data: head.body),
                                      tail: tail,
-                                     contentLength: head.total)
+                                     contentLength: head.total,
+                                     requestHeaders: extraHeaders)
         guard store.store(warmed, for: url) else {
             return decline(url, "\(warmed.byteCount) bytes exceed the prewarm store's cap")
         }
@@ -124,23 +139,32 @@ enum RangeFetch {
 
     static func run(url: URL,
                     extraHeaders: [String: String],
-                    range: String,
+                    requestedStart: Int64,
+                    requestedLength: Int,
                     label: String,
                     session: URLSession) async throws -> Result {
         guard let ticket = OriginRequestBudget.shared.tryAcquire(for: url, label: label) else {
             throw PrewarmDecline(reason: "no origin request slot free (#377)")
         }
         var request = URLRequest(url: url)
-        request.setValue(range, forHTTPHeaderField: "Range")
+        request.setValue("bytes=\(requestedStart)-\(requestedStart + Int64(requestedLength) - 1)",
+                         forHTTPHeaderField: "Range")
         for (k, v) in extraHeaders { request.setValue(v, forHTTPHeaderField: k) }
 
-        let delegate = RangeFetchDelegate(extraHeaders: extraHeaders)
+        let delegate = RangeFetchDelegate(extraHeaders: extraHeaders,
+                                          requestedStart: requestedStart,
+                                          requestedLength: requestedLength)
         let task = session.dataTask(with: request)
         task.delegate = delegate
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Result, Error>) in
-                delegate.onOutcome = { outcome in
+                // Installed through the delegate's own lock, and it replays an outcome that has
+                // already landed. `withTaskCancellationHandler` runs `onCancel` on the spot when
+                // the task is ALREADY cancelled, so `task.cancel()` can reach the delegate before
+                // this line: an outcome dropped there would strand this continuation for good, and
+                // the origin ticket with it.
+                delegate.installOutcomeHandler { outcome in
                     OriginRequestBudget.shared.release(ticket)
                     switch outcome {
                     case .body(let result): continuation.resume(returning: result)
@@ -162,16 +186,50 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
     }
 
     private let extraHeaders: [String: String]
+    private let requestedStart: Int64
+    private let requestedLength: Int
     private var buffer = Data()
     private var contentRange: (start: Int64, end: Int64, total: Int64)?
     private var rejection: String?
 
-    /// Called exactly once, whatever happened. A caller is suspended on it, so a silent failure
-    /// would be a continuation that never resumes.
-    var onOutcome: ((Outcome) -> Void)?
+    /// Guards the handoff between the caller's thread, which installs the handler, and the
+    /// session's delegate queue, which produces the outcome. Either can be first.
+    private let handoff = NSLock()
+    private var onOutcome: ((Outcome) -> Void)?
+    private var landed: Outcome?
 
-    init(extraHeaders: [String: String]) {
+    init(extraHeaders: [String: String], requestedStart: Int64, requestedLength: Int) {
         self.extraHeaders = extraHeaders
+        self.requestedStart = requestedStart
+        self.requestedLength = requestedLength
+    }
+
+    /// Install the handler, and fire it at once if the outcome has already landed. Called exactly
+    /// once per fetch, and the handler runs exactly once whichever side won.
+    func installOutcomeHandler(_ handler: @escaping (Outcome) -> Void) {
+        handoff.lock()
+        if let landed {
+            self.landed = nil
+            handoff.unlock()
+            handler(landed)
+            return
+        }
+        onOutcome = handler
+        handoff.unlock()
+    }
+
+    private func deliver(_ outcome: Outcome) {
+        handoff.lock()
+        guard let handler = onOutcome else {
+            // The caller has not installed its handler yet: hold the outcome for it rather than
+            // dropping it on the floor.
+            landed = outcome
+            handoff.unlock()
+            return
+        }
+        onOutcome = nil
+        handoff.unlock()
+        handler(outcome)
     }
 
     func urlSession(_ session: URLSession,
@@ -223,19 +281,34 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
             completionHandler(.cancel)
             return
         }
+        // The served range has to be the one that was asked for, or the part of it the source has.
+        // A 206 that starts elsewhere would put every later offset in the span at the wrong place,
+        // and a 206 WIDER than the request is the same runaway download the 200 check above exists
+        // to stop: an edge that rounds a range up to its own chunk boundary would otherwise be
+        // buffered in full before anything could look at the size. This is the check the engine's
+        // suffix prefetch already makes (`AVIOReader.suffixRangeStart`), which was built without.
+        let servedLength = parsed.end - parsed.start + 1
+        guard parsed.start == requestedStart, servedLength <= Int64(requestedLength) else {
+            rejection = "Content-Range: \(value) is not the bytes=\(requestedStart)-"
+                + "\(requestedStart + Int64(requestedLength) - 1) that was asked for"
+            completionHandler(.cancel)
+            return
+        }
         contentRange = parsed
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let expected = contentRange.map({ Int($0.end - $0.start + 1) }), buffer.count < expected else { return }
-        buffer.append(data)
+        guard let expected = contentRange.map({ Int($0.end - $0.start + 1) }),
+              buffer.count < expected else { return }
+        // Clamped rather than appended whole: an origin that over-delivers its own promise would
+        // otherwise grow the buffer past it and then be reported as a SHORT body, which is the one
+        // sentence a reporter would paste.
+        buffer.append(data.prefix(expected - buffer.count))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        let outcome = self.outcome(error: error)
-        onOutcome?(outcome)
-        onOutcome = nil
+        deliver(outcome(error: error))
     }
 
     private func outcome(error: Error?) -> Outcome {
@@ -266,5 +339,32 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         guard span.count == 2, let start = Int64(span[0]), let end = Int64(span[1]),
               start >= 0, end >= start, total > end else { return nil }
         return (start, end, total)
+    }
+}
+
+
+/// Serialises warms without holding anything while a caller waits its turn (#551).
+///
+/// An actor rather than a lock because the wait has to suspend rather than block: a warm runs on
+/// whatever task the host gave it, and blocking that thread is the one thing a library must not do
+/// to its host.
+actor WarmQueue {
+    private var busy = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        guard busy else {
+            busy = true
+            return
+        }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func release() {
+        guard !waiting.isEmpty else {
+            busy = false
+            return
+        }
+        waiting.removeFirst().resume()
     }
 }

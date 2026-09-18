@@ -15,6 +15,11 @@ struct PrewarmedSource: Sendable {
     /// a response header to learn it. Not optional: a source whose size the warm did not resolve
     /// cannot be adopted without putting the open back on the network, so it is never stored.
     let contentLength: Int64
+    /// The headers the warm was fetched with. The URL is only half of a request: an origin that
+    /// varies on Referer, User-Agent or Authorization can answer two different bodies, and two
+    /// different sizes, under one URL. A session whose headers differ therefore does not adopt
+    /// these bytes, because nothing here could tell that they are the wrong ones.
+    let requestHeaders: [String: String]
 
     var byteCount: Int { head.data.count + (tail?.data.count ?? 0) }
 }
@@ -46,8 +51,32 @@ final class SourcePrewarmStore: @unchecked Sendable {
     private var order: [String] = []
     private var _retainedBytes = 0
 
+    /// The one hoard of bytes in the engine that no session owns.
+    ///
+    /// Every other cache belongs to a playing session and dies with it; these belong to an item
+    /// nobody has asked to play, and a host that warms three of them and plays none holds them
+    /// until it remembers to say otherwise. So this is the one place a memory-pressure hook is
+    /// worth its weight: under pressure, bytes whose only purpose is to make a future start faster
+    /// are the cheapest thing in the process to give back.
+    private let pressureSource: DispatchSourceMemoryPressure
+
     init(totalByteCap: Int = SourcePrewarmStore.defaultTotalByteCap) {
         self.totalByteCap = totalByteCap
+        pressureSource = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: DispatchQueue.global(qos: .utility))
+        pressureSource.setEventHandler { [weak self] in
+            guard let self, self.retainedBytes > 0 else { return }
+            EngineLog.emit(
+                "[SourcePrewarm] memory pressure: dropping \(self.retainedBytes) warmed bytes (#551)",
+                category: .demux)
+            self.clear()
+        }
+        pressureSource.resume()
+    }
+
+    deinit {
+        pressureSource.cancel()
     }
 
     var retainedBytes: Int {

@@ -17,7 +17,8 @@ struct SourcePrewarmStoreTests {
     private func entry(head: Int, at start: Int64 = 0, contentLength: Int64 = 1 << 30) -> PrewarmedSource {
         PrewarmedSource(head: ResidentSpan(start: start, data: Data(count: head)),
                         tail: nil,
-                        contentLength: contentLength)
+                        contentLength: contentLength,
+                        requestHeaders: [:])
     }
 
     @Test("a stored source is served once and then gone")
@@ -84,7 +85,8 @@ struct SourcePrewarmStoreTests {
         let store = SourcePrewarmStore(totalByteCap: 1 << 20)
         let withTail = PrewarmedSource(head: ResidentSpan(start: 0, data: Data(count: 1000)),
                                        tail: ResidentSpan(start: 9000, data: Data(count: 500)),
-                                       contentLength: 9500)
+                                       contentLength: 9500,
+                                       requestHeaders: [:])
         store.store(withTail, for: url("a"))
         #expect(store.retainedBytes == 1500)
 
