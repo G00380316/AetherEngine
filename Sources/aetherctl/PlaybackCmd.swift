@@ -716,8 +716,20 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             print("  HOSTCALL reloadAtCurrentPosition(applying: \(labels)) at +\(optionCorrection.delayMilliseconds) ms "
                   + "(t=\(String(format: "%.2f", before))s)")
             do {
-                try await engine.reloadAtCurrentPosition { options in
+                let outcome = try await engine.reloadAtCurrentPosition { options in
                     for change in optionCorrection.changes { change.apply(to: &options) }
+                }
+                // AE#464 round 4: the returned partition, printed as it comes back. A run that
+                // asked for a field the session owns used to print the same `applied` line as one
+                // that rebuilt, which is exactly the confusion the return value ends.
+                print("  #460 outcome applied=[\(outcome.applied.joined(separator: ", "))] "
+                      + "sessionOwned=[\(outcome.sessionOwned.joined(separator: ", "))] "
+                      + "rebuilt=\(outcome.rebuilt)")
+                guard outcome.rebuilt else {
+                    print("  #460 correction complete without a rebuild, the session owns every "
+                          + "field it named (t=\(String(format: "%.2f", engine.currentTime))s, "
+                          + "state=\(engine.state))")
+                    return
                 }
                 // The clock republishes on the tick after the load returns, so reading it here
                 // prints 0 and reads like a restart the session never took. Let one tick land.

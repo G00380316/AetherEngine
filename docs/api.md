@@ -155,6 +155,22 @@ The log says so rather than leaving it to this paragraph: the field is not named
 host is reading. The one rebuild that DOES apply the flag is the resume after a background teardown
 (#357), which has no session transport left to preserve; there it is named as applied, as it is.
 
+**The call answers in three ways, and the third one is returned rather than logged at.** It hands
+back a `SessionOptionCorrectionOutcome`: `applied` and `sessionOwned` are the same two lists the log
+names, and `rebuilt` says whether the session was torn down at all. A field the session owns costs no
+rebuild (AE#464 round 4): there is nothing for one to carry, and the teardown it used to spend was a
+visible restart bought for a field the rebuild decides for itself. The session keeps its value, which
+is where the rebuild left it too, so `autoplay` remains uncorrectable through this call in exactly
+the sense above. Two lists empty with `rebuilt` true is the other quiet answer, a correction the
+session was already running on, and that one does rebuild.
+
+```swift
+let outcome = try await player.reloadAtCurrentPosition { $0.autoplay = false }
+// outcome.applied == [], outcome.sessionOwned == ["autoplay"], outcome.rebuilt == false
+```
+
+The result is `@discardableResult`, so a host that only needs the refusals can keep ignoring it.
+
 Two refusals, both raised BEFORE any teardown, so a refused correction leaves the session playing:
 
 | Thrown | When |
@@ -754,7 +770,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `declaredDurationSeconds` | nil | Trusted duration, overriding the container's. Required alongside `sequentialOrigin` on VOD, where the tail read is gone. |
 | `maxConcurrentSourceRequests` | nil | Most requests the reader may have open against this origin at once, across every path it fetches on (pump ranges, detour blocks, size probes, tail prefetch, subtitle side reader). nil counts without capping and lowers the ceiling on its own after a 429/503/509. Set it when the provider states a limit; `1` also switches off the speculative parallel paths, which exist only to overlap with the pump. Counts **requests**, not TCP connections, because over HTTP/2 a session multiplexes every request onto one connection while the origin still counts each one (AE#377). It is also the only ceiling: several engines playing from one origin are bounded by this value and by what the origin refuses, not by a transport pool underneath it (AE#450). |
 | `heldSourceConnection` | false | Ask the source **once** and pull it, instead of ending the connection at the reader's window high water and asking again every 8 to 16 MB of drain (AE#377). For an origin that punishes repeated requests rather than concurrency: some CDNs refuse new requests for minutes at a stretch while serving an already open connection at full rate, and against one of those the request cadence is the defect, at any range size (measured at the reporting origin: 32 MB ranges raised to 256 MB, eight times fewer requests, the refusals unchanged). Where `maxConcurrentSourceRequests` bounds how many requests are in flight, this removes the second request. The read path is the engine's own HTTP/1.1 over a demand-driven stream task, so: **HTTP/1.1 only** (no ALPN, an HTTP/2-only origin is out of scope), the **system proxy configuration does not apply**, and TLS is the OS's through the same host trust decision as every other engine session but has not been exercised against a self-signed origin. A viewer who pauses ends the connection after five seconds and resuming costs one request at the frontier, because a held flow nobody reads is the process-wide Network.framework starvation of AE#310. Applies to the playback reader; the subtitle and enrichment side readers keep the default transport, since they park for minutes at a time. **Names the session**: the transport is chosen at open, so a reload that changes it is refused. |
-| `autoplay` | true | False mounts paused: the load skips the terminal `play()` and settles at `.paused` for a host that resumes later. It describes THIS MOUNT and nothing after it: the rebuilds a session makes on its own (`reloadAtCurrentPosition`, an option correction, the AirPlay LAN swap, an audio-delay nudge) come back in the transport state the session is in, not in this one. Correcting it through `reloadAtCurrentPosition(applying:)` therefore does nothing (the log names it as not applied rather than as applied, AE#464 round 3); call `play()` or `pause()` instead. |
+| `autoplay` | true | False mounts paused: the load skips the terminal `play()` and settles at `.paused` for a host that resumes later. It describes THIS MOUNT and nothing after it: the rebuilds a session makes on its own (`reloadAtCurrentPosition`, an option correction, the AirPlay LAN swap, an audio-delay nudge) come back in the transport state the session is in, not in this one. Correcting it through `reloadAtCurrentPosition(applying:)` therefore does nothing (the log names it as not applied rather than as applied, AE#464 round 3, and the call returns it as `sessionOwned` with `rebuilt` false rather than spending a teardown on it, AE#464 round 4); call `play()` or `pause()` instead. |
 
 ## Value types
 

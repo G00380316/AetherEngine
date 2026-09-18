@@ -177,7 +177,9 @@ wrote `autoplay = false` onto a session that was playing.
 `--reload-applying autoplay=false` drives the third answer a correction can give, the one that is
 neither applied nor refused: before round 3 the field was named inside `#460: reload applying
 httpHeaders, autoplay` and then overwritten, now it gets `#460: autoplay not applied, the session
-owns it`. `--reload-applying-at 14990 --switch-audio-delay 150@15000` aims a press squarely into a
+owns it`. The run prints the returned partition next to it (`#460 outcome applied=[]
+sessionOwned=[autoplay] rebuilt=false`) and, since round 4, no rebuild follows: the session plays on
+without a `#361 startup` line, where it used to pay a full one for a field it decides itself. `--reload-applying-at 14990 --switch-audio-delay 150@15000` aims a press squarely into a
 rebuild window, where `videoRoute` is `.none` because there is no route to ask: that used to answer
 `this session's audio timestamps are not the engine's to move (route=none)` one line above the muxer
 cutting with the value, and now answers `set while the session is being rebuilt; the load in flight

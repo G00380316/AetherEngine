@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **A correction the session decides for itself no longer costs a rebuild, and the call says what it
+  did.** `reloadAtCurrentPosition(applying:)` has three answers, not two: refused throws, applied
+  rebuilds, and a field the SESSION owns (`autoplay`) is neither. That third one existed only in the
+  log, so the call returned `Void` and a host wrapper reported its correction as done while paying a
+  full teardown for a field the rebuild decides for itself (measured by the reporter at 202 ms on the
+  simulator, 220 ms and a second native host on an Apple TV). It now returns a
+  `SessionOptionCorrectionOutcome` (`applied`, `sessionOwned`, `rebuilt`), `@discardableResult` so
+  existing call sites are unchanged, and a correction whose every changed field is session-owned
+  returns without any teardown at all, leaving the session exactly where a rebuild would have left
+  it. `--reload-applying autoplay=true` prints the partition.
+  ([#464](https://github.com/superuser404notfound/AetherEngine/issues/464))
 
 ## [7.4.1] - 2026-09-18
 
