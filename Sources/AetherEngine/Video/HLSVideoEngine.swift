@@ -1164,8 +1164,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
             //    #268: a segmented time-seekable source (HLS VOD ingest) has no index libavformat could
             //    load, and each reposition refetches a segment, so prewarming would buy the same
             //    uniform-stride plan for the price of two segment downloads at every session start.
-            if dem.timeSeekableReader != nil {
-                EngineLog.emit("[HLSVideoEngine] cue prewarm: skipped for a segmented source (no index to load, every reposition refetches a segment)")
+            if !Self.cuePrewarmMayRun(hasSegmentedReader: dem.timeSeekableReader != nil,
+                                      isSourceSeekable: dem.isSourceSeekable) {
+                EngineLog.emit(
+                    dem.timeSeekableReader != nil
+                        ? "[HLSVideoEngine] cue prewarm: skipped for a segmented source (no index to load, every reposition refetches a segment)"
+                        : "[HLSVideoEngine] cue prewarm: skipped for a forward-only source (the seek would be a linear read, "
+                          + "and the prefix it consumes is the producer's only pass)"
+                )
             } else {
                 let prewarmStart = DispatchTime.now()
                 let prewarmOK = dem.seekBounded(to: durationSeconds * 0.5, timeout: Self.cuePrewarmTimeout)
