@@ -2029,6 +2029,10 @@ public final class AetherEngine: ObservableObject {
     /// Session-scoped; cancelled on load()/stop() alongside the other subtitle tasks.
     var remoteHLSSubtitleDiscoveryTask: Task<Void, Never>? = nil
 
+    /// AE#458: reads back what AVFoundation resolved from the audio the load served. Diagnostic only, and
+    /// session-scoped; cancelled on load()/stop() alongside the subtitle tasks.
+    var audibleReadbackTask: Task<Void, Never>? = nil
+
     /// Sodalite#38 / #65: the pin that keeps the native legible rendition deselected while the host
     /// draws subtitles itself. The task is the load-time burst, the observer holds the deselect for
     /// the rest of the item's life against iOS 26's automatic captions, and the burst budget stops
@@ -3563,6 +3567,8 @@ public final class AetherEngine: ObservableObject {
         resetSubtitleOCRState()   // Phase D: new session, new axis
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
+        audibleReadbackTask?.cancel()
+        audibleReadbackTask = nil
         cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being replaced
         remoteHLSSubtitleProxy?.tearDown()   // #316
         remoteHLSSubtitleProxy = nil
@@ -5570,6 +5576,8 @@ public final class AetherEngine: ObservableObject {
         resetSubtitleOCRState()   // Phase D: new session, new axis
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
+        audibleReadbackTask?.cancel()
+        audibleReadbackTask = nil
         cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being torn down
         // #316: the proxy serves exactly one session's master; a standing socket outliving it would keep a
         // port and a decode task alive for a source nobody plays any more.

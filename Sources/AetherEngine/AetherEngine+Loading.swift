@@ -1608,6 +1608,9 @@ extension AetherEngine {
                       // report the same two channels.
                       audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true))
         forceNativeLegibleDeselectedUntilHostSelects()
+        // AE#458: what AVFoundation makes of the audio rendition this load just served, which is the
+        // half of the exchange no log has ever carried.
+        logAudibleReadback(host: host)
     }
 
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
