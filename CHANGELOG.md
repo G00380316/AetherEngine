@@ -12,6 +12,38 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.7.0] - 2026-09-18
+
+### Added
+
+- **A source can be warmed before anything asks to play it.** The engine cached VOD bytes well once
+  a session existed and not at all before one, so every open started cold, and a cold open is two to
+  three sequential round trips before the first sample read on a non-fast-start MP4 (#281).
+  `AetherEngine.prewarm(url:httpHeaders:byteBudget:)` fetches the opening bytes of a source the
+  engine is not playing; the next `load()` of that exact URL adopts them, serves its parse reads out
+  of RAM, takes the size with the bytes instead of probing for it, and starts its data connection at
+  the warm frontier rather than at byte zero. Nothing waits on a first byte. Static and off the main
+  actor, so a host warms while its player is still on the current item. It never queues for the
+  origin, the bytes live in memory only until they are used and are dropped under memory pressure,
+  and the headers are part of the key: an origin that varies on Referer or Authorization answers a
+  different body under one URL, so a warm fetched with other headers is not adopted. Not applicable
+  to `nativeRemoteHLS`, where AVPlayer issues the requests. `aetherctl play --prewarm` measures it,
+  and it has to be measured against a real origin: on loopback the round trip it removes costs
+  nothing to begin with. (#551)
+
+### Fixed
+
+- **Bitmap subtitle recognition no longer depends on an optional system model.** `SubtitleImageOCR`
+  pinned Vision's `.accurate` level, which runs on the Neural Engine and can be unavailable on a
+  given OS build: measured on macOS 27.0, the first accurate request in a process spends about a
+  minute precompiling it and then throws `e5rtError(..., 13)` roughly half the time, after which
+  every later accurate request in that process fails in milliseconds. The throw was handled and the
+  feature was still lost, so PGS / DVB / DVD subtitles were absent in PiP, on AirPlay and on an
+  external display while `.fast` read the same frame correctly in 30 ms. A failed pass now drops to
+  `.fast` rather than dropping the cue, and the drop is remembered for the process. The language pin
+  is resolved per level, since the fast model speaks six languages against the accurate model's
+  thirty-three. (#552)
+
 ## [7.6.0] - 2026-09-18
 
 ### Fixed

@@ -72,6 +72,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Metadata | `MediaMetadata` (title / artist / album + cover) parsed on load; a container's album artist folds into `artist` as a fallback |
 | Seek | VOD seeks into watched content are restart-free cache hits (byte-budgeted retention, 2 GiB cap); short forward scrubs ride the cached window; only never-produced targets restart the producer |
 | Streaming | One long-lived forward-streaming connection, reconnect-on-drop; CDN-stutter resilient; optional caller-bounded open-time probe budget (`LoadOptions.probesize` / `maxAnalyzeDuration`) to cut first-frame latency on sparse remote remuxes; configurable forward-buffer window (`LoadOptions.forwardBufferSegments`), from the 40 s default up to an opt-in whole-source pre-buffer that is bounded in bytes by the session's disk budget rather than in segments |
+| Prewarm | `AetherEngine.prewarm(url:httpHeaders:byteBudget:)` fetches a source's opening bytes before anything asks to play it, for a host whose UI knows what is next. The following `load()` of that URL serves its parse reads out of RAM, takes the size with the bytes instead of probing for it, and opens its data connection at the warm frontier rather than at byte zero, so nothing waits on a first byte. Static and off the main actor: no engine instance, no audio session, no layer. It never queues for the origin, the bytes live in memory only until they are adopted and are dropped under memory pressure, and the headers are part of the key |
 | Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
 | Custom input | Play any byte source via the `IOReader` protocol (`load(source:)`) |
 | Network | SMB2/3 shares via the optional `AetherEngineSMB` product (NTLMv2 / guest, read-only) |
@@ -340,7 +341,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.6.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.7.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -580,10 +581,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.6.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.7.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.6.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.7.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
