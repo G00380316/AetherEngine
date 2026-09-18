@@ -1668,6 +1668,9 @@ public final class AetherEngine: ObservableObject {
     /// not one per second).
     var lastLiveCushionLogAt: Date? = nil
     var liveThinRunwayNoted = false
+    /// AE#524 round 2: the item generation whose runway has been seen at or above the floor. A thin
+    /// reading on any other item is a mount that has not fetched yet, not a session running out.
+    var liveRunwayHealthyGeneration: Int? = nil
 
     /// Current session URL. Used by reloadAtCurrentPosition and AetherEngine+FrameExtractor.
     var loadedURL: URL?
@@ -6644,6 +6647,11 @@ public final class AetherEngine: ObservableObject {
         liveBehindWhenLastAdvancing = 0
         lastPublishedLivePlayhead = nil
         lastLiveCadenceSamplePlayhead = nil
+        // AE#524: the cushion state is per session too. Left standing, a session that ended thin
+        // suppressed the next session's first line until that one had been healthy once.
+        lastLiveCushionLogAt = nil
+        liveThinRunwayNoted = false
+        liveRunwayHealthyGeneration = nil
         clock.liveEdgeTime = 0
         clock.seekableLiveRange = nil
         clock.isAtLiveEdge = false
