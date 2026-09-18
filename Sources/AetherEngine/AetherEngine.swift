@@ -553,7 +553,20 @@ public final class AetherEngine: ObservableObject {
     /// the media playlist on the panel the load had just proven. nil readout means suppressed, as at
     /// the load.
     var sessionPanelHDRReadout: Bool? = nil
-    var sessionDisplayEligibleForHDR = false
+
+    /// AE#535: the display table this session composed its route from, kept for the same reason as the
+    /// readout above. `displayCapabilities` answers at call time, and a reporter measured the platform
+    /// revoking every term of it (`hdr=false hdr10=false hlg=false dv=false`, alongside the user's own
+    /// Match-Content preference reading `off`) while the app was backgrounded, 0.7 s after the
+    /// transition and restored 133 ms after it came back, in one process. A route-death rebuild inside
+    /// that window would otherwise clamp an HDR title to SDR and withhold its master against a display
+    /// the load had just read as DV-capable. nil means no load has composed one yet.
+    var sessionObservedDisplayCaps: DisplayCapabilities? = nil
+
+    /// What the route asks of the display, which is the OBSERVED term: a host's Dolby Vision assertion
+    /// claims DV (and the HDR that entails) for the served stream, it does not make the panel eligible.
+    /// Deriving it keeps the load's answer and the rebuild's the same value rather than two.
+    var sessionDisplayEligibleForHDR: Bool { sessionObservedDisplayCaps?.supportsHDR ?? false }
 
     /// Whether the loaded source's Dolby Vision has a base layer `LoadOptions.dolbyVisionHandling =
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
@@ -3588,7 +3601,7 @@ public final class AetherEngine: ObservableObject {
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
-        sessionDisplayEligibleForHDR = false
+        sessionObservedDisplayCaps = nil
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -4135,7 +4148,7 @@ public final class AetherEngine: ObservableObject {
             displayEligibleForHDR: observedDisplayCaps.supportsHDR,
             panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
         sessionPanelHDRReadout = criteriaPanelReadout
-        sessionDisplayEligibleForHDR = observedDisplayCaps.supportsHDR
+        sessionObservedDisplayCaps = observedDisplayCaps
         if routingPanelHDR != panelHDRAfterHandshake {
             EngineLog.emit(
                 "[DisplayCriteria] panel unproven but HDR-eligible: serving the master and letting "
@@ -4477,6 +4490,8 @@ public final class AetherEngine: ObservableObject {
                     dolbyVisionRPUProfile: detectedDVRPUProfile,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: routingPanelHDR,
+                    // AE#535: the table composed at the top of this load, not a second read of it.
+                    sessionDisplayCaps: sessionDisplayCaps,
                     audioBridgeMode: options.audioBridgeMode,
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
@@ -5579,7 +5594,7 @@ public final class AetherEngine: ObservableObject {
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
-        sessionDisplayEligibleForHDR = false
+        sessionObservedDisplayCaps = nil
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil

@@ -10,6 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session reads the display once, and every route it builds answers to that one table.** A native
+  load read `displayCapabilities` twice, once to clamp the format and again inside `loadNative` for the
+  session it serves, under a comment claiming it was the first read's table. Measured 203 ms apart on an
+  Apple TV the two disagreed, and an HDR10+ title whose load had read `dv=true` was served media-direct
+  with its master withheld. The property answers at call time, and on tvOS a backgrounded process is
+  answered for its own state rather than for the display: every per-mode term reads false, the user's own
+  Match-Content preference reads `off` beside it, and both come back when the app does (measured at 0.7 s
+  and 2.5 s after the transition, restored 133 ms after the app returned, in one process). A route-death
+  rebuild lands inside that window, so it now routes from the table its load composed, the way it already
+  routes from the load's panel readout (AE#541), and says so in the log when the two differ. What this
+  does NOT reach is a process whose FIRST read falls in that window: there is nothing behind it to carry.
+  ([#535](https://github.com/superuser404notfound/AetherEngine/issues/535))
+
 ### Changed
 
 - **A correction the session decides for itself no longer costs a rebuild, and the call says what it

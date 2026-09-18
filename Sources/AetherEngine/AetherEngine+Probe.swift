@@ -761,6 +761,25 @@ extension AetherEngine {
             panelRefusedHDRMaster: panelRefusedHDRMaster)
     }
 
+    /// AE#535: the display table an in-place rebuild routes from, on the same principle as the route
+    /// above: the load's answer, because the rebuild is not a fresh look at the display.
+    ///
+    /// `displayCapabilities` answers at call time, and on tvOS a backgrounded process is answered for its
+    /// own state rather than for the display: every per-mode term reads false, the user's Match-Content
+    /// preference reads `off` beside it, and both come back when the app does. A route-death rebuild lands
+    /// inside that window (measured at 0.7 s and 2.5 s after the transition), so a table read there would
+    /// clamp an HDR source to SDR and withhold its master on a panel nothing had changed. The host's
+    /// Dolby Vision assertion is applied to it here, as at the load, because it is the session's claim and
+    /// not an observation. Reading now is the fallback for a rebuild with no load behind it, which the
+    /// engine's own paths cannot produce.
+    nonisolated static func reloadDisplayCapabilities(
+        observedAtLoad: DisplayCapabilities?,
+        hostAssertsDolbyVision: Bool,
+        readNow: () -> DisplayCapabilities
+    ) -> DisplayCapabilities {
+        (observedAtLoad ?? readNow()).assertingDolbyVision(hostAssertsDolbyVision)
+    }
+
     private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {
         let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
         guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {
