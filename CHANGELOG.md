@@ -12,6 +12,22 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.4.1] - 2026-09-18
+
+### Fixed
+
+- **A 96 kHz TrueHD or DTS-HD track played as video only.** The audio bridge opened its encoder at
+  the source's sample rate, and E-AC-3 exists at 32 / 44.1 / 48 kHz only, so `avcodec_open2` refused
+  the context with EINVAL and the route dropped the whole session to silent video-only. The #165
+  encoder cascade did not catch it, because that one retries the other encoder when one is absent
+  from the build and this encoder was present and simply rejecting the configuration. The rate now
+  comes from `avcodec_get_supported_config` on the encoder itself: an exact match is kept, above the
+  list the highest supported rate wins (96 and 192 kHz land on 48), below it the lowest, and an
+  encoder that advertises no list keeps the source rate, which leaves `.lossless` FLAC bit-perfect at
+  96 kHz. The resampler was already configured from the encoder's rate on every bridged packet, so
+  the conversion costs nothing that was not being paid.
+  ([#548](https://github.com/superuser404notfound/AetherEngine/issues/548))
+
 ## [7.4.0] - 2026-09-18
 
 ### Fixed
