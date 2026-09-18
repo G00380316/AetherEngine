@@ -4461,6 +4461,17 @@ public final class AetherEngine: ObservableObject {
                     generation: gen
                 )
                 playbackBackend = .software
+                // AE#550: the one thing a viewer on a receiver needs said out loud. This backend's
+                // picture cannot leave the device, so a wireless route carries the sound alone, and
+                // the report that opened this was someone hearing a film they could not see.
+                if Self.isWirelessAirPlayRoute() {
+                    EngineLog.emit(
+                        "[AetherEngine] AE#550: software path with a wireless receiver on the audio route; "
+                        + "the sound goes to the receiver and the picture stays on this device "
+                        + "(screen mirroring is what carries it)",
+                        category: .engine
+                    )
+                }
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: true
                 )
@@ -5671,7 +5682,21 @@ public final class AetherEngine: ObservableObject {
     /// a wired external screen. The player flag alone is not trustworthy right after an item rebuild
     /// (#227), so the audio route, which survives the teardown, carries the wireless half.
     var externalPlaybackHoldsThePicture: Bool {
-        isExternalPlaybackActiveNow || Self.isWirelessAirPlayRoute()
+        guard Self.externalPlaybackCanCarryThePicture(backend: playbackBackend) else { return false }
+        return isExternalPlaybackActiveNow || Self.isWirelessAirPlayRoute()
+    }
+
+    /// AE#550: whether the picture can leave this device on the backend that is playing.
+    ///
+    /// Only the native path can hand a picture anywhere: external playback is an AVPlayer feature, and
+    /// the wireless half of it is this engine serving its own loopback to the receiver (#86). A software
+    /// session renders into a local `AVSampleBufferDisplayLayer`, which no receiver picks up, and its
+    /// audio reaches one only because `AVSampleBufferAudioRenderer` follows the audio route. So on that
+    /// backend a wireless route means the sound left and the picture did not, and reading the route
+    /// alone said the opposite: the field log announced that an external screen held a picture that was
+    /// in fact still on the phone, and #315 latched its first-frame promise on that.
+    nonisolated static func externalPlaybackCanCarryThePicture(backend: PlaybackBackend) -> Bool {
+        backend == .native
     }
 
     /// Current external-playback state, or false where the platform has no such route.
