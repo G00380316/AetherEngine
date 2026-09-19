@@ -656,6 +656,17 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let stateLock = NSLock()
     /// Separate from stateLock so the manifest handler can block without holding the segment-list lock.
     private let firstSegmentCondition = NSCondition()
+    /// How many callers are parked in the three gates that share the condition above. Guarded by
+    /// it, which is what makes it worth having: a reader from another thread only gets the lock
+    /// while a waiter is inside `wait()`, so a non-zero read PROVES the waiter parked. Tests used
+    /// to sleep a tenth of a second and call that parked, which is a margin against scheduling and
+    /// the first thing an oversubscribed machine takes away.
+    private var parkedWaiters = 0
+    var parkedWaiterCount: Int {
+        firstSegmentCondition.lock()
+        defer { firstSegmentCondition.unlock() }
+        return parkedWaiters
+    }
     /// Set by cancelWaiters() on stop(). Without it, parked LL-HLS blocking-reload threads sleep
     /// their full timeout (18-30 s) and can write stale playlists into a recycled fd of the next session.
     private var waitersCancelled = false
@@ -904,6 +915,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let deadline = Date(timeIntervalSinceNow: timeout)
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
+        parkedWaiters += 1
+        defer { parkedWaiters -= 1 }
         while true {
             stateLock.lock()
             let ready = _seqAdvertisableCount >= Self.sequentialStartupSegments || _seqEnded
@@ -2318,6 +2331,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         var degradedGrace: TimeInterval?
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
+        parkedWaiters += 1
+        defer { parkedWaiters -= 1 }
         while true {
             if waitersCancelled { return false }
             let snap = liveCushionSnapshot()
@@ -2454,6 +2469,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let deadline = Date().addingTimeInterval(timeout)
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
+        parkedWaiters += 1
+        defer { parkedWaiters -= 1 }
         while true {
             if waitersCancelled { return false }
             stateLock.lock()
