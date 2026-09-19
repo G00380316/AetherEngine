@@ -52,7 +52,14 @@ extension AetherEngine {
         // went unnoticed because nothing deselected it either, so a pick made while one was already
         // standing looked like it had been followed. `setNativeSubtitleRendering` is the whole job,
         // mapping included, and it latches correctly if this lands mid-reload.
-        if nativeSubtitleRenderingRequested { setNativeSubtitleRendering(true) }
+        if nativeSubtitleRenderingRequested {
+            // Sodalite#156: which pick this was. A silent forced-subtitle fallback reaches here through
+            // the same call as a viewer's own choice, and the two want different answers on a
+            // receiver, so the line has to name them apart before anything acts on the difference.
+            EngineLog.emit("[AetherEngine] #156 native rendition re-asserted for track \(index) "
+                           + "(hostExplicit=\(hostExplicitSubtitleAction))", category: .engine)
+            setNativeSubtitleRendering(true)
+        }
     }
 
     /// `selectSubtitleTrack(index:)` with an explicit source-PTS start anchor. The public form passes the live
@@ -2055,6 +2062,13 @@ extension AetherEngine {
                 let deadline = Date().addingTimeInterval(15.0)
                 var lastMax = 0.0
                 var stall = 0
+                // Sodalite#156: WHY the pre-fill stopped, which the line below could not say. An empty
+                // one reads the same whether the reader never started, parked, or ran out of time, and
+                // those are three different defects: the select that follows caches whatever the
+                // rendition holds at that instant, forever, so an empty exit here is a caption box
+                // with no text in it for the rest of the session.
+                let began = Date()
+                var exit = "target"
                 while store.readMaxCueEnd() < target, Date() < deadline {
                     let m = store.readMaxCueEnd()
                     if m > lastMax {
@@ -2066,10 +2080,12 @@ extension AetherEngine {
                         // early break would skip the pre-fill entirely (Sodalite#32 regression).
                         stall += 1
                     }
-                    if stall >= 6 { break }   // ~900ms with no new cues after producing => EOF / read-ahead parked
+                    if stall >= 6 { exit = "stall"; break }   // ~900ms with no new cues after producing => EOF / read-ahead parked
                     try? await Task.sleep(nanoseconds: 150_000_000)
                 }
-                EngineLog.emit("[AetherEngine] native subtitle pre-fill done: readMax=\(String(format: "%.1f", store.readMaxCueEnd())) target=\(String(format: "%.1f", target)) cues=\(store.cueCount)", category: .engine)
+                if exit == "target", store.readMaxCueEnd() < target { exit = "deadline" }
+                let waited = Int(Date().timeIntervalSince(began) * 1000)
+                EngineLog.emit("[AetherEngine] native subtitle pre-fill done: readMax=\(String(format: "%.1f", store.readMaxCueEnd())) target=\(String(format: "%.1f", target)) cues=\(store.cueCount) exit=\(exit) waited=\(waited)ms readersRunning=\(nativeSubtitleReadersTask != nil)", category: .engine)
             }
             // #15: AVKit attaches the legible renderer to whatever selection is active when the rendering
             // pipeline is established; a selection made mid-playback updates state + downloads cues but is not
