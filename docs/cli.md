@@ -94,6 +94,30 @@ swift run aetherctl play --sidecar de=/tmp/de.srt --subs de <master.m3u8>   # de
 swift run aetherctl play --native-hls --trust-any-certificate <https master.m3u8>  # the AE#495 origin relay
 ```
 
+`--host-calls nativesubs,nativerender@N,subsoff@N,subson@N` drives the NATIVE SUBTITLE RENDITION path
+for VOD, which nothing here could do before (Sodalite#156). `serve --native-subs` stands the renditions
+up and `live --force-master` routes a channel behind them, but no VOD session loaded with
+`prepareNativeSubtitles`, so the half that matters was untestable: whether AVPlayer actually HOLDS a
+legible selection and whether the engine keeps feeding the one it holds. `nativesubs` sets the load
+option, `nativerender@N` makes the host call a player makes when the picture leaves its own layer
+(PiP, AirPlay, a wired display), and `subsoff@N` / `subson@N` are the viewer turning subtitles off and
+back on while it is away.
+
+The observable is a `LEGIBLE` line printed a tick AFTER each transition, never inside it: both calls
+finish on a detached task and the select waits on a cue pre-fill first, so an immediate read reports
+what the host ASKED for rather than what the item ended up with. It prints the selection AVPlayer
+holds next to the track the engine thinks is active, and those two coming apart is the defect class:
+
+```bash
+aetherctl play --subs ger --seconds 30 \
+  --host-calls nativesubs,nativerender@8,subsoff@14,subson@20 file://$PWD/subs.mkv
+```
+
+A healthy run reads `selected=German engineActive=2`, then `selected=none engineActive=nil` after the
+off, then `selected=German engineActive=2` after the on. `selected=German engineActive=nil` is a
+rendition nobody is filling any more, which on an AirPlay receiver is an empty caption box; and
+`selected=none engineActive=2` is subtitles that never came back.
+
 `--sidecar <lang>=<path-or-url>[,<lang>=<path>...]` fills `LoadOptions.externalSubtitles`, the load-time
 declaration a host makes. On a remote `m3u8` this is what makes the engine stand up its rewritten master
 (#316), so it is the way to see the whole chain from the CLI: the served `master.m3u8` body is logged, the

@@ -46,6 +46,13 @@ extension AetherEngine {
     public func selectSubtitleTrack(index: Int) {
         hostExplicitSubtitleAction = true
         selectSubtitleTrack(index: index, startAt: sourceTime)
+        // Sodalite#156: while the picture is off this device the RENDITION is the display, so a pick
+        // has to reach it. Selecting a track alone never did: the rendition only ever moved through
+        // the readers' re-anchor path, which is tied to coverage and not to the host's choice. That
+        // went unnoticed because nothing deselected it either, so a pick made while one was already
+        // standing looked like it had been followed. `setNativeSubtitleRendering` is the whole job,
+        // mapping included, and it latches correctly if this lands mid-reload.
+        if nativeSubtitleRenderingRequested { setNativeSubtitleRendering(true) }
     }
 
     /// `selectSubtitleTrack(index:)` with an explicit source-PTS start anchor. The public form passes the live
@@ -1545,14 +1552,26 @@ extension AetherEngine {
         // pipeline; deselect it on the item (criteria pinned manual so system caption prefs
         // don't immediately re-select).
         // #316: an injected external rendition is the same kind of selection, under an external id.
+        //
+        // Sodalite#156: and the same is true of the native rendition whenever the host has asked for
+        // it, which is every session where the picture is on a receiver or an external screen.
+        // Cancelling the readers below only stops FILLING a rendition; it does not stop anything from
+        // rendering it, and a receiver went on fetching one nobody fed, which is a caption box with
+        // nothing in it. Deliberately the item-level deselect rather than
+        // `setNativeSubtitleSelected(track: nil)`, whose job this otherwise is: that call also clears
+        // `nativeSubtitleReapplyOrdinal`, and `nativeOrdinalToReplay` is guarded on
+        // `currentOrdinal == nil`, so clearing it here would ARM the #170 carryover replay and
+        // re-select on the next session-preserving reload, the opposite of the point.
         if let active = activeSubtitleTrackIndex,
-           RemoteHLSMediaSelection.ordinal(forTrackID: active) != nil
+           nativeSubtitleRenderingRequested
+            || RemoteHLSMediaSelection.ordinal(forTrackID: active) != nil
             || injectedSubtitleRenditionNames[active] != nil,
            let item = currentAVPlayer?.currentItem {
             Task { @MainActor in
                 self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
                 guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
                 item.select(nil, in: group)
+                EngineLog.emit("[AetherEngine] subtitles off: legible selection cleared", category: .engine)
             }
         }
         cancelSidecarTask()
@@ -2182,6 +2201,10 @@ extension AetherEngine {
     /// active subtitle has no native text equivalent: a bitmap (PGS/DVB), CEA-708 (608 now rides a native
     /// rendition, #98), or a track added after load (dynamic external / one-shot sidecar).
     public func setNativeSubtitleRendering(_ active: Bool) {
+        // Sodalite#156: the host's request is a STANDING one, not a one-shot. It says where the
+        // picture is, and it holds until the picture comes back or the session ends, which is what
+        // lets a later track pick or a subtitles-off know that the rendition is the display.
+        nativeSubtitleRenderingRequested = active
         // #170: the AirPlay flip triggers both the engine's LAN-swap reload and the host's
         // documented rendering call; landing mid-reload the active track is transiently nil and
         // this call would be misread as a deselect. Latch the newest request instead;
