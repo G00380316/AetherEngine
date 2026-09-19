@@ -59,7 +59,13 @@ struct OriginRequestBudgetTests {
     /// `.timeLimit` trait on the test. Each call below waits on a condition that is true in BOTH
     /// outcomes where a defect would otherwise only show as a timeout.
     private func waitFor(_ condition: () -> Bool) async {
-        while !condition() { try? await Task.sleep(nanoseconds: 2_000_000) }
+        // The sleep has to be allowed to THROW. `try?` here swallows the cancellation the
+        // `.timeLimit` trait sends, `Task.sleep` then returns at once, and the loop spins for as
+        // long as the job lives instead of letting the trait report: one hung `swift test` on main
+        // at the 30 minute job ceiling (run 35421586854).
+        while !condition() {
+            do { try await Task.sleep(nanoseconds: 2_000_000) } catch { return }
+        }
     }
 
     @Test("a capped origin makes the second request wait for the first to finish",
