@@ -540,6 +540,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         liveJoinProfile: fastZap ? .fastZap : .standard,
         liveJoinStartsImmediately: liveStartImmediately,
         nativeRemoteHLS: nativeHLS,
+        // Sodalite#156: the native WebVTT renditions, i.e. the path a host uses whenever the picture
+        // leaves its own layer (PiP, AirPlay, a wired display). `serve --native-subs` could stand the
+        // renditions UP and `live --force-master` could route a channel behind them, but no VOD
+        // session here had ever loaded with them, so the half that matters, AVPlayer actually holding
+        // a legible selection and the engine feeding it, had no harness at all. AE#359 was found the
+        // day live got one; this is the same gap on the other side.
+        prepareNativeSubtitles: hostCalls.contains("nativesubs"),
         sequentialOrigin: sequentialOrigin,
         maxConcurrentSourceRequests: maxConcurrentRequests,
         heldSourceConnection: heldConnection,
@@ -642,10 +649,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             engine.pause()
         case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still", "stallclock":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
-        case let call where call.hasPrefix("seekfar"):
-            break  // #433, in the telemetry loop; `seekfar@N` picks the tick
+        case "nativesubs":
+            break  // Sodalite#156, read at load time into LoadOptions.prepareNativeSubtitles
+        case let call where call.hasPrefix("seekfar") || call.hasPrefix("subsoff")
+            || call.hasPrefix("subson") || call.hasPrefix("nativerender"):
+            break  // #433 / Sodalite#156, all in the telemetry loop; `@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,nativesubs,nativerender,subsoff,subson)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -823,6 +833,25 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     let seekFarTick: Int? = hostCalls.first(where: { $0.hasPrefix("seekfar") }).map { call in
         let parts = call.split(separator: "@")
         return parts.count == 2 ? (Int(parts[1]) ?? 15) : 15
+    }
+
+    // Sodalite#156: a host turning subtitles OFF and back ON mid-session, which is the transition the
+    // native rendition path had no way to drive from here at all. `subsoff@N` / `subson@N` pick the
+    // second each one fires in. Selecting a track and clearing it are two different engine calls with
+    // two different async tails, and only running them against each other shows whether the legible
+    // selection ends up where the host asked for it. Defaults sit far enough apart for the pre-fill
+    // that gates a select to finish in between.
+    let nativeRenderTick: Int? = hostCalls.first(where: { $0.hasPrefix("nativerender") }).map { call in
+        let parts = call.split(separator: "@")
+        return parts.count == 2 ? (Int(parts[1]) ?? 8) : 8
+    }
+    let subsOffTick: Int? = hostCalls.first(where: { $0.hasPrefix("subsoff") }).map { call in
+        let parts = call.split(separator: "@")
+        return parts.count == 2 ? (Int(parts[1]) ?? 12) : 12
+    }
+    let subsOnTick: Int? = hostCalls.first(where: { $0.hasPrefix("subson") }).map { call in
+        let parts = call.split(separator: "@")
+        return parts.count == 2 ? (Int(parts[1]) ?? 18) : 18
     }
 
     // #544: scrub stills on the software live path, decoded out of the DVR packet ring. Three aims
@@ -1135,6 +1164,33 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                 print("  SELECT subtitle: no track matching '\(subsPick)' (have: \(engine.subtitleTracks.map(\.codec).joined(separator: ", ")))")
             }
         }
+
+        // Sodalite#156. The readout is taken a tick AFTER each transition, not inside it: both calls
+        // finish their work on a detached MainActor task (the select waits on a cue pre-fill first),
+        // so reading immediately would report the state the host asked for rather than the one the
+        // item ended up in, which is the whole distinction this harness exists to make.
+        // Sodalite#156: what the host does when the picture leaves its own layer. Without this the
+        // renditions are merely SERVED and nothing ever holds a legible selection, which is the state
+        // the first version of this harness measured and mistook for a result.
+        if let t = nativeRenderTick, tick == t {
+            print("  HOSTCALL setNativeSubtitleRendering(true)")
+            engine.setNativeSubtitleRendering(true)
+        }
+        if let t = nativeRenderTick, tick == t + 2 { await reportLegibleSelection(engine, "after render on") }
+        if let subsOffTick, tick == subsOffTick {
+            print("  HOSTCALL subtitles off")
+            engine.clearSubtitle()
+        }
+        if let subsOnTick, tick == subsOnTick, let subsPick,
+           let match = engine.subtitleTracks.first(where: {
+               $0.codec.localizedCaseInsensitiveContains(subsPick)
+                   || ($0.language?.localizedCaseInsensitiveContains(subsPick) ?? false)
+           }) {
+            print("  HOSTCALL subtitles on id=\(match.id)")
+            engine.selectSubtitleTrack(index: match.id)
+        }
+        if let t = subsOffTick, tick == t + 1 { await reportLegibleSelection(engine, "after off") }
+        if let t = subsOnTick, tick == t + 1 { await reportLegibleSelection(engine, "after on") }
     }
 
     let finalTime = engine.currentTime
@@ -1294,4 +1350,27 @@ enum Issue436RateHold {
         }
         return -1
     }
+}
+
+/// Sodalite#156: what the item's legible media selection actually holds right now.
+///
+/// This is the observable the native rendition path never had from the CLI. `nativeSubtitleTracks`
+/// and `activeSubtitleTrackIndex` say what the ENGINE thinks; the legible selection is what an
+/// AVPlayer, and therefore an AirPlay receiver, renders. Those two came apart in the field report:
+/// the readers had been cancelled while the receiver was still fetching the rendition it had been
+/// handed, which is a caption box with nothing in it.
+@MainActor
+private func reportLegibleSelection(_ engine: AetherEngine, _ label: String) async {
+    guard let item = engine.currentAVPlayer?.currentItem else {
+        print("  LEGIBLE \(label): no item")
+        return
+    }
+    guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else {
+        print("  LEGIBLE \(label): no legible group")
+        return
+    }
+    let selection = item.currentMediaSelection.selectedMediaOption(in: group)
+    let name = selection.map { $0.displayName } ?? "none"
+    print("  LEGIBLE \(label): selected=\(name) options=\(group.options.count) "
+          + "engineActive=\(engine.activeSubtitleTrackIndex.map(String.init) ?? "nil")")
 }
