@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.7.1] - 2026-09-19
+
 ### Fixed
 
 - **The system Now-Playing card survives the screensaver.** A tvOS backgrounding tears the video
@@ -23,6 +27,19 @@ the public-API contract.
   registered from scratch. The decision now asks whether a host is still there rather than which
   backend is running; a load that goes on to route software or audio-only releases the preserved
   host in its own branch, as before (Sodalite#149).
+- **The loopback server keeps answering in a process whose dispatch pool is busy.** `HLSLocalServer`
+  ran its accept loop on a serial queue and every connection on a concurrent one, so both sat on the
+  global pool. Both block by design: accept spends the server's whole life in a syscall, and a
+  handler blocks in `UpstreamPump` while the origin feeds it. The pool hands out a worker only once
+  one is free, so a process whose workers are all in a blocking wait stopped answering while the
+  server was perfectly healthy, and AVPlayer read a dead server. Accept and each connection get a
+  real thread.
+- **A size probe that blocks on a round trip no longer costs a source its seekability.** The
+  staggered open-time ladder ran its three probes with `asyncAfter` on a concurrent queue, so each
+  held a global-pool worker for a whole semaphore-driven URLSession round trip. Where the pool was
+  saturated the fallbacks never started, `open()` spent its budget, and the source fell back to
+  streaming mode although the origin would have answered the range question. Each probe gets a
+  thread of its own.
 
 ## [7.7.0] - 2026-09-18
 
