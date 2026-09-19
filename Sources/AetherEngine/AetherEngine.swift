@@ -913,6 +913,27 @@ public final class AetherEngine: ObservableObject {
         priorBackendWasNative && (pipActive || hostRequested)
     }
 
+    /// Whether `load()` hands its teardown a `NativeAVPlayerHost` to keep (issue #15).
+    ///
+    /// The question is whether a host is still THERE, not which backend is running. Reading the
+    /// backend alone was wrong on exactly one path, and it is the one that most needs the host:
+    /// `teardownVideoForBackground` preserves it deliberately, so AVKit's Now-Playing registration
+    /// outlives the suspension, and then leaves `playbackBackend` at `.none`. The reload on the way
+    /// back read that `.none`, answered "nothing native here", and threw away the instance the
+    /// teardown had just kept. AVKit registers its MediaRemote client once per AVPlayer instance and
+    /// never registers again against a swapped one ("Code=14 client callback"), so the viewer came
+    /// back from the screensaver to a dead Control Center card and no remote transport until they
+    /// left the player entirely (Sodalite#149).
+    ///
+    /// Keeping a host a load then has no use for is safe and already the contract: the software and
+    /// audio-only dispatch branches each release a preserved-but-unused host before they build.
+    nonisolated static func shouldPreserveNativeHostAcrossLoad(
+        backend: PlaybackBackend,
+        nativeHostSurvives: Bool
+    ) -> Bool {
+        backend == .native || nativeHostSurvives
+    }
+
     /// Consume the one-shot host request at the load boundary, folded with PiP's mandatory handover.
     /// Consumed here rather than where it is read so one episode transition cannot change the
     /// teardown of a later, unrelated load.
@@ -3476,16 +3497,20 @@ public final class AetherEngine: ObservableObject {
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
+        let preserveNativeHost = Self.shouldPreserveNativeHostAcrossLoad(
+            backend: playbackBackend, nativeHostSurvives: nativeHost != nil)
         // AE#158: while a PiP window is live, or when the host asked for it, the running item must
         // survive this load's teardown; the loopback host.load callsite finishes the handover
-        // (inPlaceSwap). The host request is consumed here so it can affect only this load.
+        // (inPlaceSwap). The host request is consumed here so it can affect only this load. The
+        // RUNNING session is the right question here, unlike the host above: a background teardown
+        // has already unloaded the item, so there is nothing left to hand over in place.
         let handOverInPlace = consumeInPlaceItemHandoverRequest(priorBackendWasNative: priorBackendWasNative)
         pendingInPlaceItemHandover = handOverInPlace
         // #128 follow-up: preserve the previous session's display criteria across the load seam. Nil-ing it
         // here bounces the panel through SDR before apply() re-negotiates the same mode on video->video
         // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
-        stopInternal(resetDisplayCriteria: false, keepNativeHost: priorBackendWasNative, keepCurrentItem: handOverInPlace)
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
         // Scrub/seek/producer-restart never route through load(), so mid-stream #93 detection stays armed.
         hasRenderedFirstFrameMirror.set(false)

@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The system Now-Playing card survives the screensaver.** A tvOS backgrounding tears the video
+  pipeline down and keeps the `NativeAVPlayerHost` alive on purpose, because AVKit registers its
+  MediaRemote client once per `AVPlayer` instance and never registers again against a swapped one
+  (issue #15). The reload on the way back then threw that host away: it decided whether to preserve
+  it by reading `playbackBackend`, which the background teardown had already reset to `.none`, so it
+  answered "nothing native here" and built a fresh `AVPlayer`. The viewer came back from the
+  screensaver to a video that played and a dead Control Center card, with no lock-screen transport
+  and no remote volume, until they left the player entirely and a new `AVPlayerViewController`
+  registered from scratch. The decision now asks whether a host is still there rather than which
+  backend is running; a load that goes on to route software or audio-only releases the preserved
+  host in its own branch, as before (Sodalite#149).
 
 ## [7.7.0] - 2026-09-18
 
