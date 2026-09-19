@@ -849,10 +849,14 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         let parts = call.split(separator: "@")
         return parts.count == 2 ? (Int(parts[1]) ?? 12) : 12
     }
-    let subsOnTick: Int? = hostCalls.first(where: { $0.hasPrefix("subson") }).map { call in
-        let parts = call.split(separator: "@")
-        return parts.count == 2 ? (Int(parts[1]) ?? 18) : 18
-    }
+    // `subson@N` re-picks the `--subs` track; `subson@N:lang` picks a DIFFERENT one, which is the
+    // track-switch case. It read as working before this was fixable, for the same reason the off case
+    // read as broken: with a selection standing and nothing ever moving it, a pick that never reached
+    // the rendition still left the right language on screen.
+    let subsOnSpec = hostCalls.first(where: { $0.hasPrefix("subson") })
+        .map { $0.split(separator: "@").dropFirst().joined().split(separator: ":") }
+    let subsOnTick: Int? = subsOnSpec.map { Int($0.first ?? "") ?? 18 }
+    let subsOnLang: String? = subsOnSpec.flatMap { $0.count > 1 ? String($0[1]) : nil }
 
     // #544: scrub stills on the software live path, decoded out of the DVR packet ring. Three aims
     // per run (deep in the window, just behind the playhead, and at the edge), because the edge is the
@@ -1181,16 +1185,20 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             print("  HOSTCALL subtitles off")
             engine.clearSubtitle()
         }
-        if let subsOnTick, tick == subsOnTick, let subsPick,
+        if let subsOnTick, tick == subsOnTick, let wanted = subsOnLang ?? subsPick,
            let match = engine.subtitleTracks.first(where: {
-               $0.codec.localizedCaseInsensitiveContains(subsPick)
-                   || ($0.language?.localizedCaseInsensitiveContains(subsPick) ?? false)
+               $0.codec.localizedCaseInsensitiveContains(wanted)
+                   || ($0.language?.localizedCaseInsensitiveContains(wanted) ?? false)
            }) {
             print("  HOSTCALL subtitles on id=\(match.id)")
             engine.selectSubtitleTrack(index: match.id)
         }
+        // Four ticks, not one. A deselect is one hop, but a SELECT waits on the cue pre-fill that
+        // exists so AVPlayer fetches a populated rendition instead of racing the reader, and that is
+        // seconds rather than a runloop turn. Reading at +1 caught the off correctly and reported
+        // every on as a failure, which is the harness lying in the more expensive direction.
         if let t = subsOffTick, tick == t + 1 { await reportLegibleSelection(engine, "after off") }
-        if let t = subsOnTick, tick == t + 1 { await reportLegibleSelection(engine, "after on") }
+        if let t = subsOnTick, tick == t + 4 { await reportLegibleSelection(engine, "after on") }
     }
 
     let finalTime = engine.currentTime

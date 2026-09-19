@@ -3127,6 +3127,13 @@ public final class AetherEngine: ObservableObject {
     var sessionPreservingReloadInFlight = false
     var pendingNativeRenderingRequest: Bool? = nil
 
+    /// Sodalite#156: the host's standing "the picture is not on my layer" request, from
+    /// `setNativeSubtitleRendering`. While it holds, the native rendition IS the display, so a
+    /// subtitle pick has to reach it and a subtitles-off has to take it down. Both directions were
+    /// missing, and they hid each other: nothing deselected, so a pick made against a standing
+    /// selection looked like it had been followed.
+    var nativeSubtitleRenderingRequested = false
+
     /// AE#464 round 2: the position the load currently in flight was handed, parked across the window
     /// in which `load` has already zeroed the clock but the rebuilt session has not reached it yet.
     /// Written at the two sites that raise `state = .loading` for a load; read only through
