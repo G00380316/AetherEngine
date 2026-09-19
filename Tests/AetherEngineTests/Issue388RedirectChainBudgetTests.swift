@@ -23,19 +23,6 @@ struct Issue388RedirectChainBudgetTests {
     private let mediaHostResigned = URL(string: "https://nexus-128.example.net/signed/1325105.mkv?exp=2&sig=b")!
     private let secondEdge = URL(string: "https://nexus-175.example.net/signed/1325105.mkv?exp=1&sig=c")!
 
-    /// Wait on a state the budget itself reports rather than on a duration, and with no deadline of
-    /// its own: a finite bound here is overrun by an oversubscribed machine, and then the bound
-    /// decides what the test reports. The hang catcher is the `.timeLimit` trait on the test.
-    private func waitFor(_ condition: () -> Bool) async {
-        // The sleep has to be allowed to THROW. `try?` here swallows the cancellation the
-        // `.timeLimit` trait sends, `Task.sleep` then returns at once, and the loop spins for as
-        // long as the job lives instead of letting the trait report: one hung `swift test` on main
-        // at the 30 minute job ceiling (run 35421586854).
-        while !condition() {
-            do { try await Task.sleep(nanoseconds: 2_000_000) } catch { return }
-        }
-    }
-
     // MARK: - The ceiling
 
     @Test("the ceiling declared for the loaded URL binds the host that serves the bytes")
@@ -90,7 +77,7 @@ struct Issue388RedirectChainBudgetTests {
 
     @Test("a request against the pinned target waits for the pump instead of joining it",
           .timeLimit(.minutes(3)))
-    func targetRequestQueuesBehindThePump() async {
+    func targetRequestQueuesBehindThePump() async throws {
         let budget = OriginRequestBudget()
         budget.setHostLimit(1, for: portal)
         let pump = budget.acquire(for: portal, label: "pump", timeout: 0.1)
@@ -112,17 +99,17 @@ struct Issue388RedirectChainBudgetTests {
         }
         // Wait for the thread before waiting for the park, or the observation window is spent on
         // scheduling and a waiter that never ran reports a budget defect nobody measured.
-        await waitFor { started.value == true }
+        try await waitFor { started.value == true }
 
         // Either outcome ends the wait, so a budget that lets the detour through is still reported
         // at once, while starvation can only delay these two lines, never flip what they read.
-        await waitFor { budget.snapshot(for: mediaHost)?.waiting == 1 || granted.value != nil }
+        try await waitFor { budget.snapshot(for: mediaHost)?.waiting == 1 || granted.value != nil }
         #expect(granted.value == nil, "nothing may be granted while the pump holds the only slot")
         #expect(budget.snapshot(for: mediaHost)?.waiting == 1,
                 "the second request went out alongside the pump: \(String(describing: budget.snapshot(for: mediaHost)))")
 
         budget.release(pump)
-        await waitFor { granted.value != nil }
+        try await waitFor { granted.value != nil }
         #expect(granted.value == true, "the waiter must be served once the pump's slot comes back")
     }
 

@@ -20,7 +20,7 @@ struct SourcePrewarmAdoptionTests {
         URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!
     }
 
-    private func warm(_ server: ThrottledOriginServer, bytes: Int) async {
+    private func warm(_ server: ThrottledOriginServer, bytes: Int) async throws {
         _ = await SourcePrewarmFetcher.warm(url: url(server), extraHeaders: [:],
                                             byteBudget: bytes, into: .shared)
     }
@@ -28,10 +28,9 @@ struct SourcePrewarmAdoptionTests {
     /// The warm open deliberately does not wait for the data connection, so the request it issues
     /// is still on the wire when `open()` returns. Waiting for it here is the test's job, not the
     /// reader's.
-    private func waitForRequest(_ server: ThrottledOriginServer, startingAt start: Int64) async {
-        for _ in 0..<100 {
-            if server.requestedRanges.contains(where: { $0.start == start }) { return }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+    private func waitForRequest(_ server: ThrottledOriginServer, startingAt start: Int64) async throws {
+        try await waitFor(upTo: .seconds(10)) {
+            server.requestedRanges.contains(where: { $0.start == start })
         }
     }
 
@@ -46,7 +45,7 @@ struct SourcePrewarmAdoptionTests {
         SourcePrewarmStore.shared.clear()
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
-        await warm(server, bytes: warmBytes)
+        try await warm(server, bytes: warmBytes)
         let warmRequests = server.rangeRequestCount
 
         let reader = AVIOReader(url: url(server))
@@ -67,13 +66,13 @@ struct SourcePrewarmAdoptionTests {
         SourcePrewarmStore.shared.clear()
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
-        await warm(server, bytes: warmBytes)
+        try await warm(server, bytes: warmBytes)
         let warmRequests = server.rangeRequestCount
 
         let reader = AVIOReader(url: url(server))
         defer { reader.markClosed(); reader.close() }
         try reader.open()
-        await waitForRequest(server, startingAt: Int64(warmBytes))
+        try await waitForRequest(server, startingAt: Int64(warmBytes))
 
         let opened = Array(server.requestedRanges.dropFirst(warmRequests))
         #expect(opened.contains(where: { $0.start == Int64(warmBytes) }),
@@ -90,7 +89,7 @@ struct SourcePrewarmAdoptionTests {
         SourcePrewarmStore.shared.clear()
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
-        await warm(server, bytes: warmBytes)
+        try await warm(server, bytes: warmBytes)
 
         let reader = AVIOReader(url: url(server))
         defer { reader.markClosed(); reader.close() }
@@ -109,7 +108,7 @@ struct SourcePrewarmAdoptionTests {
                                          firstByteDelayUs: { _ in 2_000_000 })
         let server = try #require(slow)
         defer { server.stop() }
-        await warm(server, bytes: warmBytes)
+        try await warm(server, bytes: warmBytes)
 
         let reader = AVIOReader(url: url(server))
         defer { reader.markClosed(); reader.close() }
@@ -130,7 +129,7 @@ struct SourcePrewarmAdoptionTests {
         let small: Int64 = 40 * 1024
         let server = try #require(ThrottledOriginServer(totalSize: small))
         defer { server.stop() }
-        await warm(server, bytes: 1 << 20)
+        try await warm(server, bytes: 1 << 20)
         let warmRequests = server.rangeRequestCount
 
         let reader = AVIOReader(url: url(server))
@@ -165,7 +164,7 @@ struct SourcePrewarmAdoptionTests {
         SourcePrewarmStore.shared.clear()
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
-        await warm(server, bytes: warmBytes)
+        try await warm(server, bytes: warmBytes)
 
         let first = AVIOReader(url: url(server))
         try first.open()
@@ -197,7 +196,7 @@ struct SourcePrewarmAdoptionTests {
         let reader = AVIOReader(url: url(server))   // no headers: a different request
         defer { reader.markClosed(); reader.close() }
         try reader.open()
-        await waitForRequest(server, startingAt: 0)
+        try await waitForRequest(server, startingAt: 0)
 
         let opened = Array(server.requestedRanges.dropFirst(warmRequests))
         #expect(opened.contains(where: { $0.start == 0 }),
@@ -213,7 +212,7 @@ struct SourcePrewarmAdoptionTests {
         SourcePrewarmStore.shared.clear()
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
-        await warm(server, bytes: warmBytes)
+        try await warm(server, bytes: warmBytes)
         // The source is not what it was when it was warmed.
         let restated: Int64 = 32 * 1024 * 1024
         server.setTotalSize(restated)
