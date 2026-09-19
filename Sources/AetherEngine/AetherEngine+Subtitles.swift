@@ -2056,6 +2056,7 @@ extension AetherEngine {
             // left ~45/46 segments empty (device-confirmed). Pre-fill far enough ahead to cover that burst; break
             // early when the reader stops making progress (EOF / read-ahead parked) so we never wait the full
             // deadline for content with little remaining.
+            var prefilledCues: Int?
             if let stores = nativeSubtitleReaderParams?.stores, ordinal < stores.count {
                 let store = stores[ordinal]
                 let target = currentTime + 240.0
@@ -2086,6 +2087,30 @@ extension AetherEngine {
                 if exit == "target", store.readMaxCueEnd() < target { exit = "deadline" }
                 let waited = Int(Date().timeIntervalSince(began) * 1000)
                 EngineLog.emit("[AetherEngine] native subtitle pre-fill done: readMax=\(String(format: "%.1f", store.readMaxCueEnd())) target=\(String(format: "%.1f", target)) cues=\(store.cueCount) exit=\(exit) waited=\(waited)ms readersRunning=\(nativeSubtitleReadersTask != nil)", category: .engine)
+                prefilledCues = store.cueCount
+            }
+            // Sodalite#156: never hand AVKit an EMPTY rendition. The comment above says why the
+            // pre-fill exists; this is the half that was missing, and without it the pre-fill is
+            // advice rather than a gate. AVKit fetches the whole forward window in one burst at
+            // selection and never re-fetches a segment it already has, so selecting an empty
+            // rendition is not a slow start, it is a caption box with no text in it for the rest of
+            // the session (device log 2026-09-19: `cues=0 exit=deadline waited=15146ms`, then
+            // `selected=Deutsch`, then an empty `subs_0_392.vtt` the receiver kept).
+            //
+            // Empty is not always a race. The store can be legitimately empty because the track has
+            // nothing to say here: a FORCED subtitle covers foreign dialogue only, and Sodalite
+            // selects one silently when the viewer turns subtitles off. Waiting longer would not have
+            // helped that one, and the deadline had already been paid in full.
+            //
+            // Refusing costs nothing that selecting would have bought: nothing is drawn either way,
+            // and only the refusal can be retried. `nativeSubtitleReapplyOrdinal` is set before this
+            // runs, so the readers' own re-anchor re-selects once coverage reaches the playhead.
+            if prefilledCues == 0 {
+                EngineLog.emit("[AetherEngine] native subtitle select refused: rendition ordinal=\(ordinal) "
+                               + "is empty at the playhead, and AVKit caches what it is handed. "
+                               + "Leaving it deselected; the readers' re-anchor retries once it has cues",
+                               category: .engine)
+                return
             }
             // #15: AVKit attaches the legible renderer to whatever selection is active when the rendering
             // pipeline is established; a selection made mid-playback updates state + downloads cues but is not
