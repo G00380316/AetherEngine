@@ -2017,6 +2017,28 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] reload superseded before start; ignored", category: .engine)
             return nil
         }
+        // #227 round 2: this is a session-preserving rebuild exactly like `reloadAtCurrentPosition`'s
+        // URL branch, and it tears down the very item the external-playback KVO watches, so it has to
+        // hold the same edge. #227 put the hold on that one branch only, which left the three rebuilds
+        // that come through here (the audio pick, the disc-title pick, and that function's own
+        // custom-source branch) acting on an edge that describes a teardown rather than a route.
+        //
+        // Measured on an AirPlay route, device log 2026-09-19: the unheld `false` cleared
+        // `airPlayActive` BEFORE `loadNative` read it, so the audio switch rebuilt the session on
+        // 127.0.0.1, which a receiver cannot reach (the Apple TV never requested that port at all),
+        // the receiver re-engaged, and the true edge paid for a SECOND full rebuild to get back onto
+        // the LAN URL. One pick, two session rebuilds, the first one dead on arrival.
+        let wasPreservingSession = sessionPreservingReloadInFlight
+        sessionPreservingReloadInFlight = true
+        defer {
+            // Restored rather than cleared, and the reconcile belongs to the OUTERMOST rebuild alone:
+            // a nested one that reconciled would start a reload inside the teardown of the rebuild
+            // still running, which is #227's loop entered from the inside instead of from the KVO.
+            sessionPreservingReloadInFlight = wasPreservingSession
+            if AetherEngine.rebuildOwnsHeldExternalPlaybackEdge(wasAlreadyRebuilding: wasPreservingSession) {
+                reconcileExternalPlaybackAfterReload()
+            }
+        }
         // Disc title to reopen with: an explicit override (selectTitle on a custom disc) wins, else the title
         // already playing so an audio switch / background-resume doesn't silently revert to the main title (#67).
         let titleToReopen = discTitleIDOverride ?? activeDiscTitleID

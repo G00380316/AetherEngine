@@ -2464,6 +2464,18 @@ public final class AetherEngine: ObservableObject {
         return parked
     }
 
+    /// #227 round 2: whether a finishing session-preserving rebuild is the one that owns the held
+    /// external-playback edge, and so the one that reconciles it against the live route.
+    ///
+    /// Only the outermost does. Every rebuild raises the hold, because every rebuild tears down the
+    /// item the KVO watches and so produces a false edge that describes the teardown rather than the
+    /// route; but a nested one that reconciled would start a reload inside the teardown of the
+    /// rebuild still running. That is the same loop #227 exists to prevent, reached from the inside
+    /// rather than from the KVO, and it is why the flag is restored on exit instead of cleared.
+    nonisolated static func rebuildOwnsHeldExternalPlaybackEdge(wasAlreadyRebuilding: Bool) -> Bool {
+        !wasAlreadyRebuilding
+    }
+
     /// #35 cold-DV-master startup-readiness gate. A DV master (P7->P8.1, or any HDR master)
     /// instantiated while the HDMI DV/HDCP decode path is still warming right after an SDR->HDR switch
     /// resolves 0 tracks (silent park) or fails -11819 "Cannot Complete Action"; neither is a
@@ -4808,12 +4820,18 @@ public final class AetherEngine: ObservableObject {
         // session state is seeded into the load and the selection restored after it.
         let audioToRestore = selection.audioTrackIndex
         let carryover = selection.subtitles
+        let wasPreservingSession = sessionPreservingReloadInFlight
         sessionPreservingReloadInFlight = true
         // #227: the reconcile has to run on every exit, including a thrown/superseded load, or an edge held
         // during the reload is lost and the session stays on the wrong URL for the current route.
+        // Round 2: restored rather than cleared, and only the outermost rebuild reconciles. This used
+        // to clear the flag outright, so a rebuild nested inside another one ended the outer hold
+        // early and reconciled on its behalf, mid-teardown.
         defer {
-            sessionPreservingReloadInFlight = false
-            reconcileExternalPlaybackAfterReload()
+            sessionPreservingReloadInFlight = wasPreservingSession
+            if AetherEngine.rebuildOwnsHeldExternalPlaybackEdge(wasAlreadyRebuilding: wasPreservingSession) {
+                reconcileExternalPlaybackAfterReload()
+            }
         }
         // Live: rejoin at the live edge; pre-suspend playhead is stale and may have slid out of the window.
         let resume: Double? = LiveReloadPolicy.resumePosition(
