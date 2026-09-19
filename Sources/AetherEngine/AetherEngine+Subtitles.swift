@@ -1541,18 +1541,32 @@ extension AetherEngine {
         // the fetching stops, so re-selecting the track starts fresh from the current window.
         liveSubtitleFetchTask?.cancel()
         liveSubtitleFetchTask = nil
-        // AE#154: a remote-HLS legible selection lives in AVMediaSelection, not the overlay
-        // pipeline; deselect it on the item (criteria pinned manual so system caption prefs
-        // don't immediately re-select).
-        // #316: an injected external rendition is the same kind of selection, under an external id.
-        if let active = activeSubtitleTrackIndex,
-           RemoteHLSMediaSelection.ordinal(forTrackID: active) != nil
-            || injectedSubtitleRenditionNames[active] != nil,
-           let item = currentAVPlayer?.currentItem {
+        // A legible selection lives in AVMediaSelection, not in the overlay pipeline, so turning
+        // subtitles off has to deselect it as well. This is the mirror of the select: the readers
+        // being cancelled below only stops FILLING the rendition, it does not stop anything from
+        // rendering it.
+        //
+        // It used to be narrowed to a remote-HLS selection (AE#154) and an injected external
+        // rendition (#316), the two cases where the engine knew a selection existed. Every other
+        // session has one too whenever the host asked for native rendering, and there it was left
+        // standing. Measured on AirPlay (device log 2026-09-19, Sodalite#156): subtitles off cancelled
+        // the readers, and the receiver went on fetching the rendition it had been handed
+        // (subs_1_380.vtt, subs_1_381.vtt, both AFTER the off) and drew an empty caption box over the
+        // picture for the rest of the session. The text was gone because nothing filled it; the box
+        // stayed because nothing deselected it. A sender-side `textStyleRules` hide cannot reach that,
+        // it is a local text-renderer instruction and the receiver never sees it.
+        //
+        // Deliberately the item-level deselect and NOT `setNativeSubtitleSelected(track: nil)`, whose
+        // job this otherwise is: that call also clears `nativeSubtitleReapplyOrdinal`, and
+        // `nativeOrdinalToReplay` is guarded on `currentOrdinal == nil`. Clearing it here would have
+        // let the #170 carryover replay fire on the `.clear` branch, i.e. re-select the rendition on
+        // the next session-preserving reload, which is the opposite of what this is for.
+        if let item = currentAVPlayer?.currentItem {
             Task { @MainActor in
                 self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
                 guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
                 item.select(nil, in: group)
+                EngineLog.emit("[AetherEngine] subtitles off: native rendition deselected", category: .engine)
             }
         }
         cancelSidecarTask()
