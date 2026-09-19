@@ -3597,9 +3597,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return probed
     }
 
-    /// Concurrent queue for the staggered open-time size probes; each probe blocks its
-    /// worker on a semaphore-driven URLSession round-trip.
-    private static let sizeProbeQueue = DispatchQueue(label: "aether.avio.size-probe", attributes: .concurrent)
+    /// Each staggered open-time size probe gets its own thread, because each one blocks on a
+    /// semaphore-driven URLSession round-trip. On a concurrent queue that is a global-pool worker
+    /// held for the whole round-trip, and a process whose pool workers are all in a blocking wait
+    /// gives the fallbacks no thread at all: `open()` spends its budget, falls back to streaming
+    /// mode, and the source silently loses seekability although the origin would have answered.
+    /// Seen on CI as the #255 HEAD fallback never running.
 
     /// How long the primary open-ended range probe runs alone before the two fallback
     /// probes fire. Fast origins resolve well inside this window and never see a
@@ -3630,7 +3633,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         func launch(after delay: TimeInterval, name: String, _ run: @escaping @Sendable () -> Int64) {
             state.cond.lock(); state.outstanding += 1; state.cond.unlock()
-            Self.sizeProbeQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            let probe = Thread { [weak self] in
+                if delay > 0 { Thread.sleep(forTimeInterval: delay) }
                 state.cond.lock()
                 let alreadyResolved = state.resolvedSize > 0
                 state.cond.unlock()
@@ -3645,6 +3649,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 state.cond.broadcast()
                 state.cond.unlock()
             }
+            probe.name = "aether.avio.size-probe.\(name)"
+            probe.qualityOfService = .userInitiated
+            probe.start()
         }
 
         launch(after: 0, name: "Range probe") { [weak self] in
