@@ -166,7 +166,7 @@ struct Issue306SoftwareTelemetryTests {
         let sampler = LiveTelemetrySampler(engine: engine, softwareRead: { _ in
             entered.set(true)
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global().async {
+                Thread.detachNewThread {
                     release.wait()
                     continuation.resume()
                 }
