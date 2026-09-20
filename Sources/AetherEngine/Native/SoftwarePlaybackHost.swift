@@ -1228,7 +1228,18 @@ final class SoftwarePlaybackHost {
         didParkClockAtEnd = false
         didEmitParkedDiag = false
         let packetSource = vodPacketReadAhead
-        let cacheGeneration = packetSource?.beginSeek(to: seconds)
+        // #107 round 2: `seconds` is the SESSION axis. The demuxer, the packet
+        // store, the decoder's skip threshold and the synchronizer clock all
+        // speak the source's own timestamps, so the target is carried back over
+        // before it reaches any of them, the same conversion `liveScrubStill`
+        // already makes with `sessionStartPts`. For a zero-based source the two
+        // axes coincide and this is the identity, which is why the omission only
+        // ever showed on a mid-stream-joined one.
+        let sourceSeconds = SWClockAnchorPolicy.sourceSeconds(
+            forSession: seconds,
+            sessionZeroSeconds: clockSessionZero
+        )
+        let cacheGeneration = packetSource?.beginSeek(to: sourceSeconds)
         // #292: inside another seek's window `isPlaying` is that seek's parked flag, not the transport's
         // intent. Inherit what it captured, and hand the same value on to whoever supersedes this one.
         let wasPlaying = SeekResumeIntent.resolve(isPlaying: isPlaying,
@@ -1265,14 +1276,14 @@ final class SoftwarePlaybackHost {
         // packet read before the seek used to meet a renderer with no threshold standing and was
         // taken. It then owns the newest handed-over timestamp, and the first real post-seek frame
         // reports the entire seek distance as one inter-frame interval.
-        let targetTime = CMTime(seconds: seconds, preferredTimescale: 90000)
+        let targetTime = CMTime(seconds: sourceSeconds, preferredTimescale: 90000)
         videoDecoder.skipUntilPTS = targetTime
         renderer.setSkipThreshold(targetTime)
 
         var cacheHit = false
         if let packetSource, let cacheGeneration {
             let preparation = await Task.detached(priority: .userInitiated) {
-                try packetSource.prepareSeek(cacheGeneration, to: seconds)
+                try packetSource.prepareSeek(cacheGeneration, to: sourceSeconds)
             }.result
             guard seekGeneration == generation, !stopRequested else { return .superseded }
             switch preparation {
@@ -1281,7 +1292,7 @@ final class SoftwarePlaybackHost {
                 EngineLog.emit(
                     "[SWHost] packet cache seek generation=\(generation) "
                     + "result=\(hit ? "hit" : "miss") "
-                    + "target_s=\(String(format: "%.3f", seconds)) "
+                    + "target_s=\(String(format: "%.3f", sourceSeconds)) "
                     + "resident_bytes=\(packetSource.snapshot.residentBytes)",
                     category: .swPlayback
                 )
@@ -1308,7 +1319,7 @@ final class SoftwarePlaybackHost {
             outcome = .landed
         } else {
             outcome = await dem.seekBounded(
-                to: seconds, timeout: Self.seekBudgetSeconds, on: seekQueue,
+                to: sourceSeconds, timeout: Self.seekBudgetSeconds, on: seekQueue,
                 isSuperseded: { [weak self] in
                     self?.seekGeneration != generation || (self?.stopRequested ?? true)
                 })
@@ -1351,7 +1362,7 @@ final class SoftwarePlaybackHost {
         // The source stands at the target and the clock is anchored on it: everything the loop
         // reads from here belongs to this position. Closing the window releases the loop.
         noteSeekSettled(generation)
-        if let cacheGeneration { packetSource?.endSeek(cacheGeneration, sourceClock: seconds) }
+        if let cacheGeneration { packetSource?.endSeek(cacheGeneration, sourceClock: sourceSeconds) }
         return outcome
     }
 

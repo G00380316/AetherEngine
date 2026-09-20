@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A seek on a mid-stream-joined source no longer rewinds to the start of the file and starves
+  the reader.** `SoftwarePlaybackHost.seek(to:)` carries the target from the session axis over to
+  the source axis before it reaches the demuxer, the packet store, the decoder's skip threshold
+  and the synchronizer clock, the same conversion `liveScrubStill` already makes, and the
+  identity for a zero-based source. Without it the demuxer clamped to the beginning of the file
+  and the packet store read the whole offset as reservoir, so the producer stopped reading and
+  the picture stood with no error reported (#107 round 2).
+
 - **Subtitle OCR no longer blocks Swift's cooperative executor.** Vision text recognition is a
   synchronous call that waits for work of its own, so running it from a task (including
   `Task.detached`) can occupy every cooperative worker at once and stall everything else in the
