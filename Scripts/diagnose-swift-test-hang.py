@@ -10,7 +10,7 @@ import time
 
 
 output = Path(os.environ.get("AE_DIAGNOSTIC_OUTPUT", "ci-hang-evidence"))
-output.mkdir(exist_ok=True)
+output.mkdir(parents=True, exist_ok=True)
 idle_timeout = int(os.environ.get("AE_DIAGNOSTIC_IDLE_TIMEOUT", "120"))
 timeout = int(os.environ.get("AE_DIAGNOSTIC_TIMEOUT", "360"))
 
@@ -46,11 +46,16 @@ def snapshot(process, label):
 process = None
 try:
     with (output / "swift-test.log").open("wb") as log:
+        environment = dict(os.environ)
+        if "AE_TEST_FRAMEWORK_PATH" in environment:
+            environment["DYLD_FRAMEWORK_PATH"] = environment["AE_TEST_FRAMEWORK_PATH"]
+            environment["DYLD_LIBRARY_PATH"] = environment["AE_TEST_LIBRARY_PATH"]
         process = subprocess.Popen(
             sys.argv[1:] or ["swift", "test", "--skip-build"],
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            env=environment,
         )
         print(f"Owned test command PID: {process.pid}", flush=True)
         started = time.monotonic()

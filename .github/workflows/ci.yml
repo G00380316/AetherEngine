@@ -39,6 +39,7 @@ jobs:
       # SIGPIPE from a test origin server (see the SO_NOSIGPIPE note in Issue177IngestPrefetchTests),
       # so nothing hangs and no time limit would have caught it.
       - name: swift test
+        if: github.event_name != 'workflow_dispatch'
         timeout-minutes: 8
         run: python3 Scripts/diagnose-swift-test-hang.py
 
@@ -47,6 +48,8 @@ jobs:
         env:
           LIBDISPATCH_COOPERATIVE_POOL_STRICT: '1'
           AE_DIAGNOSTIC_OUTPUT: ci-hang-evidence/strict-ocr
+          AE_TEST_FRAMEWORK_PATH: /Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks
+          AE_TEST_LIBRARY_PATH: /Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib
         run: |
           python3 Scripts/diagnose-swift-test-hang.py \
             /Applications/Xcode_26.3.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper \
