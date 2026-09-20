@@ -22,6 +22,14 @@ the public-API contract.
   native rendition: its advanced cursor is dropped, so re-selection collects those cues again,
   while everything already recognised stays in the store.
 
+- **Item diagnostics read on their own threads, so a saturated dispatch pool cannot strand them.**
+  The two read lanes shared a private concurrent queue, and a concurrent queue draws from the
+  non-overcommit root: measured on macOS 27 with 64 work items blocked on the global pool, such a
+  queue had not started after 30 seconds, while a thread started in 0.1 ms. That is precisely the
+  state a stranded media server produces, so the carrier failed in the one case it existed for.
+  The lanes already count their own admission, so each read now carries a thread that lives exactly
+  as long as it does. The serial-queue callers are unchanged; their queue is their admission policy.
+
 - **Native item diagnostics no longer block the main actor or read logs inside AVFoundation
   callbacks.** Access/error notifications, failure dumps and outgoing-item counter reads use
   item-bound, coalesced background batches. A blocked getter keeps its admission slot until it

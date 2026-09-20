@@ -89,14 +89,19 @@ struct ItemDiagnosticSnapshot: Sendable {
     }
 }
 
-/// Process-wide admission, not a fresh queue/thread per load. Cancellation invalidates publication;
+/// Process-wide admission, not a fresh lane per load. Cancellation invalidates publication;
 /// it cannot release a lane still inside a synchronous native getter. A second lane lets a new item
 /// make progress past one stranded read. If both strand, diagnostics wait, never playback.
+///
+/// The lanes count themselves, so each read carries its own thread rather than a shared concurrent
+/// queue: a concurrent queue draws from the non-overcommit root and stops starting work once the
+/// global pool is saturated, which is the one state in which a stranded media server makes these
+/// reads interesting (see AVFoundationOffMain for the measurement). Two lanes means at most two
+/// threads, and they live only as long as their read.
 @MainActor
 final class ItemDiagnosticReadPool {
     static let shared = ItemDiagnosticReadPool()
     nonisolated static let maximumConcurrentReads = 2
-    private let queue = DispatchQueue(label: "engine.item-diagnostics", qos: .utility, attributes: .concurrent)
     private var pending: [AVPlayerItemDiagnostics] = []
     private(set) var runningCount = 0
     var pendingCount: Int { pending.count }
@@ -129,7 +134,7 @@ final class ItemDiagnosticReadPool {
             let item = reader.item
             let read = reader.read
             Task { @MainActor in
-                let snapshot = await AVFoundationOffMain.read(item, on: queue) { item in
+                let snapshot = await AVFoundationOffMain.read(item) { item in
                     read(item, request)
                 }
                 runningCount -= 1
