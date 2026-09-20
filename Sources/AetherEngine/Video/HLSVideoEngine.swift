@@ -1431,12 +1431,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Keyed on the sample entry the route chose, not on the variant: a Profile 5 record served as
         // its base layer (`dolbyVisionHandling = .baseLayerOnly`) is plain hvc1 whose VUI the muxer
         // stream-copies as it stands.
-        // A record the engine synthesized from the RPU (AE#recordless) is the opposite case: the source
-        // is a file whose VUI says nothing on purpose, and the reference muxer that plays it correctly
-        // in Safari writes no `colr` at all. Stamping BT.2020 / PQ over an IPT-PQ-c2 base is what made
-        // the picture greener than the SDR route, so the tuple stays unspecified there.
+        // A record the engine synthesized from the RPU (AE#recordless) needs the repair most of all:
+        // its gate IS an unspecified VUI, which is the signal shape #19 was reported on, and a source
+        // is the same bytes whether the container recorded its profile or not. Measured on one
+        // bitstream in two containers, Dolby's P5 asset with and without its `dvcC`: with the record
+        // `init.mp4` is 883 B carrying `colr nclx` 9 / 16 / 9 full range, without it and without this
+        // override 864 B and no `colr` at all, which would be two deliveries of one picture.
         let p5ColorOverride: MP4SegmentMuxer.ColorOverride?
-        if codecTagOverride == "dvh1", !dem.synthesizedDolbyVisionRecord {
+        if codecTagOverride == "dvh1" {
             let sourceRange = codecpar.pointee.color_range
             p5ColorOverride = MP4SegmentMuxer.ColorOverride(
                 primaries: AVCOL_PRI_BT2020,
