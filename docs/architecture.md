@@ -479,6 +479,7 @@ Sources/AetherEngine/
 │   ├── RestartCoalescer.swift               Coalesces a burst of producer-restart requests into one in-flight + one settled target (rapid-seek, AetherEngine#35)
 │   ├── LiveWindow.swift                     Live path: session-relative DVR timeline (seconds since first frame), shared by the native and SW live paths
 │   ├── MP4SegmentMuxer.swift                Native path: session-long fragmented-MP4 muxer (+empty_moov+default_base_moof+frag_custom+delay_moov)
+│   ├── NALUnitChain.swift                   Final-stage payload guard before the fMP4 mux: a video sample whose length-prefixed NAL chain overruns it is cut at its last complete unit, because Apple's parser answers one such sample with -19602 for the whole segment (AE#561)
 │   ├── AudioLanguageMap.swift               Native path: the ISO 639-2/T an audio track is declared with in the master's `EXT-X-MEDIA:TYPE=AUDIO` rendition and written into its `mdhd`; ICU in front of the twenty ISO 639-2/B bibliographic codes Matroska writes, then canonicalization for the ISO 639-3 members CLDR aliases and pass-through for the ones it does not, failing closed on anything ICU can neither resolve nor name (AE#458)
 │   ├── FragmentSplitter.swift               Native path: routes mp4 muxer's avio output stream into init.mp4 (ftyp+moov) vs per-segment moof+mdat files
 │   ├── PacketRingBuffer.swift               Live path: keyframe-indexed, disk-spooled packet ring backing the SW-path DVR rewind

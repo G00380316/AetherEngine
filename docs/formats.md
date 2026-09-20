@@ -130,6 +130,25 @@ change is needed. The existing whole-file missing-offset policy above remains se
 See the [partial-composition regression and reproduction](partial-composition-regression.md)
 for generated fixtures, original numeric evidence and verification limits.
 
+### A video sample whose NAL chain overruns it
+
+A sample in an mp4 video track is a run of NAL units, each introduced by a big-endian
+length of the width the `avcC` / `hvcC` record declares, and a parser walks that run by
+addition. A damaged source can carry a length that reaches past the end of its own
+sample, and the two consumers answer that differently: libavcodec logs `Invalid NAL unit
+size`, skips the frame and plays on, while Apple's fMP4 parser answers the whole SEGMENT
+with `CoreMediaErrorDomain -19602`, which ends the session and every reload onto that
+segment. A file like that therefore plays in mpv, plays after an MKVToolNix remux (which
+drops the unparsable tail), and dies here at whichever position AVPlayer first has to
+decode across the damaged sample.
+
+The session muxer walks each video sample's chain before the write and cuts it at its
+last complete NAL, which is the same bytes the remux would have written. A healthy sample
+is left alone, an Annex B payload is refused rather than walked as lengths, and a sample
+with no complete unit at all is dropped instead of written empty. The fixture generator
+`Scripts/nal-overrun-fixture.py` forges the shape into any length-prefixed source by
+rewriting four bytes, so the healthy original stands as the control arm (AE#561).
+
 ## HDR routing
 
 | Source | Wrapper signaling |
