@@ -27,6 +27,15 @@ the public-API contract.
   have been refused was admitted. The anchor is carried onto the source axis with the same
   conversion the seek uses (#107 round 2, #416).
 
+- **A software live seek publishes its landing on the source axis, like every other publication on
+  that path.** `sourceTime` rides the raw synchronizer clock so the overlay drainer's playhead and
+  the packet store's timestamps agree, but the software live branch wrote the session-relative
+  target over it, and stated the harvest anchor there too. On a mid-stream-joined live source one
+  drain tick then read the whole offset as an unannounced reposition, reset its cursor and scanned
+  a stretch the store has nothing at, with the next tick seeing the same offset in the other
+  direction. `SoftwarePlaybackHost.sourceSeconds(forSession:)` is now the single place that mapping
+  is made, and the host's own live scrub still and DVR rewind go through it (#107 round 2).
+
 - **Subtitle OCR no longer blocks Swift's cooperative executor.** Vision text recognition is a
   synchronous call that waits for work of its own, so running it from a task (including
   `Task.detached`) can occupy every cooperative worker at once and stall everything else in the

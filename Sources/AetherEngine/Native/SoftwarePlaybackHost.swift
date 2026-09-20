@@ -117,11 +117,21 @@ final class SoftwarePlaybackHost {
     var cachedVODBytes: Int64? { vodPacketReadAhead.map { Int64($0.snapshot.residentBytes) } }
     var vodPacketCacheSnapshot: SoftwarePacketReadAhead.Snapshot? { vodPacketReadAhead?.snapshot }
 
-    /// #107 round 2: a session-axis position on the source axis, for a caller outside the host that
-    /// hands a target to something speaking source timestamps. `seek(to:)` makes the same
-    /// conversion for everything inside the host; the identity for a zero-based source.
+    /// #107 round 2: a session-axis position on the source axis. The one place that mapping is
+    /// made, for callers inside the host and outside it alike; the identity for a zero-based
+    /// source, which is why the omissions only ever showed on a mid-stream-joined one.
+    ///
+    /// The two session shapes anchor on different things and always have: the live feeder anchors
+    /// on the first packet's PTS as it arrives, the VOD path on the anchor `SWClockAnchorPolicy`
+    /// resolved at the first decoded sample, which carries the resume offset with it.
     func sourceSeconds(forSession seconds: Double) -> Double {
-        SWClockAnchorPolicy.sourceSeconds(forSession: seconds, sessionZeroSeconds: clockSessionZero)
+        guard isLive else {
+            return SWClockAnchorPolicy.sourceSeconds(forSession: seconds,
+                                                     sessionZeroSeconds: clockSessionZero)
+        }
+        liveEdgeLock.lock()
+        defer { liveEdgeLock.unlock() }
+        return (sessionStartPts.isFinite ? sessionStartPts : 0) + seconds
     }
 
     private let demuxQueue = DispatchQueue(label: "engine.sw.demux", qos: .userInitiated)
@@ -1381,12 +1391,7 @@ final class SoftwarePlaybackHost {
     /// the demux or feed loop would make the viewer pay for the preview in dropped packets.
     func liveScrubStill(atSessionSeconds seconds: Double, maxWidth: Int) async -> CGImage? {
         guard isLive, let ring = dvrRing, let extractor = stillExtractor else { return nil }
-        let startPts: Double = {
-            liveEdgeLock.lock()
-            defer { liveEdgeLock.unlock() }
-            return sessionStartPts.isFinite ? sessionStartPts : 0
-        }()
-        let targetSource = startPts + seconds
+        let targetSource = sourceSeconds(forSession: seconds)
         let requests = stillRequests
         let ticket = requests.next()
         return await withCheckedContinuation { continuation in
@@ -1404,11 +1409,7 @@ final class SoftwarePlaybackHost {
 
     /// Live DVR rewind: reseeds decoder from the ring (source PTS axis; maps via sessionStartPts) without touching the live demuxer. After return, the loop reads new packets forward and plays back to live.
     private func seekLiveDVR(to targetSession: Double, ring: PacketRingBuffer, wasPlaying: Bool) async {
-        let startPts: Double = {
-            liveEdgeLock.lock(); defer { liveEdgeLock.unlock() }
-            return sessionStartPts.isFinite ? sessionStartPts : 0
-        }()
-        let targetSource = startPts + targetSession
+        let targetSource = sourceSeconds(forSession: targetSession)
 
         let targetTime = CMTime(seconds: targetSource, preferredTimescale: 90000)
         videoDecoder.skipUntilPTS = targetTime
