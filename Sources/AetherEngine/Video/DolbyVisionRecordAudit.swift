@@ -143,7 +143,8 @@ public enum DolbyVisionRecordAudit {
             pixelFormat: codecpar.pointee.format,
             colorTransfer: codecpar.pointee.color_trc, colorMatrix: codecpar.pointee.color_space,
             colorPrimaries: codecpar.pointee.color_primaries) else { return false }
-        let rpu = rpuProfileOfSource(url: url, extraHeaders: extraHeaders)
+        let rpu = rpuProfileOfSource(
+            url: url, extraHeaders: extraHeaders, packetBudget: recordlessPacketBudget)
         guard rpuProvesProfile5(rpu), synthesizeProfile5Record(codecpar) else {
             EngineLog.emit(
                 "[AetherEngine] AE#recordless: untagged 10-bit HEVC with no DV record, RPU "
@@ -161,6 +162,15 @@ public enum DolbyVisionRecordAudit {
     /// RPU, so the answer is in the first one; the slack is for a container whose head is audio.
     private static let auditPacketBudget = 16
 
+    /// The same for the recordless gate, where the slack is paid by the wrong sources. #532 reads packets
+    /// only for a record its own VUI already contradicts, which is a source that is broken either way;
+    /// the recordless gate is met by every untagged 10-bit HEVC, and an SDR encode with no colour
+    /// description is a common shape that walks the whole budget to learn nothing. Measured against an
+    /// origin at 150 ms latency and 1 MB/s on a 30 MB untagged 10-bit SDR Matroska: `probe` costs 0.50 s
+    /// without the audit, 2.75 s at a budget of 16 and about 1.2 s at 2. A Profile 5 answers in the first
+    /// video packet, so four is slack and not budget.
+    private static let recordlessPacketBudget = 4
+
     /// Open the source a second time and read what its first RPU says. nil when the source cannot be
     /// opened, carries no video, or holds no parseable RPU in its first frames, which all mean the same
     /// thing to the caller: the record stands.
@@ -169,7 +179,9 @@ public enum DolbyVisionRecordAudit {
     /// handed to the software path as it stands and packets taken out of it here would be packets that
     /// path never sees. The audit is gated on `recordIsContradicted`, so this cost is paid by the one
     /// class of source that is already broken without it, and by no other.
-    static func rpuProfileOfSource(url: URL, extraHeaders: [String: String]) -> Int? {
+    static func rpuProfileOfSource(
+        url: URL, extraHeaders: [String: String], packetBudget: Int = auditPacketBudget
+    ) -> Int? {
         let demuxer = Demuxer()
         defer { demuxer.close() }
         do {
@@ -188,7 +200,7 @@ public enum DolbyVisionRecordAudit {
             size: Int(codecpar?.pointee.extradata_size ?? 0))
 
         var walked = 0
-        while walked < auditPacketBudget {
+        while walked < packetBudget {
             guard let packet = (try? demuxer.readPacket()) ?? nil else { return nil }
             defer {
                 av_packet_unref(packet)
