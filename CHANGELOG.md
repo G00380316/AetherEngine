@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.8.1] - 2026-09-20
+
 ### Fixed
 
 - **Every segment of a Matroska with B-frames now opens on a keyframe (AE#561).** The
