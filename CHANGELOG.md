@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A seek on a mid-stream-joined source no longer rewinds to the start of the file and starves
+  the reader.** `SoftwarePlaybackHost.seek(to:)` carries the target from the session axis over to
+  the source axis before it reaches the demuxer, the packet store, the decoder's skip threshold
+  and the synchronizer clock — the same conversion `liveScrubStill` already makes, and the
+  identity for a zero-based source. Without it the demuxer clamped to the beginning of the file
+  and the packet store read the whole offset as reservoir, so the producer stopped reading and
+  the picture stood with no error reported (#107 round 2).
+
 - **Native item diagnostics no longer block the main actor or read logs inside AVFoundation
   callbacks.** Access/error notifications, failure dumps and outgoing-item counter reads use
   item-bound, coalesced background batches. A blocked getter keeps its admission slot until it
