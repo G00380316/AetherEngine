@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.9.0] - 2026-09-20
+
 ### Added
 
 - **A probe can identify HDR10+ before playback.** `AetherEngine.probe(url:detecting:)` takes a
@@ -25,6 +29,37 @@ the public-API contract.
   2 s) and additive: a cap leaves the base probe's answer exactly where it was, and a negative means
   "not seen inside the budget", never "proven absent". `aetherctl probe` gained
   `--detect-hdr10plus` and `--detect-atmos`. Suggested by Geordie.
+
+### Fixed
+
+- **A video sample whose NAL chain overruns it is cut instead of handed on (AE#561).** A sample in
+  an mp4 video track is a run of NAL units, each introduced by a big-endian length of the width the
+  `avcC` / `hvcC` record declares, and a parser walks that run by addition. A damaged source can
+  carry a length that reaches past the end of its own sample (a reporter's Blu-ray remux declared
+  384137139 bytes with 350873 left in the packet), and the two consumers answer that differently:
+  libavcodec logs `Invalid NAL unit size`, skips the frame and plays on, while Apple's fMP4 parser
+  answers the whole SEGMENT with `CoreMediaErrorDomain -19602`, which ends the session and every
+  reload onto that segment. Such a file plays in mpv, plays after an MKVToolNix remux (which drops
+  the unparsable tail), and died here at whichever position AVPlayer first had to decode across the
+  damaged sample, which is why the stops looked like specific places rather than a fixed interval.
+  The session muxer now cuts each video sample at its last complete NAL, which is the same bytes the
+  remux would have written. A healthy sample is untouched, an Annex B payload is refused rather than
+  walked as lengths, and the prefix width comes out of the configuration record rather than being
+  assumed to be four. `Scripts/nal-overrun-fixture.py` forges the shape into any length-prefixed
+  source by rewriting four bytes, so the healthy original stands as the control arm.
+
+- **A session AVPlayer refuses is handed to the engine's own decoder rather than ended (AE#561).**
+  Every recovery under the native path answers the same bytes again: the #93 revive reloads the item
+  at the position that died, the stage-2 chain refills the same segment. Against a transient that is
+  right, and against a segment Apple's parser refuses on its merits it is a loop that ends the
+  session with the replacement item dying milliseconds after the first. A failure in the CoreMedia
+  domain is now offered to `SoftwarePlaybackHost` before it is made terminal: the session is rebuilt
+  at its playhead with `preferredDecodePath = .software`, which decodes with libavcodec (one skipped
+  frame rather than a dead session) and reads the demuxer directly instead of the loopback HLS, so
+  it steps around a local-server wedge too. Once per session, and only for a verdict on the MEDIA: a
+  URL-loading failure is a verdict on the SOURCE, which both paths read through the same reader.
+  Whether the software path can serve the source at all stays the AE#461 `decodePathRefusal`, so a
+  source it cannot serve costs a refusal and the original failure rather than a second dead session.
 
 ## [7.8.1] - 2026-09-20
 
