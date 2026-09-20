@@ -81,6 +81,12 @@ struct DemuxerOpenProfile: Sendable {
     /// distinguished them. Defaults to the pump, since every other path builds its profile explicitly.
     var readerLabel: String = "pump"
 
+    /// Whether a probe of an untagged 10-bit HEVC source may read its first RPU to find a Dolby Vision
+    /// Profile 5 the container never recorded (`DolbyVisionRecordAudit.addRecordIfProfile5`). On for every
+    /// playback open, so the probe, the HLS producer's own open and every rebuild agree; off for the
+    /// disposable still extractor.
+    var auditsRecordlessDolbyVision: Bool = true
+
     /// A copy of `self` under a different reader name, for two call sites that share a profile.
     func withReaderLabel(_ label: String) -> DemuxerOpenProfile {
         var copy = self
@@ -106,7 +112,8 @@ struct DemuxerOpenProfile: Sendable {
         avioRequestTimeout: 8,
         avioMaxRetries: 1,
         skipStreamInfo: false,
-        readerLabel: "extract"
+        readerLabel: "extract",
+        auditsRecordlessDolbyVision: false
     )
 
     /// A copy of `self` with only the open-time probe budget overridden (#68).
@@ -220,6 +227,10 @@ public final class Demuxer: @unchecked Sendable {
 
     private var avioProvider: AVIOProvider?
     private var openProfile: DemuxerOpenProfile = .playback
+
+    /// The URL and headers this demuxer was opened from, kept for the recordless Dolby Vision audit's
+    /// second open. nil for a custom reader (no second open to give) and for a live source.
+    private var auditSource: (url: URL, headers: [String: String])?
 
     /// #409: rewrites the timestamps of an MP4 whose writer dropped the composition-offset table.
     /// Lives here rather than in a playback host so that every consumer of this demuxer (the fMP4
@@ -417,6 +428,7 @@ public final class Demuxer: @unchecked Sendable {
     ///   - isLive: Suppresses EOF synthesis and surfaces terminal error on reconnect cap.
     func open(url: URL, extraHeaders: [String: String] = [:], profile: DemuxerOpenProfile = .playback, isLive: Bool = false, selectTitleID: Int? = nil) throws {
         self.openProfile = profile
+        self.auditSource = isLive ? nil : (url, extraHeaders)
         let isHTTP = url.scheme == "http" || url.scheme == "https"
 
         if isHTTP {
@@ -427,6 +439,7 @@ public final class Demuxer: @unchecked Sendable {
             if url.isFileURL, let fileReader = FileIOReader(url: url),
                let discInfo = try DiscReader.wrap(fileReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString) {
                 adoptDiscInfo(discInfo)
+                auditSource = nil
                 let bridge = CustomIOReaderBridge(reader: discInfo.reader)
                 let inputFormat = av_find_input_format(discInfo.formatHint)
                 try openWithProvider(bridge, inputFormat: inputFormat, isLive: isLive)
@@ -469,6 +482,7 @@ public final class Demuxer: @unchecked Sendable {
     /// `discImageProbeEnabled`.
     func open(reader: IOReader, formatHint: String? = nil, profile: DemuxerOpenProfile = .playback, isLive: Bool = false, selectTitleID: Int? = nil, discCacheKey: String? = nil) throws {
         self.openProfile = profile
+        self.auditSource = nil
         if reader.discImageProbeEnabled,
            let discInfo = try DiscReader.wrap(reader, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
             adoptDiscInfo(discInfo)
@@ -497,6 +511,7 @@ public final class Demuxer: @unchecked Sendable {
            let discReader = HTTPDiscIOReader(url: url, extraHeaders: extraHeaders) {
             if let discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString) {
                 adoptDiscInfo(discInfo)
+                auditSource = nil
                 let bridge = CustomIOReaderBridge(reader: discInfo.reader)
                 let inputFormat = av_find_input_format(discInfo.formatHint)
                 try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
@@ -691,6 +706,13 @@ public final class Demuxer: @unchecked Sendable {
         }
         logStreams(ctx)
         armGeneratedPTSSuppression(ctx)
+        if openProfile.auditsRecordlessDolbyVision, let source = auditSource {
+            let idx = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
+            if idx >= 0, let codecpar = ctx.pointee.streams[Int(idx)]?.pointee.codecpar {
+                DolbyVisionRecordAudit.addRecordIfProfile5(
+                    codecpar: codecpar, url: source.url, extraHeaders: source.headers)
+            }
+        }
     }
 
     /// An audio stream this build can never resolve, named so a report can say why a source came up

@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A Dolby Vision Profile 5 source with no container record is recognised from its first RPU.** Such a
+  file loaded as SDR `hvc1` and its IPT picture was decoded as YCbCr (a violet/green cast). For untagged
+  10-bit HEVC with no record, the demuxer now reads the first RPU and, if it reads profile 5, adds the
+  missing record so the existing Profile 5 paths apply. Any other source is left alone.
 
 ## [7.7.1] - 2026-09-19
 
