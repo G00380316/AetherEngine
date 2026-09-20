@@ -861,7 +861,22 @@ final class AudioBridge: @unchecked Sendable {
                 }
                 stats.framesDecoded += 1
                 if rebaseFromNextSourcePTS, packetPts != Self.avNoPTS {
+                    // AE#561 follow-up: this counter stamps the FRAME handed to the encoder, and an
+                    // encoder that declares `initial_padding` stamps its first PACKET a padding BELOW
+                    // that frame (256 samples on the AC-3 family, 0 on FLAC), so that a consumer which
+                    // discards the priming lands back on the source position. Nothing discards it
+                    // here: the muxer writes no edit list on purpose, since the init segment has to
+                    // stay restart-invariant, so the priming plays as the silence it is. Without the
+                    // offset the published timeline therefore STARTS a padding below the source, and
+                    // at source 0 that is a negative `baseMediaDecodeTime`, a field that is
+                    // `unsigned int(64)`: -256 went out as 2^64 - 256 and AVPlayer placed the whole
+                    // first audio fragment 584 thousand years out, losing its ~190 ms of audio. The
+                    // offset costs the content the padding's 5.3 ms instead, which is what an
+                    // unsignalled priming is worth and two orders below the lip-sync threshold. It is
+                    // applied on every rebase, not only near zero, so a restart mid-file inherits the
+                    // same relationship instead of stepping by a padding.
                     nextEncoderPTS = av_rescale_q(packetPts, srcTimeBase, encoderTimeBase)
+                        &+ Int64(enc.pointee.initial_padding)
                     rebaseFromNextSourcePTS = false
                 }
                 try resampleAndPushIntoFIFO(srcFrame: sf, enc: enc, swr: swr, fifo: fifoPtr)

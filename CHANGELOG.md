@@ -12,6 +12,35 @@ the public-API contract.
 
 ### Fixed
 
+- **Every segment of a Matroska with B-frames now opens on a keyframe (AE#561).** The
+  keyframe-aligned plan's boundaries ARE the container's index entries, and containers disagree
+  about what an entry's timestamp means: a mov/mp4 sample table holds decode times, a Matroska Cue
+  holds a presentation time. The cutter gate compared decode times against both (#358), so on any
+  MKV whose video carries composition offsets no IRAP ever reached its own boundary. The gate never
+  opened on the planned keyframe, audio (routed by boundary and not gated) opened the segment
+  instead, and every segment began mid-GOP about one IRAP below its own first random-access point,
+  with nothing in it a cold decode could start from. Playback survived only while AVPlayer decoded
+  THROUGH the boundaries; the first time it had to decode FROM one it stopped with
+  `CoreMediaErrorDomain -19602`, at a position that depends on the encode rather than on elapsed
+  time, and the automatic item reload died on the same segment. The gate now compares a packet on
+  the plan's own axis (`PlanBoundaryAxis`, read from the demuxer's format name), so a keyframe hits
+  its own boundary exactly on either container, and the AE#412 reach is measured on that same axis.
+  mov/mp4 sessions are unchanged, byte for byte. Pinned by `PlanBoundaryAxisTests` on one HEVC
+  stream muxed into both containers, where the stamping is the only difference.
+
+
+- **Bridged multichannel audio no longer publishes its first fragment 584 thousand years out
+  (AE#561 follow-up).** `baseMediaDecodeTime` is `unsigned int(64)`, so a negative published
+  timestamp is unrepresentable rather than merely unusual. The audio bridge stamps the frame it
+  hands the encoder, and an encoder that declares `initial_padding` stamps its first packet a
+  padding below that frame (256 samples on the AC-3 family, which is what surround-compat mode
+  reaches for above two channels; FLAC declares none). At source position 0 that published -256 as
+  2^64 - 256, and the session lost the ~190 ms of audio in that fragment. Nothing discards the
+  priming here, because the muxer writes no edit list on purpose, so the counter now carries the
+  padding and the content pays its 5.3 ms instead, two orders below the lip-sync threshold. Applied
+  on every rebase, so a restart mid-file keeps the same relationship instead of stepping by a
+  padding. Pinned by `BridgedAudioOriginTests` on a 5.1 PCM Matroska.
+
 - **A live recording now starts at zero instead of carrying the broadcast's own clock.**
   Copying the source timestamps verbatim produced a recording whose first presentation timestamp
   lay hours past its own beginning, which a duration probe reports as the offset rather than the
@@ -79,6 +108,20 @@ the public-API contract.
   file loaded as SDR `hvc1` and its IPT picture was decoded as YCbCr (a violet/green cast). For untagged
   10-bit HEVC with no record, the demuxer now reads the first RPU and, if it reads profile 5, adds the
   missing record so the existing Profile 5 paths apply. Any other source is left alone.
+
+### Changed
+
+- **A restart into a Matroska boundary re-aims on the distance it actually overshot (AE#561).** The
+  AE#408 tolerance, which decides when a segment opens so far past its boundary that going back for
+  an earlier sync sample is worth it, carried the stream's reorder depth. That term pays for a
+  boundary stamped in decode time being judged by presentation time, not for anything the stream
+  does, and a Matroska Cue is already a presentation time: there a correctly indexed keyframe
+  presents exactly at its boundary, and the term only widened the window in which a genuinely late
+  open escaped its re-aim. On that axis the tolerance is now the floor, which sharpens the decision
+  on the container AE#408 was reported against. mov/mp4 keeps the reorder term, because there the
+  skew is real. The gate's own comparison is deliberately left lenient; the reported AE#169 geometry
+  has the boundary falling between the anchor keyframe's two timestamps, matching neither axis, and
+  only the permissive reading admits it at all.
 
 ## [7.8.0] - 2026-09-20
 

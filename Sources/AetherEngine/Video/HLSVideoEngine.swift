@@ -663,6 +663,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// claimed it) or a source-declared plan (which aims below its IRAP by design, AE#268).
     var planBoundariesClaimRandomAccess = false
 
+    /// AE#561: the axis `segmentPlan`'s boundaries are stamped on, handed to every producer this
+    /// session builds so its cutter gate compares a packet on the plan's own axis. Set together with
+    /// `planBoundariesClaimRandomAccess`, because it is the same plan that makes it meaningful: only
+    /// the keyframe-aligned plan's boundaries ARE index entries. `.decode` for every other plan,
+    /// which is what the cutter compared before the axis existed.
+    var planBoundaryAxis: PlanBoundaryAxis = .decode
+
     /// Guards subsystem refs + `sessionEpoch`. Never held across waits or network I/O so
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
     let restartLock = NSLock()
@@ -1225,6 +1232,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     sourceDurationSeconds: durationSeconds
                 )
                 planBoundariesClaimRandomAccess = true
+                // AE#561: these boundaries ARE this container's index entries, so they carry its
+                // stamping. Read from the demuxer that produced them, never from the URL or the
+                // host's metadata: on a remux session the delivered container is the one indexed.
+                planBoundaryAxis = PlanBoundaryAxis.forContainer(formatName: dem.containerFormatName)
                 let firstKeyframePts = keyframes.sorted().first ?? 0
                 self.firstKeyframePts = firstKeyframePts
                 let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
@@ -2528,6 +2539,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoPts: videoTarget,
             boundaryClaimsRandomAccess: planBoundariesClaimRandomAccess,
+            planBoundaryAxis: planBoundaryAxis,
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
             subtitlePacketStreamIndices: allEmbeddedSubtitleStreamIndices,   // #112 rework
