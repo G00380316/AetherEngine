@@ -47,7 +47,11 @@ jobs:
         env:
           LIBDISPATCH_COOPERATIVE_POOL_STRICT: '1'
           AE_DIAGNOSTIC_OUTPUT: ci-hang-evidence/strict-ocr
-        run: python3 Scripts/diagnose-swift-test-hang.py swift test --skip-build --filter 'SubtitleOCR|SidecarPGS'
+        run: |
+          python3 Scripts/diagnose-swift-test-hang.py \
+            /Applications/Xcode_26.3.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper \
+            --test-bundle-path "$PWD/.build/arm64-apple-macosx/debug/AetherEnginePackageTests.xctest/Contents/MacOS/AetherEnginePackageTests" \
+            --testing-library swift-testing --filter 'SubtitleOCR|SidecarPGS'
 
       - name: Preserve hang evidence
         if: always()

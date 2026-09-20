@@ -35,7 +35,7 @@ def snapshot(process, label):
         "\n".join(f"{pid} {command}" for pid, command in children) + "\n"
     )
     for pid, command in children:
-        if ".xctest" in command or "swiftpm-testing" in command:
+        if ".xctest" in command or "swiftpm-testing" in command or pid == process.pid:
             subprocess.run(
                 ["sample", str(pid), "5", "-file", str(output / f"{label}-{pid}.sample.txt")],
                 timeout=20,
@@ -52,7 +52,7 @@ try:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        print(f"Owned swift test PID: {process.pid}", flush=True)
+        print(f"Owned test command PID: {process.pid}", flush=True)
         started = time.monotonic()
         changed = started
         previous_size = 0
