@@ -13,11 +13,14 @@ the public-API contract.
 ### Fixed
 
 - **A live recording now starts at zero instead of carrying the broadcast's own clock.**
-  `LiveRecordingWriter` took the origin from the first packet it writes — the arming keyframe —
-  and subtracts that one instant from every stream, so the A/V relationship is untouched and the
-  file reads like any other. Copying the source timestamps verbatim produced a recording whose
-  first presentation timestamp lay hours past its own beginning, which a duration probe reports
-  as the offset rather than the length (#560 round 2).
+  Copying the source timestamps verbatim produced a recording whose first presentation timestamp
+  lay hours past its own beginning, which a duration probe reports as the offset rather than the
+  length. `LiveRecordingWriter` asks the muxer for the rebase (`avoid_negative_ts=make_zero`), so
+  the origin is the lowest timestamp across every stream rather than the arming video keyframe:
+  a TS interleaves the audio belonging to a picture ahead of that picture, and rebasing on the
+  keyframe has to clamp those frames, which on a source whose audio led by 100 ms put four AC-3
+  frames and the picture on instant zero together. The lead is preserved instead, and the A/V
+  relationship is untouched for the rest of the file (#560 round 2, #574 by @tschuegy).
 
 - **A seek on a mid-stream-joined source no longer rewinds to the start of the file and starves
   the reader.** `SoftwarePlaybackHost.seek(to:)` carries the target from the session axis over to

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import AetherLibavcodec
+import AetherLibavformat
 import AetherLibavutil
 @testable import AetherEngine
 
@@ -256,29 +257,120 @@ struct LiveRecordingWriterTests {
         #expect(writer.bytesWritten == 512, "only the mapped stream's packet is written")
     }
 
-    // MARK: - The file starts at zero (#560 round 2)
+    // MARK: - The file starts at zero (#560 round 2, #574)
 
-    @Test("a live source's own timestamps are shifted so the recording begins at zero")
-    func rebasesOntoZero() {
-        // A channel that has been up since morning: 24549.835 s at 90 kHz.
+    /// The presentation timestamps of the first packet of each stream, read back out of the
+    /// written file. Demuxing is enough here: nothing is decoded, and the TS demuxer reports the
+    /// timestamps the muxer wrote whether or not the payload means anything.
+    private func firstTimestamps(in url: URL) throws -> [Int32: Int64] {
+        var ctx: UnsafeMutablePointer<AVFormatContext>?
+        guard avformat_open_input(&ctx, url.path, nil, nil) >= 0, let context = ctx else {
+            throw RecordingFailure.writeFailed("could not open the written file")
+        }
+        defer { var c: UnsafeMutablePointer<AVFormatContext>? = context; avformat_close_input(&c) }
+
+        var first: [Int32: Int64] = [:]
+        guard let pkt = av_packet_alloc() else { return first }
+        defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+        while av_read_frame(context, pkt) >= 0 {
+            if first[pkt.pointee.stream_index] == nil, pkt.pointee.pts != Int64.min {
+                first[pkt.pointee.stream_index] = pkt.pointee.pts
+            }
+            av_packet_unref(pkt)
+        }
+        return first
+    }
+
+    @Test("a channel that has been up since morning still records a file that begins at zero")
+    func recordingBeginsAtZero() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let params = makeVideoParameters()
+        defer { free(params) }
+
+        let writer = try LiveRecordingWriter(
+            url: url,
+            streams: [RecordingStreamDescriptor(sourceStreamIndex: 0,
+                                                timeBaseNum: 1, timeBaseDen: 90000,
+                                                codecParameters: params, isVideo: true)],
+            ceilingBytes: 1 << 20,
+            onFailure: { _ in }
+        )
+
+        // 24549.835 s at 90 kHz: where a channel's clock stands seven hours into its day.
         let origin: Int64 = 2_209_485_150
-        #expect(LiveRecordingWriter.rebased(origin, by: origin) == 0)
-        #expect(LiveRecordingWriter.rebased(origin + 90_000, by: origin) == 90_000)
+        for i in 0..<30 {
+            let payload = annexBPayload(1024, nalType: i == 0 ? 0x65 : 0x41)
+            payload.withUnsafeBytes { buf in
+                writer.accept(packetBytes: buf, sourceStreamIndex: 0,
+                              pts: origin + Int64(i) * 3000, dts: origin + Int64(i) * 3000,
+                              duration: 3000, isKeyframe: i == 0)
+            }
+        }
+        writer.finish(reason: .stoppedByHost)
+
+        let first = try firstTimestamps(in: url)
+        #expect(first[0] == 0, "a duration probe reads a broadcast clock as the length")
     }
 
-    @Test("an unknown timestamp travels through untouched")
-    func leavesNoPTSAlone() {
-        #expect(!LiveRecordingWriter.isValid(Int64.min))
-        #expect(LiveRecordingWriter.isValid(0))
-        #expect(LiveRecordingWriter.rebased(Int64.min, by: 1_000) == Int64.min)
-        // No origin yet is no shift, not a shift by zero guessed at.
-        #expect(LiveRecordingWriter.rebased(5_000, by: nil) == 5_000)
-    }
+    @Test("the audio that leads the arming keyframe keeps its distance from the picture")
+    func keepsTheLeadOfInterleavedAudio() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
 
-    @Test("a reordered frame just before the arming keyframe does not go negative")
-    func clampsReorderedFramesAtZero() {
-        // The muxer refuses a negative timestamp; sharing instant zero with the
-        // keyframe costs nothing and reorders nothing.
-        #expect(LiveRecordingWriter.rebased(900, by: 1_000) == 0)
+        let video = makeVideoParameters()
+        let audio = avcodec_parameters_alloc()!
+        audio.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        audio.pointee.codec_id = AV_CODEC_ID_AC3
+        audio.pointee.sample_rate = 48000
+        defer { free(video); free(audio) }
+
+        let writer = try LiveRecordingWriter(
+            url: url,
+            streams: [
+                RecordingStreamDescriptor(sourceStreamIndex: 0, timeBaseNum: 1, timeBaseDen: 90000,
+                                          codecParameters: video, isVideo: true),
+                RecordingStreamDescriptor(sourceStreamIndex: 1, timeBaseNum: 1, timeBaseDen: 90000,
+                                          codecParameters: audio, isVideo: false),
+            ],
+            ceilingBytes: 1 << 20,
+            onFailure: { _ in }
+        )
+
+        // A TS interleaves the audio that belongs with a picture ahead of the picture itself, so
+        // the packets that arrive just after the arming keyframe carry EARLIER timestamps than it.
+        // Rebasing on the keyframe rather than on the lowest timestamp in the file has to clamp
+        // them, and the lead is what gets lost: measured at 100 ms, four frames came out sharing
+        // instant zero with a picture that belongs 100 ms later.
+        let origin: Int64 = 2_209_485_150
+        let lead: Int64 = 9_000                                  // 100 ms at 90 kHz
+        let idr = annexBPayload(1024, nalType: 0x65)
+        idr.withUnsafeBytes { buf in
+            writer.accept(packetBytes: buf, sourceStreamIndex: 0,
+                          pts: origin, dts: origin, duration: 3000, isKeyframe: true)
+        }
+        let audioPayload = [UInt8](repeating: 0x0B, count: 256)
+        for i in 0..<10 {
+            audioPayload.withUnsafeBytes { buf in
+                writer.accept(packetBytes: buf, sourceStreamIndex: 1,
+                              pts: origin - lead + Int64(i) * 2_880,
+                              dts: origin - lead + Int64(i) * 2_880,
+                              duration: 2_880, isKeyframe: true)
+            }
+        }
+        for i in 1..<10 {
+            let payload = annexBPayload(1024, nalType: 0x41)
+            payload.withUnsafeBytes { buf in
+                writer.accept(packetBytes: buf, sourceStreamIndex: 0,
+                              pts: origin + Int64(i) * 3_000, dts: origin + Int64(i) * 3_000,
+                              duration: 3_000, isKeyframe: false)
+            }
+        }
+        writer.finish(reason: .stoppedByHost)
+
+        let first = try firstTimestamps(in: url)
+        #expect(first[1] == 0, "the earliest packet in the file is the one that becomes zero")
+        #expect(first[0] == lead, "the picture still sits the source's 100 ms behind its audio")
     }
 }
