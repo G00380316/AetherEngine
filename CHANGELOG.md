@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **A probe can identify HDR10+ before playback.** `AetherEngine.probe(url:detecting:)` takes a
+  `ProbeDetail` option set and runs the opt-in passes it names over one open handle: `.hdr10Plus`
+  scans demuxed video packets for ST 2094-40 carriage, `.atmos` is the bounded E-AC-3 JOC decode
+  that `probeDetectingAtmos` already ran (which stays, as a spelling of `detecting: .atmos`). Asking
+  for both costs one connection rather than two. `SourceProbe` gains `carriesHDR10PlusMetadata`, and
+  a source the container called HDR10 reads `.hdr10Plus` once the payload is seen, so a host can
+  label a title correctly on first play instead of waiting for the session's own mid-playback
+  upgrade. The scan opens no decoder: HDR10+ rides an in-band ITU-T T.35 SEI that no demuxer parses
+  (only `hevcdec` surfaces it, post-decode), and Matroska's `AV_PKT_DATA_DYNAMIC_HDR10_PLUS` side
+  data is read as the second carriage. Bounded by `HDR10PlusDetectionOptions` (32 packets, 16 MiB,
+  2 s) and additive: a cap leaves the base probe's answer exactly where it was, and a negative means
+  "not seen inside the budget", never "proven absent". `aetherctl probe` gained
+  `--detect-hdr10plus` and `--detect-atmos`. Suggested by Geordie.
 
 ## [7.8.1] - 2026-09-20
 

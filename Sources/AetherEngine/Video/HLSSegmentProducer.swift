@@ -4235,18 +4235,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         packet.pointee.stream_index = muxer.videoOutputStreamIndex
 
-        if !hdr10PlusDetected, let data = packet.pointee.data {
-            let size = Int(packet.pointee.size)
-            if size >= 6 {
-                let needle: [UInt8] = [0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04]
-                let found = needle.withUnsafeBufferPointer { n -> Bool in
-                    memmem(data, size, n.baseAddress, n.count) != nil
-                }
-                if found {
-                    hdr10PlusDetected = true
-                    onFirstHDR10PlusDetected?()
-                }
-            }
+        if !hdr10PlusDetected, HDR10PlusMetadataScan.packetCarriesHDR10Plus(packet) {
+            hdr10PlusDetected = true
+            onFirstHDR10PlusDetected?()
         }
 
         // #131: A53 caption extraction rides the same per-packet spot as the HDR10+ scan: decode
