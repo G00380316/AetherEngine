@@ -1551,8 +1551,19 @@ extension AetherEngine {
                     guard self.itemDeathReviveGate.admit(position: position) else {
                         EngineLog.emit(
                             "[AetherEngine] #93 item death (failedToPlayToEndTime) at "
-                            + "\(String(format: "%.2f", position))s; revive budget exhausted, giving up",
+                            + "\(String(format: "%.2f", position))s; revive budget exhausted",
                             category: .engine)
+                        // AE#561: a frozen position across three reloads is the reload answering the
+                        // same bytes three times. Offer the source to the engine's own decoder before
+                        // the session is left dead.
+                        await self.escalateToSoftwarePath(
+                            SoftwarePathEscalation.Request(
+                                domain: SoftwarePathEscalation.mediaErrorDomain,
+                                code: 0,
+                                message: "item death at a frozen position, revive budget exhausted",
+                                positionSeconds: position.isFinite ? max(0, position) : 0
+                            )
+                        )
                         return
                     }
                     EngineLog.emit(
@@ -1571,6 +1582,28 @@ extension AetherEngine {
             .compactMap { $0 }
             .sink { [weak self] rejection in
                 Task { @MainActor [weak self] in self?.fallBackToMediaPlaylist(rejection) }
+            }
+            .store(in: &nativeCancellables)
+
+        // AE#561: the last rung. Every recovery above reloads the same item against the same bytes,
+        // which is no answer to a segment AVPlayer refuses on its merits. The engine's own decoder
+        // reads the demuxer directly and answers a sample Apple's parser rejects by skipping one
+        // frame, so it is offered the session before the failure is made terminal. Once per session,
+        // and only for a verdict on the MEDIA (see SoftwarePathEscalation).
+        let escalationBudget = softwarePathEscalationBudget
+        let escalationPreferred = loadedOptions.preferredDecodePath
+        let escalationRemoteHLS = loadedOptions.nativeRemoteHLS
+        host.softwarePathAvailability = {
+            SoftwarePathEscalation.Availability(
+                alreadyEscalated: escalationBudget.isSpent,
+                preferredDecodePath: escalationPreferred,
+                nativeRemoteHLS: escalationRemoteHLS
+            )
+        }
+        host.$pendingSoftwarePathEscalation
+            .compactMap { $0 }
+            .sink { [weak self] request in
+                Task { @MainActor [weak self] in await self?.escalateToSoftwarePath(request) }
             }
             .store(in: &nativeCancellables)
 

@@ -167,6 +167,11 @@ final class MP4SegmentMuxer {
     /// length-prefixed at all. Latched at init: it is a property of the configuration record that
     /// lands in the sample entry, and the AE#561 sanitizer walks every video sample with it.
     private let videoNALLengthPrefixSize: Int?
+    /// AE#561 harness switch: the sanitizer removes the only shape that reproduces a segment Apple's
+    /// parser refuses, so the rung underneath it (the software-path escalation) would have nothing to
+    /// be measured against. Read once from the environment, never set in a shipped configuration.
+    static let nalChainSanitizerDisabled =
+        ProcessInfo.processInfo.environment["AETHER_DISABLE_NAL_SANITIZER"] != nil
     /// How many video samples the AE#561 sanitizer has had to cut, over this muxer's life.
     private var truncatedVideoSamples: Int = 0
 
@@ -616,6 +621,7 @@ final class MP4SegmentMuxer {
         // is why the file plays elsewhere. Cut the sample at its last complete NAL, which is what
         // MKVToolNix writes when it remuxes one of these files.
         if streamIndex == videoOutputStreamIndex,
+           !Self.nalChainSanitizerDisabled,
            let lengthPrefixSize = videoNALLengthPrefixSize,
            let data = packet.pointee.data,
            packet.pointee.size > 0,

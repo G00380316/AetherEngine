@@ -149,6 +149,19 @@ with no complete unit at all is dropped instead of written empty. The fixture ge
 `Scripts/nal-overrun-fixture.py` forges the shape into any length-prefixed source by
 rewriting four bytes, so the healthy original stands as the control arm (AE#561).
 
+Under that sits a last rung for the cases the cut cannot reach, because every recovery
+above it answers the same bytes again: the #93 revive reloads the item at the position
+that died, and the stage-2 chain refills the same segment, so a segment AVPlayer refuses
+on its merits ends the session with the replacement item dying milliseconds after the
+first. A failure in the CoreMedia domain is therefore offered to `SoftwarePlaybackHost`
+before it is made terminal: the session is rebuilt at its playhead with
+`preferredDecodePath = .software`, which decodes with libavcodec (one skipped frame rather
+than a dead session) and reads the demuxer directly instead of the loopback HLS. Once per
+session, and only for a verdict on the MEDIA: a URL-loading failure is a verdict on the
+SOURCE, which both paths read through the same reader. Whether the software path can serve
+the source at all is the existing #461 `decodePathRefusal`, so a source it cannot serve
+costs a refusal and the original failure, not a second dead session.
+
 ## HDR routing
 
 | Source | Wrapper signaling |
