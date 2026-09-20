@@ -42,6 +42,13 @@ jobs:
         timeout-minutes: 8
         run: python3 Scripts/diagnose-swift-test-hang.py
 
+      - name: OCR regressions with one cooperative worker
+        timeout-minutes: 8
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: '1'
+          AE_DIAGNOSTIC_OUTPUT: ci-hang-evidence/strict-ocr
+        run: python3 Scripts/diagnose-swift-test-hang.py swift test --skip-build --filter 'SubtitleOCR|SidecarPGS'
+
       - name: Preserve hang evidence
         if: always()
         uses: actions/upload-artifact@v4

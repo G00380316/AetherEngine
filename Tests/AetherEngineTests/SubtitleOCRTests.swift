@@ -4,7 +4,8 @@ import CoreGraphics
 import CoreText
 @testable import AetherEngine
 
-@Suite("Subtitle image OCR")
+// The fallback tests temporarily change the process-wide accurate-model availability flag.
+@Suite("Subtitle image OCR", .serialized, .timeLimit(.minutes(3)))
 struct SubtitleOCRTests {
     @Test("line assembly sorts top line first (Vision origin is bottom-left) and drops blanks")
     func lineAssembly() {
@@ -47,7 +48,7 @@ struct SubtitleOCRTests {
     }
 
     @Test("Vision recognizes clean synthetic subtitle text")
-    func visionSynthetic() throws {
+    func visionSynthetic() async throws {
         let width = 480, height = 96
         let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(),
@@ -60,7 +61,8 @@ struct SubtitleOCRTests {
         ctx.textPosition = CGPoint(x: 24, y: 28)
         CTLineDraw(line, ctx)
         let image = ctx.makeImage()!
-        let text = try #require(SubtitleImageOCR.recognizeText(in: image, language: "en"))
+        let recognized = await SubtitleImageOCR.recognizeText(in: image, language: "en")
+        let text = try #require(recognized)
         #expect(text.contains("HELLO"))
         #expect(text.contains("123"))
     }
@@ -73,7 +75,7 @@ struct SubtitleOCRTests {
     /// Driven through the seam rather than the weather: a machine whose model works cannot reach
     /// the fallback, and a machine whose model is broken cannot be asked for on demand.
     @Test("a subtitle is still read when the accurate model is unavailable")
-    func fallsBackToFastRecognition() throws {
+    func fallsBackToFastRecognition() async throws {
         SubtitleImageOCR.setAccurateUnavailableForTesting(true)
         defer { SubtitleImageOCR.setAccurateUnavailableForTesting(false) }
 
@@ -90,7 +92,8 @@ struct SubtitleOCRTests {
         CTLineDraw(line, ctx)
         let image = ctx.makeImage()!
 
-        let text = try #require(SubtitleImageOCR.recognizeText(in: image, language: "en"),
+        let recognized = await SubtitleImageOCR.recognizeText(in: image, language: "en")
+        let text = try #require(recognized,
                                 "the fallback read nothing, so the cue would have been dropped")
         #expect(text.contains("HELLO"))
         #expect(text.contains("123"))
@@ -107,7 +110,7 @@ struct SubtitleOCRTests {
     /// A language the fast model does not speak must not take the line down with it. Vision's fast
     /// list is six languages; the accurate one is thirty-three.
     @Test("a language the fallback does not support drops the pin, not the line")
-    func fallbackDropsUnsupportedLanguagePin() throws {
+    func fallbackDropsUnsupportedLanguagePin() async throws {
         SubtitleImageOCR.setAccurateUnavailableForTesting(true)
         defer { SubtitleImageOCR.setAccurateUnavailableForTesting(false) }
 
@@ -123,9 +126,184 @@ struct SubtitleOCRTests {
         CTLineDraw(line, ctx)
 
         // Japanese: on the accurate list, not on the fast one.
-        let text = SubtitleImageOCR.recognizeText(in: ctx.makeImage()!, language: "ja")
+        let text = await SubtitleImageOCR.recognizeText(in: ctx.makeImage()!, language: "ja")
         #expect(text?.contains("HELLO") == true,
                 "an unsupported language pin took the whole recognition down: \(text ?? "nil")")
+    }
+}
+
+@Suite("Subtitle recognition executor", .timeLimit(.minutes(3)))
+struct SubtitleOCRExecutorTests {
+    @Test("a blocked recognition leaves the cooperative executor free")
+    func blockedRecognitionAllowsProgress() async throws {
+        let executor = SubtitleImageOCR.Executor()
+        let entered = AtomicBool(false)
+        let onTask = AtomicBool(true)
+        let onMain = AtomicBool(true)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let recognition = Task {
+            await executor.run {
+                onTask.set(withUnsafeCurrentTask { $0 != nil })
+                onMain.set(Thread.isMainThread)
+                entered.set(true)
+                release.wait()
+                return "recognized"
+            }
+        }
+        defer { recognition.cancel() }
+        try await waitFor { entered.get() }
+        #expect(!onTask.get(), "Vision must not synchronously occupy a Swift task's executor")
+        #expect(!onMain.get())
+        release.signal()
+        #expect(await recognition.value == "recognized")
+    }
+
+    @Test("cancellation keeps active admission occupied and removes queued work")
+    func cancellationKeepsAdmissionUntilNativeReturn() async throws {
+        let executor = SubtitleImageOCR.Executor()
+        let entered = AtomicBool(false)
+        let queuedRan = AtomicBool(false)
+        let replacementRan = AtomicBool(false)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let recognition = Task {
+            await executor.run {
+                entered.set(true)
+                release.wait()
+                return "completed cue"
+            }
+        }
+        defer { recognition.cancel() }
+        try await waitFor { entered.get() }
+        let queued = Task {
+            await executor.run { queuedRan.set(true); return "cancelled cue" }
+        }
+        defer { queued.cancel() }
+        try await waitFor { await executor.pendingCount == 1 }
+        queued.cancel()
+        #expect(await queued.value == nil)
+        #expect(!queuedRan.get())
+        recognition.cancel()
+        let replacement = Task {
+            await executor.run { replacementRan.set(true); return "replacement" }
+        }
+        defer { replacement.cancel() }
+        try await waitFor { await executor.pendingCount == 1 }
+        #expect(!replacementRan.get(), "cancellation must not free a running native operation's slot")
+        release.signal()
+        #expect(await recognition.value == "completed cue")
+        #expect(await replacement.value == "replacement")
+    }
+
+    @Test("concurrent callers never overlap native recognition")
+    func concurrentRecognitionIsBounded() async throws {
+        let executor = SubtitleImageOCR.Executor()
+        let counter = RecognitionCounter()
+        let entered = AtomicBool(false)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let first = Task {
+            await executor.run {
+                counter.begin()
+                defer { counter.end() }
+                entered.set(true)
+                release.wait()
+                return "recognized"
+            }
+        }
+        defer { first.cancel() }
+        try await waitFor { entered.get() }
+        let queued = (0..<19).map { _ in
+            Task {
+                await executor.run {
+                    counter.begin()
+                    defer { counter.end() }
+                    return "recognized"
+                }
+            }
+        }
+        defer { queued.forEach { $0.cancel() } }
+        try await waitFor { await executor.pendingCount == 19 }
+        #expect(counter.maximum == 1)
+        release.signal()
+        #expect(await first.value == "recognized")
+        for task in queued { #expect(await task.value == "recognized") }
+        #expect(counter.maximum == 1)
+    }
+
+    @MainActor
+    @Test("cancelling an unfinished embedded batch invalidates only its advanced coverage")
+    func cancelledBatchIsCollectedAgain() throws {
+        let engine = try AetherEngine()
+        engine.subtitleOCRArmedOrdinal = 0
+        engine.subtitleOCRBatchInFlight = true
+        engine.subtitleOCRCursors[0] = SubtitleDrainCursor(lastDecodedPts: 120, lastPlayhead: 100)
+        engine.subtitleOCRPendingStates[0] = SubtitleOCRPendingState()
+        engine.subtitleOCRCursors[1] = SubtitleDrainCursor(lastDecodedPts: 80, lastPlayhead: 60)
+        engine.cancelSubtitleOCRWorker()
+        #expect(engine.subtitleOCRCursors[0] == nil)
+        #expect(engine.subtitleOCRPendingStates[0] == nil)
+        #expect(engine.subtitleOCRCursors[1]?.lastDecodedPts == 80)
+        #expect(!engine.subtitleOCRBatchInFlight)
+        engine.subtitleOCRArmedOrdinal = 1
+        engine.cancelSubtitleOCRWorker()
+        #expect(engine.subtitleOCRCursors[1]?.lastDecodedPts == 80,
+                "completed coverage must survive re-selection")
+    }
+
+    @Test("cancelling a batch retains its completed cue in the originally captured store")
+    func cancellationRetainsCompletedCue() async throws {
+        let original = NativeSubtitleCueStore()
+        let replacement = NativeSubtitleCueStore()
+        let entered = AtomicBool(false)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let fill = Task {
+            await SubtitleImageOCR.appendRecognized(
+                cues: [imageCue(1, 10, 12), imageCue(2, 12, 14)], language: "eng",
+                to: original
+            ) { _, _ in
+                entered.set(true)
+                release.wait()
+                return "completed cue"
+            }
+        }
+        defer { fill.cancel() }
+        try await waitFor { entered.get() }
+        fill.cancel()
+        release.signal()
+        await fill.value
+        let retained = original.snapshotCues()
+        #expect(retained.count == 1)
+        #expect(retained.first?.text == "completed cue")
+        #expect(retained.first?.startTime == 10)
+        #expect(replacement.cueCount == 0)
+    }
+}
+
+private final class RecognitionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private var highWater = 0
+
+    func begin() {
+        lock.lock()
+        active += 1
+        highWater = max(highWater, active)
+        lock.unlock()
+    }
+
+    func end() {
+        lock.lock()
+        active -= 1
+        lock.unlock()
+    }
+
+    var maximum: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return highWater
     }
 }
 

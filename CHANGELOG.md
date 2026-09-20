@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Subtitle OCR no longer blocks Swift's cooperative executor.** Synchronous Vision recognition
+  now runs on a dedicated utility thread with one admitted operation across all callers.
+  Embedded and sidecar workers suspend while waiting for recognition.
+  This fixes the macOS full-suite stall sampled with all three cooperative workers waiting inside
+  Vision. Cancellation removes queued work without starting replacement threads for active work;
+  an interrupted embedded batch is collected again on re-selection.
 
 ## [7.7.1] - 2026-09-19
 
