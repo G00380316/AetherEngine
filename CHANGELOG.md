@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A live recording now starts at zero instead of carrying the broadcast's own clock.**
+  `LiveRecordingWriter` took the origin from the first packet it writes — the arming keyframe —
+  and subtracts that one instant from every stream, so the A/V relationship is untouched and the
+  file reads like any other. Copying the source timestamps verbatim produced a recording whose
+  first presentation timestamp lay hours past its own beginning, which a duration probe reports
+  as the offset rather than the length (#560 round 2).
+
 - **Native item diagnostics no longer block the main actor or read logs inside AVFoundation
   callbacks.** Access/error notifications, failure dumps and outgoing-item counter reads use
   item-bound, coalesced background batches. A blocked getter keeps its admission slot until it

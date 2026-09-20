@@ -35,6 +35,11 @@ final class LiveRecordingWriter: LiveRecordingSink, @unchecked Sendable {
 
     private var queue: LiveRecordingQueue!
 
+    /// The instant the recording calls zero, in seconds on the source clock.
+    /// Taken from the first packet written and then never moved, so every
+    /// stream is shifted by the same amount.
+    private var originSeconds: Double?
+
     private let url: URL
     private let onFailure: @Sendable (RecordingFailure) -> Void
 
@@ -174,8 +179,24 @@ final class LiveRecordingWriter: LiveRecordingSink, @unchecked Sendable {
             }
         }
         pkt.pointee.stream_index = map.out
-        pkt.pointee.pts = item.pts
-        pkt.pointee.dts = item.dts
+        // The file starts at zero, not where the broadcast happened to be.
+        //
+        // A live source's timestamps are whatever its clock had reached — six
+        // or seven hours in on a channel that has been up since morning — and
+        // copying them verbatim produced a file whose first presentation
+        // timestamp lies hours past its own beginning. That is legal, and this
+        // engine's own VOD path had to learn to cope with it (#107), but it is
+        // not what a file is: every player that treats the first timestamp as
+        // the origin reads such a recording as hours of nothing, and a
+        // duration probe reports the offset rather than the length.
+        //
+        // The origin is taken once, from the first packet written — the arming
+        // keyframe — and the same instant is subtracted from every stream, so
+        // the A/V relationship is preserved exactly. Nothing is decoded and
+        // nothing is re-encoded; only the numbering changes.
+        let origin = originTicks(forInput: map.inTb, item: item)
+        pkt.pointee.pts = Self.rebased(item.pts, by: origin)
+        pkt.pointee.dts = Self.rebased(item.dts, by: origin)
         pkt.pointee.duration = item.duration
         if item.isKeyframe { pkt.pointee.flags |= AV_PKT_FLAG_KEY }
         av_packet_rescale_ts(pkt, map.inTb, map.outTb)
@@ -193,6 +214,35 @@ final class LiveRecordingWriter: LiveRecordingSink, @unchecked Sendable {
         ctxLock.lock()
         _bytesWritten += Int64(item.bytes.count)
         ctxLock.unlock()
+    }
+
+    /// The recording's zero, expressed in one stream's own time base.
+    ///
+    /// Latched on the first packet: `dts` decides it where it is known, because
+    /// that is the order the muxer writes in and the arming keyframe carries
+    /// the earliest of both. A source with no usable timestamp at all leaves
+    /// the origin unset and the packets are written as they came.
+    private func originTicks(forInput timeBase: AVRational, item: LiveRecordingQueue.QueuedPacket) -> Int64? {
+        let seconds = Double(timeBase.num) / Double(timeBase.den)
+        if originSeconds == nil {
+            let first = Self.isValid(item.dts) ? item.dts : item.pts
+            guard Self.isValid(first) else { return nil }
+            originSeconds = Double(first) * seconds
+        }
+        guard let originSeconds, seconds > 0 else { return nil }
+        return Int64((originSeconds / seconds).rounded())
+    }
+
+    /// `AV_NOPTS_VALUE` is `Int64.min` and means "unknown"; it travels through
+    /// untouched, exactly as `OutputTimestampSanitizer` treats it.
+    static func isValid(_ timestamp: Int64) -> Bool { timestamp != Int64.min }
+
+    static func rebased(_ timestamp: Int64, by origin: Int64?) -> Int64 {
+        guard let origin, isValid(timestamp) else { return timestamp }
+        // A reordered frame may sit a little before the arming keyframe's DTS.
+        // Clamping keeps the muxer's "no negative timestamp" invariant without
+        // reordering anything: at most the first few frames share instant zero.
+        return max(0, timestamp - origin)
     }
 
     // MARK: - Teardown

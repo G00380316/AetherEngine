@@ -255,4 +255,30 @@ struct LiveRecordingWriterTests {
         writer.finish(reason: .stoppedByHost)
         #expect(writer.bytesWritten == 512, "only the mapped stream's packet is written")
     }
+
+    // MARK: - The file starts at zero (#560 round 2)
+
+    @Test("a live source's own timestamps are shifted so the recording begins at zero")
+    func rebasesOntoZero() {
+        // A channel that has been up since morning: 24549.835 s at 90 kHz.
+        let origin: Int64 = 2_209_485_150
+        #expect(LiveRecordingWriter.rebased(origin, by: origin) == 0)
+        #expect(LiveRecordingWriter.rebased(origin + 90_000, by: origin) == 90_000)
+    }
+
+    @Test("an unknown timestamp travels through untouched")
+    func leavesNoPTSAlone() {
+        #expect(!LiveRecordingWriter.isValid(Int64.min))
+        #expect(LiveRecordingWriter.isValid(0))
+        #expect(LiveRecordingWriter.rebased(Int64.min, by: 1_000) == Int64.min)
+        // No origin yet is no shift, not a shift by zero guessed at.
+        #expect(LiveRecordingWriter.rebased(5_000, by: nil) == 5_000)
+    }
+
+    @Test("a reordered frame just before the arming keyframe does not go negative")
+    func clampsReorderedFramesAtZero() {
+        // The muxer refuses a negative timestamp; sharing instant zero with the
+        // keyframe costs nothing and reorders nothing.
+        #expect(LiveRecordingWriter.rebased(900, by: 1_000) == 0)
+    }
 }
