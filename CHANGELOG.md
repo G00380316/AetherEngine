@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.8.0] - 2026-09-20
+
 ### Added
 
 - **Record a live stream to a file, from the connection the session already holds** (#560).
