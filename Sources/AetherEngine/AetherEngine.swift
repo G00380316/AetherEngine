@@ -5013,13 +5013,21 @@ public final class AetherEngine: ObservableObject {
             // Live/DVR native: translate session-time target into AVPlayer live clock via behind-delta
             // (robust if the edge advances between publish tick and seek; collapses to clockTarget = target - shift).
             // Live SW: drive the host's ring-backed DVR reseed directly; no AVPlayer-clock translation applies.
-            if softwareHost != nil, nativeHost == nil {
+            if let host = softwareHost, nativeHost == nil {
                 EngineLog.emit("[AetherEngine] SW live seek target=\(target)", category: .engine)
-                softwareSubtitlePacketStore?.noteHarvestAnchor(.pump, at: target)   // #416
-                await softwareHost?.seek(to: target)
+                // #416, and #107 round 2 for the axis: the ledger's notes and the overlay drainer's
+                // playhead are both source-axis, so the anchor is stated there too.
+                let targetSource = host.sourceSeconds(forSession: target)
+                softwareSubtitlePacketStore?.noteHarvestAnchor(.pump, at: targetSource)
+                await host.seek(to: target)
                 guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
                 clock.currentTime = target
-                clock.sourceTime = target
+                // #107 round 2: `sourceTime` rides the RAW synchronizer clock everywhere else on
+                // this path (see the `$sourceClockSeconds` sink), and the drainer reads it as its
+                // playhead. Published session-relative here, a mid-stream-joined live source saw
+                // one drain tick at a position its packet store has nothing at, and `drainPlan`
+                // read the gap as an unannounced reposition and reset the cursor for it.
+                clock.sourceTime = targetSource
                 // Sodalite#104 round 2: the transport this publishes is the HOST's, the same way the
                 // VOD landing below reads it off the host it just drove (#122, #292). The live branch
                 // returns early and never got that rule, so a rewind issued while paused published
