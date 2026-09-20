@@ -48,7 +48,7 @@ jobs:
         env:
           LIBDISPATCH_COOPERATIVE_POOL_STRICT: '1'
           AE_DIAGNOSTIC_OUTPUT: ci-hang-evidence/strict-ocr
-          AE_TEST_FRAMEWORK_PATH: /Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks
+          AE_TEST_FRAMEWORK_PATH: /Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks:/Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks:/Applications/Xcode_26.3.app/Contents/SharedFrameworks
           AE_TEST_LIBRARY_PATH: /Applications/Xcode_26.3.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib
         run: |
           python3 Scripts/diagnose-swift-test-hang.py \
