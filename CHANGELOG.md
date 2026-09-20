@@ -23,6 +23,11 @@ the public-API contract.
   last observed totals with an explicit incomplete-final-totals diagnostic. The audio-only host's
   error-log observer follows the same off-main path.
 
+- **A Dolby Vision Profile 5 source with no container record is recognised from its first RPU.** Such a
+  file loaded as SDR `hvc1` and its IPT picture was decoded as YCbCr (a violet/green cast). For untagged
+  10-bit HEVC with no record, the demuxer now reads the first RPU and, if it reads profile 5, adds the
+  missing record so the existing Profile 5 paths apply. Any other source is left alone.
+
 ## [7.8.0] - 2026-09-20
 
 ### Added
@@ -38,6 +43,7 @@ the public-API contract.
   a source reset ends it cleanly instead of writing past a seam. `nativeRemoteHLS`
   (`.remoteBypass`) cannot record and throws `.unsupportedRoute`: AVFoundation holds the source
   connection there and the engine never sees a byte. `aetherctl play --record <path>` drives it.
+
 
 ## [7.7.1] - 2026-09-19
 
