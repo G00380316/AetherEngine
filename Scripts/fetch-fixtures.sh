@@ -18,6 +18,7 @@
 #   restart-witness-subs.mkv      - same as MKV with an embedded SRT track (pump tap)
 #   a53-captions.mp4              - H.264 with in-picture A/53 CEA-608 SEI (#131, #259)
 #   hev1-inband-xps.mp4           - HEVC with in-band VPS/SPS/PPS and an empty hvcC
+#   cue-axis-bframes.mkv/.mp4     - one HEVC B-pyramid stream in both containers (AE#561)
 #
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
@@ -279,6 +280,24 @@ replacement += freed.to_bytes(4, 'big') + b'free' + bytes(freed - 8)
 data[start:start + size] = replacement
 open(path, 'wb').write(bytes(data))
 PY
+
+# AE#561: one HEVC elementary stream in both containers, so the only difference between the two
+# files is what their index entries are stamped on. A Matroska Cue stores a presentation time, a
+# mov/mp4 sample table stores decode times, and the keyframe-aligned plan's boundaries ARE those
+# entries. B-frames (b-pyramid) are what makes the two axes differ at all; a dense keyint puts an
+# IRAP well inside every 4 s segment, so a segment that lost its own IRAP still carries a later one
+# and the defect shows as "opens below its first random-access point" rather than as no picture.
+# The .mp4 is a stream copy on purpose: same packets, same timestamps, different index stamping.
+echo "→ cue-axis-bframes.mkv + .mp4 (HEVC B-pyramid, same stream in both containers, 16s)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "testsrc2=size=480x270:rate=24" \
+    -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 16 \
+    -c:v libx265 -preset ultrafast -pix_fmt yuv420p \
+    -x265-params "keyint=21:min-keyint=21:scenecut=0:bframes=4:b-pyramid=1:log-level=none" \
+    -c:a aac -b:a 96k "$FIXTURES_DIR/cue-axis-bframes.mkv"
+ffmpeg -hide_banner -loglevel error -y \
+    -i "$FIXTURES_DIR/cue-axis-bframes.mkv" -c copy \
+    "$FIXTURES_DIR/cue-axis-bframes.mp4"
 
 # AetherEngine#268: finite HEVC-in-MPEG-TS HLS VOD, the carriage AVFoundation refuses to build a
 # video track for. Three shapes, because each one only shows its own defect:

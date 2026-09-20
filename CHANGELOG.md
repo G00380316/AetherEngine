@@ -12,6 +12,22 @@ the public-API contract.
 
 ### Fixed
 
+- **Every segment of a Matroska with B-frames now opens on a keyframe (AE#561).** The
+  keyframe-aligned plan's boundaries ARE the container's index entries, and containers disagree
+  about what an entry's timestamp means: a mov/mp4 sample table holds decode times, a Matroska Cue
+  holds a presentation time. The cutter gate compared decode times against both (#358), so on any
+  MKV whose video carries composition offsets no IRAP ever reached its own boundary. The gate never
+  opened on the planned keyframe, audio (routed by boundary and not gated) opened the segment
+  instead, and every segment began mid-GOP about one IRAP below its own first random-access point,
+  with nothing in it a cold decode could start from. Playback survived only while AVPlayer decoded
+  THROUGH the boundaries; the first time it had to decode FROM one it stopped with
+  `CoreMediaErrorDomain -19602`, at a position that depends on the encode rather than on elapsed
+  time, and the automatic item reload died on the same segment. The gate now compares a packet on
+  the plan's own axis (`PlanBoundaryAxis`, read from the demuxer's format name), so a keyframe hits
+  its own boundary exactly on either container, and the AE#412 reach is measured on that same axis.
+  mov/mp4 sessions are unchanged, byte for byte. Pinned by `PlanBoundaryAxisTests` on one HEVC
+  stream muxed into both containers, where the stamping is the only difference.
+
 - **A live recording now starts at zero instead of carrying the broadcast's own clock.**
   Copying the source timestamps verbatim produced a recording whose first presentation timestamp
   lay hours past its own beginning, which a duration probe reports as the offset rather than the

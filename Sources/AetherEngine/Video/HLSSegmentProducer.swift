@@ -474,6 +474,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// IRAP (AE#268), so neither may be re-anchored for opening past its target.
     private let boundaryClaimsRandomAccess: Bool
 
+    /// AE#561: the axis `segmentBoundaries` are stamped on, so the cutter gate compares like with
+    /// like. Decode for a mov/mp4 index, presentation for Matroska Cues; see `PlanBoundaryAxis`.
+    private let planBoundaryAxis: PlanBoundaryAxis
+
     /// AE#408: the gate target actually in force. Starts at `restartTargetVideoPts` and moves BACK when
     /// the boundary turns out not to be openable, so the segment covers its own advertised start
     /// instead of carrying content from the far side of a keyframe drought.
@@ -1364,6 +1368,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audioFallbackDurationPts: Int64 = 0,
         restartTargetVideoPts: Int64 = Int64.min,
         boundaryClaimsRandomAccess: Bool = false,
+        planBoundaryAxis: PlanBoundaryAxis = .decode,
         closedCaptionStreamIndex: Int32 = -1,
         subtitleTapStreamIndices: Set<Int32> = [],
         subtitlePacketStreamIndices: Set<Int32> = [],
@@ -1440,6 +1445,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.audioFallbackDurationPts = audioFallbackDurationPts
         self.restartTargetVideoPts = restartTargetVideoPts
         self.boundaryClaimsRandomAccess = boundaryClaimsRandomAccess
+        self.planBoundaryAxis = planBoundaryAxis
         self.effectiveGateTargetPts = restartTargetVideoPts
         self.gateProvenEmptyFromPts = restartTargetVideoPts
         // Audio target set dynamically once video gate opens (rescaled to audio TB).
@@ -3827,17 +3833,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // at the IRAP that reaches its plan boundary, so the IRAP is the segment's first sample
                     // and its open-GOP RASL leading pictures stay with it (#92). Routing by DTS against PTS
                     // boundaries used to drop the IRAP (dts < pts) into the previous segment.
-                    // #358: the VOD plan's boundaries are the mov/mp4 index's sync-sample timestamps,
-                    // which are DECODE times, so the gate compares decode times too. Comparing the
-                    // presentation time against them let a keyframe reach boundaries beyond its own
-                    // by its composition offset (3 s on the field report's remux), consuming plan
-                    // indices that then never opened a segment. Keyframe gating is unchanged, so
-                    // #92 holds: the IRAP is still the segment's first sample and its RASL pictures
-                    // still follow it in decode order.
+                    // #358 / AE#561: the VOD plan's boundaries ARE the container's index entries, and
+                    // what an entry's timestamp means depends on the container: decode times from a
+                    // mov/mp4 sample table, presentation times from a Matroska Cue. The gate compares
+                    // on the plan's own axis (`PlanBoundaryAxis`), because either mismatch costs a
+                    // segment its IRAP: a presentation packet against decode boundaries let a keyframe
+                    // reach boundaries beyond its own (#358), a decode packet against presentation
+                    // boundaries let no keyframe reach its own at all (AE#561). Keyframe gating itself
+                    // is unchanged, so #92 holds: the IRAP is the segment's first sample and its
+                    // open-GOP RASL pictures still follow it in decode order.
                     let thisVideoSeg = isLive
                         ? liveVideoSegmentIndex(pts: packet.pointee.pts, isKeyframe: isVideoKeyframe)
-                        : vodCutter.index(pts: packet.pointee.dts != Int64.min
-                                               ? packet.pointee.dts : packet.pointee.pts,
+                        : vodCutter.index(pts: planBoundaryAxis.timestamp(dts: packet.pointee.dts,
+                                                                          pts: packet.pointee.pts),
                                           isKeyframe: isVideoKeyframe)
                     if thisVideoSeg != pumpQoSLastSeg {
                         pumpQoSLastSeg = thisVideoSeg
@@ -3907,8 +3915,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             if !isLive, (prev.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
                                 let openIdx = muxer.currentSegmentIndex
                                 if firstSyncItemPtsBySegment[openIdx] == nil {
+                                    // AE#561: measured against a plan boundary, so stamped on the
+                                    // plan's axis. On the wrong one the reach is off by the frame's
+                                    // composition offset, which is the distance this very number
+                                    // exists to report.
                                     firstSyncItemPtsBySegment[openIdx] =
-                                        prev.pointee.dts != Int64.min ? prev.pointee.dts : prev.pointee.pts
+                                        planBoundaryAxis.timestamp(dts: prev.pointee.dts,
+                                                                   pts: prev.pointee.pts)
                                 }
                             }
                             finalizeAndWriteVideo(prev, nextDts: packet.pointee.dts, muxer: muxer)
