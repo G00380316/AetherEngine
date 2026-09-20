@@ -5134,7 +5134,15 @@ public final class AetherEngine: ObservableObject {
             // wherever this reposition puts it. Everything between where it had got to and here is
             // ground nobody read; the drain must not read an empty store there as an authored
             // silence. Stated before the seek: the demuxer lands at or before the target.
-            softwareSubtitlePacketStore?.noteHarvestAnchor(.pump, at: clockTarget)
+            //
+            // #107 round 2: on the SOURCE axis, like every other note this ledger takes. The pump
+            // reports its progress from `sourceTime` (`subtitleDrainTick`), so an anchor left on
+            // the session axis opens a run below every note that follows it, and `noteReach` has
+            // no unannounced-advance guard to catch the gap. On a mid-stream-joined source that
+            // silently extends one run over the whole offset, which is exactly the claim
+            // `SubtitleHarvestCoverage` exists to refuse.
+            softwareSubtitlePacketStore?.noteHarvestAnchor(
+                .pump, at: host.sourceSeconds(forSession: clockTarget))
             hostReposition = await host.seek(to: clockTarget)
         } else {
             // #93 retest: remember the target as recovery intent BEFORE awaiting; a wedged seek

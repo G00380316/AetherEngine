@@ -117,6 +117,13 @@ final class SoftwarePlaybackHost {
     var cachedVODBytes: Int64? { vodPacketReadAhead.map { Int64($0.snapshot.residentBytes) } }
     var vodPacketCacheSnapshot: SoftwarePacketReadAhead.Snapshot? { vodPacketReadAhead?.snapshot }
 
+    /// #107 round 2: a session-axis position on the source axis, for a caller outside the host that
+    /// hands a target to something speaking source timestamps. `seek(to:)` makes the same
+    /// conversion for everything inside the host; the identity for a zero-based source.
+    func sourceSeconds(forSession seconds: Double) -> Double {
+        SWClockAnchorPolicy.sourceSeconds(forSession: seconds, sessionZeroSeconds: clockSessionZero)
+    }
+
     private let demuxQueue = DispatchQueue(label: "engine.sw.demux", qos: .userInitiated)
 
     /// #254: every demuxer reposition runs here, never on the main actor. See
