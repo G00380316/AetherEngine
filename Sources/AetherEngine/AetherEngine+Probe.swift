@@ -82,7 +82,7 @@ extension AetherEngine {
         options: LoadOptions = .init(),
         atmosDetection: AtmosDetectionOptions = .init()
     ) throws -> SourceProbe {
-        try probeDetectingAtmos(source: .url(url), options: options, atmosDetection: atmosDetection)
+        try probe(source: .url(url), options: options, detecting: .atmos, atmosDetection: atmosDetection)
     }
 
     /// `probeDetectingAtmos(url:)` for a custom byte source. Same reader-ownership contract as `probe(source:)`:
@@ -91,6 +91,59 @@ extension AetherEngine {
         source: MediaSource,
         options: LoadOptions = .init(),
         atmosDetection: AtmosDetectionOptions = .init()
+    ) throws -> SourceProbe {
+        try probe(source: source, options: options, detecting: .atmos, atmosDetection: atmosDetection)
+    }
+
+    // MARK: - Bounded, opt-in detail probe
+
+    /// `probe(url:)` plus the bounded, OPT-IN passes named in `detecting`, over ONE open handle to the source.
+    ///
+    /// Everything the base probe reports comes from the container. Two things a host wants to put on a
+    /// details screen are not in there:
+    ///
+    /// - **Dolby Atmos**, which for E-AC-3 means the JOC flag in the dependent substream and only exists
+    ///   post-decode (`.atmos`, see `AtmosDetectionOptions`), and
+    /// - **HDR10+**, whose ST 2094-40 metadata rides an in-band ITU-T T.35 SEI that no demuxer parses
+    ///   (`.hdr10Plus`, see `HDR10PlusDetectionOptions`).
+    ///
+    /// Both cost reads past `avformat_find_stream_info`, which is why `probe(url:)` does neither and stays
+    /// byte-for-byte what it was. Neither is for the playback-start critical path. Asking for both runs both
+    /// over one open, one connection: the HDR10+ scan first, out of the packets `find_stream_info` already
+    /// queued, then the queue-flushing seek the Atmos decode pass needs.
+    ///
+    /// Both passes are additive and one-directional. They can only ever SET `isAtmos` /
+    /// `carriesHDR10PlusMetadata`, never clear what the container already declared, and a pass that hits a cap
+    /// leaves the base probe's answer exactly where it was.
+    ///
+    /// - Parameters:
+    ///   - url: Media source, forwarded verbatim to `probe(url:)`.
+    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only).
+    ///   - detecting: Which extra passes to run. Empty is exactly `probe(url:)`.
+    ///   - atmosDetection: Bounds + optional track override for the Atmos decode pass. Ignored without `.atmos`.
+    ///   - hdr10PlusDetection: Bounds for the HDR10+ scan. Ignored without `.hdr10Plus`.
+    /// - Throws: Only what `probe(url:)` throws (demuxer open / probe). Pass-side failures are never thrown:
+    ///   they only mean a detail stays unconfirmed.
+    public nonisolated static func probe(
+        url: URL,
+        options: LoadOptions = .init(),
+        detecting: ProbeDetail,
+        atmosDetection: AtmosDetectionOptions = .init(),
+        hdr10PlusDetection: HDR10PlusDetectionOptions = .init()
+    ) throws -> SourceProbe {
+        try probe(source: .url(url), options: options, detecting: detecting,
+                  atmosDetection: atmosDetection, hdr10PlusDetection: hdr10PlusDetection)
+    }
+
+    /// `probe(url:detecting:)` for a custom byte source (SMB, WebDAV, a disc image, anything behind an
+    /// `IOReader`). Same reader-ownership contract as `probe(source:)`: the caller retains ownership, the
+    /// cursor is left at an unspecified position, and `close()` is NOT called.
+    public nonisolated static func probe(
+        source: MediaSource,
+        options: LoadOptions = .init(),
+        detecting: ProbeDetail,
+        atmosDetection: AtmosDetectionOptions = .init(),
+        hdr10PlusDetection: HDR10PlusDetectionOptions = .init()
     ) throws -> SourceProbe {
         let demuxer = Demuxer()
         let displayURL: URL
@@ -104,19 +157,37 @@ extension AetherEngine {
         }
         defer { demuxer.close() }
 
-        let base = makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
-        // Flush what `avformat_find_stream_info` left queued before the decode pass starts. Those packets
-        // were read before `detectAtmos` sets AVDISCARD_ALL, so libavformat hands them back regardless of
-        // the hint: on a source whose audio does not sit at the head, the pass burns its whole foreign-packet
-        // fuse on that queue and reports "not Atmos" for genuinely Atmos media without ever reading a byte
-        // of audio. Seeking to the start discards the queue so the discard takes effect from the first read.
-        // A source that cannot seek is no worse off than before.
-        demuxer.seekBounded(to: 0, timeout: Self.atmosProbeFlushSeekTimeout)
-        let targetIndex = Self.atmosDecodeTargetIndex(
-            options: atmosDetection, defaultAudioStreamIndex: demuxer.audioStreamIndex)
-        let outcome = Self.detectAtmos(demuxer: demuxer, targetIndex: targetIndex, options: atmosDetection)
-        guard outcome.confirmedAtmos else { return base }
-        return Self.enrichAtmos(base: base, confirmedTrackID: Int(targetIndex))
+        var probe = makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
+
+        // HDR10+ first, and before any seek: `avformat_find_stream_info` leaves its packets queued and
+        // `av_read_frame` hands those back first, so at the head of a container the scan gets video packets
+        // that have already been paid for. Running it after the Atmos pass would mean re-reading them.
+        if detecting.contains(.hdr10Plus) {
+            let outcome = Self.detectHDR10Plus(
+                demuxer: demuxer, videoIndex: demuxer.videoStreamIndex, options: hdr10PlusDetection)
+            if outcome.carriesHDR10Plus {
+                probe = Self.enrichHDR10Plus(base: probe)
+            }
+        }
+
+        if detecting.contains(.atmos) {
+            // Flush what is still queued before the decode pass starts. Those packets were read before
+            // `detectAtmos` sets AVDISCARD_ALL, so libavformat hands them back regardless of the hint: on a
+            // source whose audio does not sit at the head, the pass burns its whole foreign-packet fuse on
+            // that queue and reports "not Atmos" for genuinely Atmos media without ever reading a byte of
+            // audio. Seeking to the start discards the queue so the discard takes effect from the first read.
+            // A source that cannot seek is no worse off than before. (It also puts a source the HDR10+ scan
+            // has just walked back at the start.)
+            demuxer.seekBounded(to: 0, timeout: Self.atmosProbeFlushSeekTimeout)
+            let targetIndex = Self.atmosDecodeTargetIndex(
+                options: atmosDetection, defaultAudioStreamIndex: demuxer.audioStreamIndex)
+            let outcome = Self.detectAtmos(demuxer: demuxer, targetIndex: targetIndex, options: atmosDetection)
+            if outcome.confirmedAtmos {
+                probe = Self.enrichAtmos(base: probe, confirmedTrackID: Int(targetIndex))
+            }
+        }
+
+        return probe
     }
 
     /// Flip `isAtmos` to `true` on exactly the one confirmed audio track, leaving everything else identical.
@@ -133,6 +204,18 @@ extension AetherEngine {
             confirmed.isAtmos = true
             return confirmed
         }
+        return probe
+    }
+
+    /// Record HDR10+ carriage on a probe: set the flag, and move `videoFormat` if it is the one label the
+    /// payload describes (see `hdr10PlusUpgradedFormat`).
+    ///
+    /// Mutates a copy rather than rebuilding the struct field by field: the memberwise init carries defaulted
+    /// parameters, so a hand-copy silently drops any field added later and the compiler stays quiet about it.
+    nonisolated static func enrichHDR10Plus(base: SourceProbe) -> SourceProbe {
+        var probe = base
+        probe.carriesHDR10PlusMetadata = true
+        probe.videoFormat = Self.hdr10PlusUpgradedFormat(base.videoFormat)
         return probe
     }
 

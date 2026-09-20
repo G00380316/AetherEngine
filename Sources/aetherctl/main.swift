@@ -66,7 +66,7 @@ func printUsage() {
     aetherctl: standalone AetherEngine repro harness
 
     Usage:
-      aetherctl probe <url>
+      aetherctl probe [--detect-hdr10plus] [--detect-atmos] <url>
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
@@ -891,6 +891,11 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let extractLoops = takeIntFlag("--loops", from: &rest) ?? 1
     let extractWidth = takeIntFlag("--width", from: &rest) ?? 320
     let snapshotMode = takeFlag("--snapshot", from: &rest)
+    // The opt-in detail passes of `AetherEngine.probe(url:detecting:)`, so both are observable from the CLI
+    // instead of only through a host. Each costs reads past find_stream_info; the bare `probe` does neither.
+    var probeDetail: ProbeDetail = []
+    if takeFlag("--detect-hdr10plus", from: &rest) { probeDetail.insert(.hdr10Plus) }
+    if takeFlag("--detect-atmos", from: &rest) { probeDetail.insert(.atmos) }
     let inMemory = takeFlag("--memory", from: &rest)
     let forwardOnly = takeFlag("--forward-only", from: &rest)
     let customAudioIndex = takeIntFlag("--audio-index", from: &rest).map(Int32.init)
@@ -976,7 +981,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     }
     switch first {
     case "probe":
-        exit(runProbe(url: url))
+        exit(runProbe(url: url, detecting: probeDetail))
     case "serve":
         runServe(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV,
                  dolbyVisionHandling: dvHandling,

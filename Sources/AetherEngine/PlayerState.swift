@@ -950,7 +950,10 @@ public struct SourceProbe: Sendable {
     /// 0 for live streams / pipes.
     public let durationSeconds: Double
     /// `.sdr` when no HDR signaling or no video track.
-    public let videoFormat: VideoFormat
+    ///
+    /// Settable inside the module so the `.hdr10Plus` upgrade from `probe(url:detecting: .hdr10Plus)` lands
+    /// here rather than rebuilding the struct field by field.
+    public internal(set) var videoFormat: VideoFormat
     /// FFmpeg AVCodecID raw value; 0 (AV_CODEC_ID_NONE) when no video track.
     public let videoCodecID: Int32
     /// Codec name from libavcodec (e.g. "hevc", "h264", "av1"). nil when unavailable.
@@ -964,6 +967,15 @@ public struct SourceProbe: Sendable {
     public let isDolbyVision: Bool
     /// Dolby Vision profile number (5, 7, 8, 10) read from the dvcC/dvvC configuration record; nil when not DV.
     public let dvProfile: Int?
+    /// HDR10+ (ST 2094-40) dynamic metadata was SEEN in this source's video.
+    ///
+    /// Always `false` unless the probe was asked for `.hdr10Plus` (the container carries no such declaration,
+    /// so there is nothing to read without looking at packets). `false` therefore means "not asked, or not
+    /// seen inside the scan budget", never "proven absent": a positive is evidence, a negative is not.
+    ///
+    /// Separate from `videoFormat == .hdr10Plus` because a Dolby Vision source can carry an HDR10+ layer too
+    /// (Blu-ray Profile 7 and the 8.1 remuxes of it), and that source keeps reading `.dolbyVision`.
+    public internal(set) var carriesHDR10PlusMetadata: Bool
     /// Settable inside the module so `probeDetectingAtmos` can enrich one track without rebuilding the struct field by field.
     public internal(set) var audioTracks: [TrackInfo]
     /// Includes both text and bitmap (PGS / DVB) variants.
@@ -983,6 +995,7 @@ public struct SourceProbe: Sendable {
         videoFrameRate: Double?,
         isDolbyVision: Bool,
         dvProfile: Int? = nil,
+        carriesHDR10PlusMetadata: Bool = false,
         audioTracks: [TrackInfo],
         subtitleTracks: [TrackInfo],
         metadata: MediaMetadata = MediaMetadata(title: nil, artist: nil, album: nil, artworkData: nil),
@@ -998,6 +1011,7 @@ public struct SourceProbe: Sendable {
         self.videoFrameRate = videoFrameRate
         self.isDolbyVision = isDolbyVision
         self.dvProfile = dvProfile
+        self.carriesHDR10PlusMetadata = carriesHDR10PlusMetadata
         self.audioTracks = audioTracks
         self.subtitleTracks = subtitleTracks
         self.metadata = metadata
