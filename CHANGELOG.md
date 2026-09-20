@@ -12,6 +12,16 @@ the public-API contract.
 
 ### Fixed
 
+- **Subtitle OCR no longer blocks Swift's cooperative executor.** Vision text recognition is a
+  synchronous call that waits for work of its own, so running it from a task (including
+  `Task.detached`) can occupy every cooperative worker at once and stall everything else in the
+  process. Recognition now runs on a dedicated utility thread with one admitted operation across
+  all callers, and the embedded and sidecar OCR workers suspend while they wait for it.
+  Cancelling queued work removes it; cancelling active work does not hand its slot on before the
+  native call returns. An embedded batch cut short mid-recognition no longer leaves a hole in the
+  native rendition: its advanced cursor is dropped, so re-selection collects those cues again,
+  while everything already recognised stays in the store.
+
 - **Native item diagnostics no longer block the main actor or read logs inside AVFoundation
   callbacks.** Access/error notifications, failure dumps and outgoing-item counter reads use
   item-bound, coalesced background batches. A blocked getter keeps its admission slot until it

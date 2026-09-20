@@ -264,6 +264,17 @@ struct TrackMenuButton: UIViewRepresentable {
 
 SwiftUI diffing can re-run `updateUIView` as often as it likes; the guard means an open menu only rebuilds on a real item change. Credit to [@ohjey](https://github.com/ohjey) for isolating the mechanism and the pattern (AetherEngine#29).
 
+## Subtitle recognition scheduling
+
+Bitmap subtitle OCR awaits each image's recognition on a dedicated utility thread.
+`VNImageRequestHandler.perform` blocks while Vision completes its own work; calling it directly
+from a Swift task, even `Task.detached`, can exhaust the cooperative executor. Embedded and
+sidecar OCR workers therefore suspend during recognition rather than occupying that executor.
+One process-wide admission slot stays occupied until the native operation actually returns,
+including after cancellation. Cancelled queued callers leave without starting another thread.
+Completed cues remain in the store; an embedded worker cancelled mid-batch invalidates that
+batch's advanced cursor so re-selection collects it again rather than skipping unfinished cues.
+
 ## Source map
 
 ```

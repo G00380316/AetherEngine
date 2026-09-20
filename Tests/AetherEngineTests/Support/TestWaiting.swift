@@ -29,6 +29,14 @@ func waitFor(isolation: isolated (any Actor)? = #isolation,
     }
 }
 
+/// The same wait for actor-owned state, whose condition must itself suspend to read it.
+func waitFor(isolation: isolated (any Actor)? = #isolation,
+             _ condition: () async -> Bool) async throws {
+    while !(await condition()) {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+}
+
 /// The bounded form, for the rare case where the BOUND is the assertion: "this must not have
 /// happened within n seconds". Returns whether the condition came true, and never asserts on its
 /// own. A positive event that the test needs in order to measure anything belongs in `waitFor`

@@ -2049,6 +2049,7 @@ public final class AetherEngine: ObservableObject {
     /// and reset only on load/stop.
     var subtitleOCRArmedOrdinal: Int?
     var subtitleOCRWorkerTask: Task<Void, Never>?
+    var subtitleOCRBatchInFlight = false
     var subtitleOCRSidecarFillTask: Task<Void, Never>?
     var subtitleOCRDecoder: EmbeddedSubtitleDecoder?
     var subtitleOCRCursors: [Int: SubtitleDrainCursor] = [:]
