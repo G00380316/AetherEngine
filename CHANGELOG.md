@@ -20,6 +20,13 @@ the public-API contract.
   and the packet store read the whole offset as reservoir, so the producer stopped reading and
   the picture stood with no error reported (#107 round 2).
 
+- **The subtitle landing gate no longer trusts ground nobody read on a mid-stream-joined source.**
+  A software VOD seek stated the pump's harvest anchor on the session axis while the pump reports
+  its progress on the source axis, so the first progress note stretched one run over the whole
+  offset. `SubtitleHarvestCoverage` then covered everything, and a stale PGS arrival that should
+  have been refused was admitted. The anchor is carried onto the source axis with the same
+  conversion the seek uses (#107 round 2, #416).
+
 - **Subtitle OCR no longer blocks Swift's cooperative executor.** Vision text recognition is a
   synchronous call that waits for work of its own, so running it from a task (including
   `Task.detached`) can occupy every cooperative worker at once and stall everything else in the
