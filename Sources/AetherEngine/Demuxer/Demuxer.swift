@@ -232,6 +232,10 @@ public final class Demuxer: @unchecked Sendable {
     /// second open. nil for a custom reader (no second open to give) and for a live source.
     private var auditSource: (url: URL, headers: [String: String])?
 
+    /// True when the video stream's Dolby Vision record was synthesized from the first RPU rather than
+    /// read from the container (`DolbyVisionRecordAudit.addRecordIfProfile5`).
+    private(set) var synthesizedDolbyVisionRecord = false
+
     /// #409: rewrites the timestamps of an MP4 whose writer dropped the composition-offset table.
     /// Lives here rather than in a playback host so that every consumer of this demuxer (the fMP4
     /// producer, the segment plan, the software decoder, the still extractor) reads the same axis;
@@ -709,7 +713,7 @@ public final class Demuxer: @unchecked Sendable {
         if openProfile.auditsRecordlessDolbyVision, let source = auditSource {
             let idx = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
             if idx >= 0, let codecpar = ctx.pointee.streams[Int(idx)]?.pointee.codecpar {
-                DolbyVisionRecordAudit.addRecordIfProfile5(
+                synthesizedDolbyVisionRecord = DolbyVisionRecordAudit.addRecordIfProfile5(
                     codecpar: codecpar, url: source.url, extraHeaders: source.headers)
             }
         }

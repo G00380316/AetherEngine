@@ -131,9 +131,10 @@ public enum DolbyVisionRecordAudit {
     /// RPU from a second open of `url` and add the Profile 5 record if it says so. Called by the demuxer
     /// at the end of its own probe, so the load, the HLS producer's own open and every rebuild see the
     /// same stream and none of them needs the verdict carried to it. A failed read is no evidence.
+    @discardableResult
     static func addRecordIfProfile5(
         codecpar: UnsafeMutablePointer<AVCodecParameters>, url: URL, extraHeaders: [String: String]
-    ) {
+    ) -> Bool {
         let hasRecord = (0..<Int(codecpar.pointee.nb_coded_side_data)).contains {
             codecpar.pointee.coded_side_data?[$0].type == AV_PKT_DATA_DOVI_CONF
         }
@@ -141,18 +142,19 @@ public enum DolbyVisionRecordAudit {
             codecID: codecpar.pointee.codec_id, hasRecord: hasRecord,
             pixelFormat: codecpar.pointee.format,
             colorTransfer: codecpar.pointee.color_trc, colorMatrix: codecpar.pointee.color_space,
-            colorPrimaries: codecpar.pointee.color_primaries) else { return }
+            colorPrimaries: codecpar.pointee.color_primaries) else { return false }
         let rpu = rpuProfileOfSource(url: url, extraHeaders: extraHeaders)
         guard rpuProvesProfile5(rpu), synthesizeProfile5Record(codecpar) else {
             EngineLog.emit(
                 "[AetherEngine] AE#recordless: untagged 10-bit HEVC with no DV record, RPU "
                 + (rpu.map { "reads profile \($0)" } ?? "could not be read") + "; left as it was",
                 category: .engine)
-            return
+            return false
         }
         EngineLog.emit(
             "[AetherEngine] AE#recordless: DV profile 5 from the first RPU, container has no record",
             category: .engine)
+        return true
     }
 
     /// How many video packets to walk before giving up. Every frame of a Dolby Vision source carries an
