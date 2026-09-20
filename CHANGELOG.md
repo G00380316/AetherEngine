@@ -28,6 +28,18 @@ the public-API contract.
   mov/mp4 sessions are unchanged, byte for byte. Pinned by `PlanBoundaryAxisTests` on one HEVC
   stream muxed into both containers, where the stamping is the only difference.
 
+- **Bridged multichannel audio no longer publishes its first fragment 584 thousand years out
+  (AE#561 follow-up).** `baseMediaDecodeTime` is `unsigned int(64)`, so a negative published
+  timestamp is unrepresentable rather than merely unusual. The audio bridge stamps the frame it
+  hands the encoder, and an encoder that declares `initial_padding` stamps its first packet a
+  padding below that frame (256 samples on the AC-3 family, which is what surround-compat mode
+  reaches for above two channels; FLAC declares none). At source position 0 that published -256 as
+  2^64 - 256, and the session lost the ~190 ms of audio in that fragment. Nothing discards the
+  priming here, because the muxer writes no edit list on purpose, so the counter now carries the
+  padding and the content pays its 5.3 ms instead, two orders below the lip-sync threshold. Applied
+  on every rebase, so a restart mid-file keeps the same relationship instead of stepping by a
+  padding. Pinned by `BridgedAudioOriginTests` on a 5.1 PCM Matroska.
+
 - **A live recording now starts at zero instead of carrying the broadcast's own clock.**
   Copying the source timestamps verbatim produced a recording whose first presentation timestamp
   lay hours past its own beginning, which a duration probe reports as the offset rather than the

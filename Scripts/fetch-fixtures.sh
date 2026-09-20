@@ -19,6 +19,7 @@
 #   a53-captions.mp4              - H.264 with in-picture A/53 CEA-608 SEI (#131, #259)
 #   hev1-inband-xps.mp4           - HEVC with in-band VPS/SPS/PPS and an empty hvcC
 #   cue-axis-bframes.mkv/.mp4     - one HEVC B-pyramid stream in both containers (AE#561)
+#   bridge-eac3-51.mkv            - 5.1 PCM in MKV, drives the EAC3 audio bridge (AE#561 follow-up)
 #
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
@@ -298,6 +299,19 @@ ffmpeg -hide_banner -loglevel error -y \
 ffmpeg -hide_banner -loglevel error -y \
     -i "$FIXTURES_DIR/cue-axis-bframes.mkv" -c copy \
     "$FIXTURES_DIR/cue-axis-bframes.mp4"
+
+# AE#561 follow-up: multichannel PCM in Matroska, which routes audio through the bridge in
+# surround-compat mode, so the encoder is EAC3 rather than FLAC. That distinction is the whole
+# point: FFmpeg's AC-3 family declares `initial_padding = 256` and stamps its first packet a
+# padding below the frame it encoded, while FLAC declares none. 5.1 because the mode only reaches
+# for EAC3 above two channels.
+echo "→ bridge-eac3-51.mkv (5.1 PCM in MKV, drives the EAC3 bridge, 8s)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "testsrc2=size=320x180:rate=24" \
+    -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 8 \
+    -c:v libx264 -preset veryfast -g 48 -pix_fmt yuv420p -b:v 200k \
+    -af "pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0" \
+    -c:a pcm_s24le "$FIXTURES_DIR/bridge-eac3-51.mkv"
 
 # AetherEngine#268: finite HEVC-in-MPEG-TS HLS VOD, the carriage AVFoundation refuses to build a
 # video track for. Three shapes, because each one only shows its own defect:
