@@ -866,11 +866,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     /// AE#169 round 3 pure decision: whether a video packet opens the restart scan-forward gate.
-    /// The gate target is a plan-boundary PTS (`segmentPlan[baseIndex].startPts`), so the packet
-    /// is judged by presentation time. Comparing DTS dropped the exact IRAP the restart seeked
-    /// for (a keyframe's DTS sits a reorder delay below its own PTS; same defect class as the #92
-    /// cutter fix): mid-file the next IRAP rescued the miss one GOP late, but at the file tail no
-    /// later IRAP exists, so the unbounded VOD gate starved to EOF with zero packets written.
+    /// The gate target is a plan boundary (`segmentPlan[baseIndex].startPts`), and the packet is
+    /// judged by presentation time. Comparing DTS dropped the exact IRAP the restart seeked for (a
+    /// keyframe's DTS sits a reorder delay below its own PTS; same defect class as the #92 cutter
+    /// fix): mid-file the next IRAP rescued the miss one GOP late, but at the file tail no later
+    /// IRAP exists, so the unbounded VOD gate starved to EOF with zero packets written.
+    ///
+    /// AE#561 deliberately did NOT make this axis-matched the way the cutter gate is, and the
+    /// reason is that the two answer different questions. The cutter decides which segment a packet
+    /// belongs to, where being wrong by a composition offset costs a segment its IRAP, and it can
+    /// afford exactness because it sees every packet. This gate decides where production STARTS
+    /// after a seek, and being wrong in the strict direction costs the whole restart: the reported
+    /// geometry (target 2878501, the anchor IRAP at dts 2878495 and pts 2878620) has the boundary
+    /// falling BETWEEN that keyframe's two timestamps, so it matches neither axis and only the
+    /// lenient comparison admits it. Since `pts >= dts` holds for any conforming stream, judging
+    /// presentation time is the most permissive reading and cannot starve on a skew in either
+    /// direction. What the axis buys here is knowing how much of the resulting overshoot is real,
+    /// which is what `boundaryOpenToleranceTicks` spends it on.
     static func videoGateTargetSatisfied(pts: Int64, dts: Int64, targetPts: Int64) -> Bool {
         if targetPts == Int64.min { return true }
         let ts = pts != Int64.min ? pts : dts
@@ -901,16 +913,24 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// AE#408: how far past the boundary a sync sample may present before it is worth going back for.
     ///
-    /// A container index entry is a DECODE timestamp while the gate judges presentation time
-    /// (AE#169 round 3), so even a perfectly formed index puts the keyframe's PTS a reorder delay
-    /// above the boundary it was indexed at. Charging that skew a second seek would re-aim on every
-    /// restart of a B-pyramid encode, so the tolerance covers the stream's own declared depth plus a
-    /// frame, and never falls below the floor.
+    /// The gate judges presentation time (AE#169 round 3), so where the plan's boundaries are DECODE
+    /// timestamps even a perfectly formed index puts the keyframe's PTS a reorder delay above the
+    /// boundary it was indexed at. Charging that skew a second seek would re-aim on every restart of
+    /// a B-pyramid encode, so the tolerance covers the stream's own declared depth plus a frame, and
+    /// never falls below the floor.
+    ///
+    /// AE#561: that reorder term pays for an AXIS MISMATCH, not for anything the stream does. A plan
+    /// whose boundaries are PRESENTATION timestamps (Matroska Cues) has no such skew, a correctly
+    /// indexed keyframe presents exactly at its boundary, and the term would only widen the window in
+    /// which a genuinely late open escapes its re-aim. On that axis the tolerance is the floor, which
+    /// sharpens the decision on the very container AE#408 was reported against. The floor still
+    /// absorbs an index that is approximate rather than skewed, which Matroska Cues frequently are.
     static func boundaryOpenToleranceTicks(
-        reorderFrames: Int32, frameDurationPts: Int64, floorTicks: Int64
+        reorderFrames: Int32, frameDurationPts: Int64, floorTicks: Int64,
+        planAxis: PlanBoundaryAxis = .decode
     ) -> Int64 {
         let frame = Swift.max(0, frameDurationPts)
-        let reorder = Int64(Swift.max(0, reorderFrames)) &* frame
+        let reorder = planAxis == .decode ? Int64(Swift.max(0, reorderFrames)) &* frame : 0
         return Swift.max(floorTicks, reorder &+ frame)
     }
 
@@ -3480,7 +3500,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                toleranceTicks: Self.boundaryOpenToleranceTicks(
                                    reorderFrames: videoConfig.codecpar.pointee.video_delay,
                                    frameDurationPts: videoFallbackDurationPts,
-                                   floorTicks: Int64(Self.boundaryOpenToleranceSeconds / sourceVideoTbSeconds)),
+                                   floorTicks: Int64(Self.boundaryOpenToleranceSeconds / sourceVideoTbSeconds),
+                                   planAxis: planBoundaryAxis),
                                attemptsUsed: gateBackoffAttempts,
                                maxAttempts: Self.gateBackoffStepsSeconds.count),
                            reanchorGateBelowBoundary(reason: "its first sync sample presents "

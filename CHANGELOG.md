@@ -28,6 +28,7 @@ the public-API contract.
   mov/mp4 sessions are unchanged, byte for byte. Pinned by `PlanBoundaryAxisTests` on one HEVC
   stream muxed into both containers, where the stamping is the only difference.
 
+
 - **Bridged multichannel audio no longer publishes its first fragment 584 thousand years out
   (AE#561 follow-up).** `baseMediaDecodeTime` is `unsigned int(64)`, so a negative published
   timestamp is unrepresentable rather than merely unusual. The audio bridge stamps the frame it
@@ -107,6 +108,20 @@ the public-API contract.
   file loaded as SDR `hvc1` and its IPT picture was decoded as YCbCr (a violet/green cast). For untagged
   10-bit HEVC with no record, the demuxer now reads the first RPU and, if it reads profile 5, adds the
   missing record so the existing Profile 5 paths apply. Any other source is left alone.
+
+### Changed
+
+- **A restart into a Matroska boundary re-aims on the distance it actually overshot (AE#561).** The
+  AE#408 tolerance, which decides when a segment opens so far past its boundary that going back for
+  an earlier sync sample is worth it, carried the stream's reorder depth. That term pays for a
+  boundary stamped in decode time being judged by presentation time, not for anything the stream
+  does, and a Matroska Cue is already a presentation time: there a correctly indexed keyframe
+  presents exactly at its boundary, and the term only widened the window in which a genuinely late
+  open escaped its re-aim. On that axis the tolerance is now the floor, which sharpens the decision
+  on the container AE#408 was reported against. mov/mp4 keeps the reorder term, because there the
+  skew is real. The gate's own comparison is deliberately left lenient; the reported AE#169 geometry
+  has the boundary falling between the anchor keyframe's two timestamps, matching neither axis, and
+  only the permissive reading admits it at all.
 
 ## [7.8.0] - 2026-09-20
 
