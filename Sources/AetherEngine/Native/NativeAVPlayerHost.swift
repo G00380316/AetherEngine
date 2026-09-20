@@ -44,6 +44,9 @@ final class NativeAVPlayerHost {
     /// AE#495: what the AE#495 relay knows about the origin's certificate, when the item this host
     /// plays is served by one. Set by the engine at mount, read only while classifying a failure.
     var upstreamTrustRefusal: (@Sendable () -> Int?)?
+    /// AE#561: what the session can still offer when AVPlayer refuses the media, answered by the
+    /// engine because the host owns none of it. Set at mount, read only while classifying a failure.
+    var softwarePathAvailability: (@Sendable () -> SoftwarePathEscalation.Availability?)?
     /// #50: latched on first .playing; discriminates startup failures (never played) from mid-playback transients. .failed and timeControlStatus KVOs are unsynchronized, so instantaneous status is unreliable. Reset with the item on a reused host.
     private var hasEverPlayed = false
     @Published private(set) var didReachEnd: Bool = false
@@ -133,6 +136,11 @@ final class NativeAVPlayerHost {
     /// engine's fallback subscriber reads it, decides, and either reloads the media playlist or
     /// surfaces the failure. Reset on each load.
     @Published private(set) var pendingDisplayRejection: DisplayRejection?
+
+    /// AE#561: a failure this host would otherwise have made terminal, offered to the engine's own
+    /// decoder instead. The engine's subscriber rebuilds the session on the software path at the
+    /// carried position. Reset on each load.
+    @Published private(set) var pendingSoftwarePathEscalation: SoftwarePathEscalation.Request?
 
     /// AetherEngine#168: dynamic range read back from the item's parsed video-track CMFormatDescription,
     /// so the probe-free `nativeRemoteHLS` bypass can report the real format instead of the `.sdr` default.
@@ -524,6 +532,7 @@ final class NativeAVPlayerHost {
         }
         failure = nil
         pendingDisplayRejection = nil
+        pendingSoftwarePathEscalation = nil
         lastSuppressedStartupFailure = nil
         isReady = false
         seekableEnd = 0
@@ -891,6 +900,30 @@ final class NativeAVPlayerHost {
     /// Discriminates on hasEverPlayed, not instantaneous timeControlStatus: .failed and timeControlStatus KVOs are unsynchronized (426b45c: still published terminal failure at 27.3s while AVPlayer played smoothly).
     /// Before first .playing: surface promptly (genuine startup failure). After: defer 5s and confirm -- clear if .playing or clock advanced, surface if both stopped.
     @MainActor
+    /// AE#561: offer a failure to the engine's own decoder before making it terminal. True when the
+    /// offer was made, in which case nothing is surfaced here and the engine rebuilds the session.
+    private func offerToSoftwarePath(_ desc: String, item: AVPlayerItem, position: Double) -> Bool {
+        let nsError = item.error as NSError?
+        guard SoftwarePathEscalation.shouldEscalate(
+            errorDomain: nsError?.domain,
+            availability: softwarePathAvailability?()
+        ) else { return false }
+        let at = position.isFinite ? String(format: "%.2f", position) + "s" : "an unreadable position"
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sessionID) #561 AVPlayer refused the media "
+            + "(\(nsError?.domain ?? "?")/\(nsError?.code ?? 0)) at \(at); handing the session to the "
+            + "engine's own decoder instead of surfacing: \(desc)",
+            category: .engine
+        )
+        pendingSoftwarePathEscalation = SoftwarePathEscalation.Request(
+            domain: nsError?.domain ?? "",
+            code: nsError?.code ?? 0,
+            message: desc,
+            positionSeconds: position.isFinite ? max(0, position) : 0
+        )
+        return true
+    }
+
     private func handleItemFailed(_ desc: String, item: AVPlayerItem) {
         // Ignore a late `.failed` KVO from an item we have already replaced.
         guard playerItem === item else { return }
@@ -939,6 +972,9 @@ final class NativeAVPlayerHost {
                                                            domain: (item.error as NSError?)?.domain)
                 return
             }
+            // AE#561: a startup failure on the media itself (a segment Apple's parser refuses) is
+            // not the end of the source, only of this consumer's opinion of it.
+            if offerToSoftwarePath(desc, item: item, position: renderedTime) { return }
             failure = Self.itemFailureInfo(desc: desc, itemError: item.error,
                                            relayRefusalCode: upstreamTrustRefusal?())
             return
@@ -968,6 +1004,7 @@ final class NativeAVPlayerHost {
                     + "clock=\(String(format: "%.2f", self.renderedTime)))",
                     category: .engine
                 )
+                if self.offerToSoftwarePath(desc, item: item, position: self.renderedTime) { return }
                 self.failure = Self.itemFailureInfo(desc: desc, itemError: item.error,
                                                     relayRefusalCode: self.upstreamTrustRefusal?())
             } else {

@@ -2192,6 +2192,10 @@ public final class AetherEngine: ObservableObject {
     /// bounded reload budget. Cancelled on load reset; superseded by newer deaths.
     var itemDeathConfirmTask: Task<Void, Never>? = nil
     var itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
+    /// AE#561: the one rebuild onto the software path this session may spend when AVPlayer refuses
+    /// the media. Replaced (not reset) on teardown, so a closure held by a dead host cannot spend
+    /// the next session's.
+    var softwarePathEscalationBudget = SoftwarePathEscalation.Budget()
     /// #65 final rung, storm shape: on a frozen live playlist each stage-2 reload replays the tail,
     /// re-stalls within seconds, and the fresh stall SUPERSEDES the ladder task before its
     /// post-reload rung can run, so the reload cycle alone would loop forever. This gate persists
@@ -3643,6 +3647,7 @@ public final class AetherEngine: ObservableObject {
         itemDeathConfirmTask = nil
         itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
         stallReloadReviveGate = ItemDeathReviveGate(maxAttempts: 2)
+        softwarePathEscalationBudget = SoftwarePathEscalation.Budget()
         masterFallbackUsed = false
         nativeSubtitleReanchorTask?.cancel()
         nativeSubtitleReanchorTask = nil
