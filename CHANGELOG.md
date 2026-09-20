@@ -12,10 +12,38 @@ the public-API contract.
 
 ### Fixed
 
+- **Native item diagnostics no longer block the main actor or read logs inside AVFoundation
+  callbacks.** Access/error notifications, failure dumps and outgoing-item counter reads use
+  item-bound, coalesced background batches. A blocked getter keeps its admission slot until it
+  actually returns; stopping or replacing an item only invalidates its results, never waits on it
+  or starts an unbounded replacement thread. Replacement by a synchronous state subscriber also
+  stops delivery of the old batch. Coalesced error batches preserve startup loader-poison
+  signals, and access-log output keeps its per-item cap. Same-session swaps fold observed counters
+  immediately and reconcile final deltas asynchronously; saturated retirement work retains the
+  last observed totals with an explicit incomplete-final-totals diagnostic. The audio-only host's
+  error-log observer follows the same off-main path.
+
 - **A Dolby Vision Profile 5 source with no container record is recognised from its first RPU.** Such a
   file loaded as SDR `hvc1` and its IPT picture was decoded as YCbCr (a violet/green cast). For untagged
   10-bit HEVC with no record, the demuxer now reads the first RPU and, if it reads profile 5, adds the
   missing record so the existing Profile 5 paths apply. Any other source is left alone.
+
+## [7.8.0] - 2026-09-20
+
+### Added
+
+- **Record a live stream to a file, from the connection the session already holds** (#560).
+  `startRecording(to:)` / `stopRecording()` plus a published `recordingState`. The output is
+  MPEG-TS, a stream copy of the source packets taken before any audio bridging, so a bridged
+  TrueHD or DTS channel records its original audio while playback listens to FLAC, and a file cut
+  short by a crash is still playable up to the cut. No second connection to the origin is opened,
+  which is what makes it usable on IPTV, where a plan commonly caps an account at 1 to 3
+  simultaneous connections and a second connection knocks the viewer off the channel. Recording
+  follows the source rather than the playhead, so pause and DVR scrubbing do not interrupt it, and
+  a source reset ends it cleanly instead of writing past a seam. `nativeRemoteHLS`
+  (`.remoteBypass`) cannot record and throws `.unsupportedRoute`: AVFoundation holds the source
+  connection there and the engine never sees a byte. `aetherctl play --record <path>` drives it.
+
 
 ## [7.7.1] - 2026-09-19
 

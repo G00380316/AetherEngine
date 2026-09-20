@@ -45,6 +45,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 - [File Box](https://apps.apple.com/app/id6765818194): File Box is a simple and practical local file manager that makes it easy to manage, view, organize, and process your files on iPhone and iPad.
 - [Moonfin](https://github.com/Moonfin-Client/Moonfin-Core): A multi-platform third party Jellyfin client.
 - [Vivid](https://github.com/blurbery/vivid): open-source media app for iPhone, iPad and Apple TV.
+- [Snappier IPTV](https://apps.apple.com/gb/app/snappier-iptv/id1579702567): IPTV App for iOS/iPadOS and tvOS.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
@@ -341,7 +342,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.7.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.8.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -425,7 +426,14 @@ try await player.load(
     source: .custom(HLSLiveIngestReader(playlistURL: upstreamM3U8), formatHint: "mpegts"),
     options: LoadOptions(isLive: true, dvrWindowSeconds: 600)
 )
+
+// Record the channel WITHOUT opening a second connection to the origin:
+try await player.startRecording(to: fileURL)
+await player.stopRecording()
+player.$recordingState            // .idle / .recording / .ended / .failed
 ```
+
+`startRecording(to:)` (AetherEngine#560) writes the live source to an MPEG-TS file fed from the connection the session already holds. That is the point of it rather than a detail: an IPTV plan commonly caps an account at 1 to 3 simultaneous connections, so a host that opens its own connection to record either fails outright or knocks the viewer off the channel. It is a stream copy of the source packets taken before any audio bridging, so a TrueHD or DTS channel records its original audio while playback listens to the bridged rendition, and a file cut short by a crash is still playable up to the cut. Recording follows the source rather than the playhead, so pausing or scrubbing back inside the DVR window does not interrupt it, and a `liveSourceReset` ends it cleanly rather than writing past a seam the codecs may not survive. The one route that cannot record is `nativeRemoteHLS` (`.remoteBypass`), where AVFoundation holds the source connection and the engine never sees a byte; `startRecording` throws `.unsupportedRoute` there instead of producing an empty file. Full contract in [docs/api.md](docs/api.md#recording-a-live-stream).
 
 `liveJoinProfile: .fastZap` (AetherEngine#195/#208) cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to the source GOP length and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; opt in for zapping UX, keep `.standard` for lean-back viewing.
 
@@ -581,10 +589,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.7.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.8.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.7.1")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.8.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
