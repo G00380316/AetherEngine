@@ -21,7 +21,7 @@ jobs:
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: '26.3'
 
       - name: Show toolchain
         run: |
@@ -29,7 +29,8 @@ jobs:
           xcodebuild -version
 
       - name: swift build
-        run: swift build
+        timeout-minutes: 12
+        run: swift build --build-tests
 
       # A test process that dies mid-run reads as exit 1 with no ✘, no backtrace and no swift-testing
       # summary: `swift test` collapses every abnormal child exit to a plain 1, and a signal takes the
@@ -38,7 +39,15 @@ jobs:
       # SIGPIPE from a test origin server (see the SO_NOSIGPIPE note in Issue177IngestPrefetchTests),
       # so nothing hangs and no time limit would have caught it.
       - name: swift test
-        run: swift test
+        timeout-minutes: 8
+        run: python3 Scripts/diagnose-swift-test-hang.py
+
+      - name: Preserve hang evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-hang-evidence
+          path: ci-hang-evidence
 
       - name: Software VOD packet-cache regressions
         run: |
@@ -60,6 +69,7 @@ jobs:
         run: swift build --build-tests --package-path Probes/TransportProbe
 
   build-tvos:
+    if: github.event_name != 'workflow_dispatch'
     name: xcodebuild (tvOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
@@ -109,6 +119,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
   build-ios:
+    if: github.event_name != 'workflow_dispatch'
     name: xcodebuild (iOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
@@ -144,6 +155,7 @@ jobs:
   # is a compile error on visionOS and on no other platform. Nobody here owns a Vision Pro, which
   # makes this job the only place the platform is exercised at all.
   build-visionos:
+    if: github.event_name != 'workflow_dispatch'
     name: xcodebuild (visionOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
@@ -178,6 +190,7 @@ jobs:
   # This lane replaces the weekly beta SDK watcher, whose one subject (#351) the 7.0 platform floor
   # closed.
   build-macos-xcode27:
+    if: github.event_name != 'workflow_dispatch'
     name: swift build --build-tests (macOS, Xcode 27)
     runs-on: xcode-27
     timeout-minutes: 30
@@ -193,6 +206,7 @@ jobs:
         run: swift build --build-tests
 
   build-tvos-xcode27:
+    if: github.event_name != 'workflow_dispatch'
     name: xcodebuild (tvOS Simulator, Xcode 27)
     runs-on: xcode-27
     timeout-minutes: 30
@@ -224,6 +238,7 @@ jobs:
   # until someone looked. Same check, here, before the merge. Ubuntu on purpose: it needs no
   # toolchain and no network, so it reports in seconds while the macOS jobs are still starting.
   docs-links:
+    if: github.event_name != 'workflow_dispatch'
     name: docs links
     runs-on: ubuntu-latest
     timeout-minutes: 5
