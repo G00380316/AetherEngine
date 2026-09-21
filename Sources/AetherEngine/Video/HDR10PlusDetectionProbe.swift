@@ -203,14 +203,17 @@ extension AetherEngine {
                 bytesRead += packetBytes
                 found = HDR10PlusMetadataScan.packetCarriesHDR10Plus(pkt, codecParameters: codecpar)
             }
-            guard elapsed() < options.timeBudget else {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: .timeCap, packetsRead: packetsRead, bytesRead: bytesRead)
-            }
-
+            // Evidence in hand outranks the soft budget. The caps exist to bound what this pass SPENDS,
+            // and a confirmation is already paid for; dropping it would turn an overrun into a false
+            // negative on a slow origin, which the caller cannot tell apart from "this source has none".
             if found {
                 return HDR10PlusDetectionOutcome(
                     stopReason: .found, packetsRead: packetsRead, bytesRead: bytesRead)
+            }
+
+            guard elapsed() < options.timeBudget else {
+                return HDR10PlusDetectionOutcome(
+                    stopReason: .timeCap, packetsRead: packetsRead, bytesRead: bytesRead)
             }
 
             // AVDISCARD_ALL is advisory, so a container that keeps handing back foreign packets still ends.

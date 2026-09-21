@@ -216,9 +216,6 @@ struct HDR10PlusMetadataScanTests {
         for cut in 0..<packet.count {
             #expect(!scan(Array(packet.prefix(cut)), framing: .lengthPrefixed(size: 4)))
         }
-        #expect(!scan(packet + [0], framing: .lengthPrefixed(size: 4)))
-        #expect(!scan(packet + [0, 0, 0, 0], framing: .lengthPrefixed(size: 4)))
-        #expect(!scan(packet + [0xFF, 0xFF, 0xFF, 0xFF], framing: .lengthPrefixed(size: 4)))
         for width in [0, -1, 5, Int.max] {
             #expect(!scan(packet, framing: .lengthPrefixed(size: width)))
         }
@@ -227,12 +224,9 @@ struct HDR10PlusMetadataScanTests {
         #expect(!scan(Self.annexB([0x4E, 0x00] + nal.dropFirst(2))))
         #expect(!scan(Self.annexB([0x66] + Self.sei(hevc: false).dropFirst()), codecID: AV_CODEC_ID_H264))
         #expect(!scan([0xAA] + Self.annexB(nal)))
-        #expect(!scan(Self.annexB(nal) + [0, 0, 1]))
         for badRBSP in [[4, 255], [255], [4, 100, 0xB5, 0x80], [0, 0, 3], [0, 0, 3, 4]] as [[UInt8]] {
             #expect(!scan(Self.annexB([0x4E, 0x01] + badRBSP)))
         }
-        let truncatedAfterMetadata = Self.message(Self.t35()) + [4, 100, 0x80]
-        #expect(!scan(Self.annexB([0x4E, 0x01] + Self.escaped(truncatedAfterMetadata))))
         #expect(!scan(Self.annexB([0x4E, 0x01] + Self.message(Self.t35(windows: 2)) + [0x80])))
         #expect(!HDR10PlusMetadataScan.bytesCarryHDR10Plus(nil, size: 10, codecID: AV_CODEC_ID_HEVC))
         #expect(!scan([]))
@@ -276,7 +270,34 @@ struct HDR10PlusMetadataScanTests {
         #expect(!scan([0x2A] + Array(repeating: 0x80, count: 8), codecID: AV_CODEC_ID_AV1))
         #expect(!scan([0x2A, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F], codecID: AV_CODEC_ID_AV1))
         #expect(!scan(Self.obu([0x80]), codecID: AV_CODEC_ID_AV1))
-        #expect(!scan(packet + [0x2A], codecID: AV_CODEC_ID_AV1))
+    }
+
+    /// The scan answers ONE question: is validated ST 2094-40 metadata present. Damage further along a
+    /// packet says nothing about a message already parsed in full, and treating it as a retraction is a
+    /// false negative on real media, where a vendor SEI or a trailing byte next to the HDR10+ message is
+    /// ordinary. Nothing here can invent a positive: only `validT35` ever sets one.
+    @Test("A message validated in full outranks malformed framing that follows it")
+    func damageAfterAValidatedMessage() {
+        let nal = Self.sei()
+        let lengthPrefixed = Self.lengthPrefixed(nal, width: 4)
+        for junk in [[0], [0, 0, 0, 0], [0xFF, 0xFF, 0xFF, 0xFF]] as [[UInt8]] {
+            #expect(scan(lengthPrefixed + junk, framing: .lengthPrefixed(size: 4)))
+        }
+        // A second NAL the walk cannot read: forbidden_zero_bit set, then temporal_id zero.
+        for bad in [[0x82, 0x01, 0xAA], [0x4E, 0x00, 0xAA]] as [[UInt8]] {
+            #expect(scan(Self.annexB(nal) + Self.annexB(bad)))
+        }
+        // rbsp_trailing_bits missing. Length-prefixed framing, because Annex B strips the zero bytes
+        // ahead of a start code and the payload's own zero padding goes with them, which truncates the
+        // message rather than damaging what follows it.
+        #expect(scan(Self.lengthPrefixed(Array(nal.dropLast()), width: 4), framing: .lengthPrefixed(size: 4)))
+        // A start code with nothing behind it.
+        #expect(scan(Self.annexB(nal) + [0, 0, 1]))
+        // A second SEI message whose declared size runs off the end of the same NAL.
+        let overrunAfterMetadata = Self.message(Self.t35()) + [4, 100, 0x80]
+        #expect(scan(Self.annexB([0x4E, 0x01] + Self.escaped(overrunAfterMetadata))))
+        // AV1: a metadata OBU that validated, followed by an OBU with an unreadable size field.
+        #expect(scan(Self.obu([4] + Self.t35() + [0x80]) + [0x2A], codecID: AV_CODEC_ID_AV1))
     }
 
     private func withPacket(

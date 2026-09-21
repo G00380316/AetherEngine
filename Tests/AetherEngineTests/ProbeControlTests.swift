@@ -163,6 +163,30 @@ struct ProbeControlTests {
         #expect(interrupts.value == 1)
     }
 
+    /// The origin request slot is the one wait the watchdog cannot interrupt: it fires at reads, and an
+    /// `acquire` is already blocked when it does. So the slot wait is bounded by what is left of the
+    /// deadline instead, and a probe that merely arrived while another request held the origin waits for
+    /// it rather than failing on the spot.
+    @Test("Remaining time bounds the one wait the watchdog cannot interrupt")
+    func remainingTimeTracksTheDeadline() throws {
+        let clock = ProbeTestBox<TimeInterval>(10)
+        let control = try ProbeControl(
+            limits: .init(timeBudget: 5), cancellation: nil,
+            now: { clock.value }, scheduleDeadline: false)
+        defer { control.finish() }
+        #expect(control.remainingTime == 5)
+        clock.update { $0 = 13 }
+        #expect(control.remainingTime == 2)
+        clock.update { $0 = 99 }
+        #expect(control.remainingTime == 0)
+
+        let uncapped = try ProbeControl(
+            limits: nil, cancellation: ProbeCancellation(),
+            now: { clock.value }, scheduleDeadline: false)
+        defer { uncapped.finish() }
+        #expect(uncapped.remainingTime == nil)
+    }
+
     @Test("Completion checks time even without another read or watchdog tick")
     func completionChecksDeadline() throws {
         let clock = ProbeTestBox<TimeInterval>(10)

@@ -283,11 +283,9 @@ extension AetherEngine {
             av_packet_free_safe(pkt)
 
             if confirmed {
-                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
-                guard elapsed < options.timeBudget else {
-                    return AtmosDetectionOutcome(stopReason: .timeCap, packetsRead: packetsRead,
-                                                 bytesRead: bytesRead, decodedProfile: nil)
-                }
+                // A decoded JOC frame is evidence the pass already paid for. The wall-clock budget bounds
+                // what this pass SPENDS, so an overrun retires the pass, it does not retract its answer:
+                // a caller cannot tell a withheld confirmation apart from a source that carries no Atmos.
                 return AtmosDetectionOutcome(
                     stopReason: .frameDecoded, packetsRead: packetsRead, bytesRead: bytesRead,
                     decodedProfile: lastProfile
