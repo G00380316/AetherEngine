@@ -10,33 +10,44 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.10.0] - 2026-09-21
+
 ### Added
 
-- Optional `ProbeLimits` and `ProbeCancellation` on URL/custom metadata and HDR10+/Atmos detail
-  probes. Input and monotonic time limits cover opening, stream analysis, seeks and both passes;
-  cancellation reaches HTTP reads and cooperating custom readers, and waits for cancelled HTTP request
-  callbacks before releasing origin slots. A whole-probe stop throws without
-  a partial result, and caller-owned readers are never closed. Existing calls keep their open policy.
+- **A probe can be given bounds and cancelled.** `ProbeLimits` (input bytes, packets, packet size,
+  a monotonic time budget) and `ProbeCancellation` are optional trailing parameters on every
+  URL/custom metadata and detail probe. They cover the whole operation, from before the first read
+  through container open, `avformat_find_stream_info`, the seeks and both detail passes, and
+  cancellation reaches HTTP reads as well as a cooperating custom `IOReader`. A stop throws
+  (`ProbeError`, or `CancellationError` for an explicit cancel) rather than publishing a partial or
+  late result, cancelled HTTP requests finish their task callbacks before their origin slots are
+  released, and a caller-owned reader is never closed. The limits are cooperative, not hard network
+  or memory caps: input counts bytes the reader delivers, not wire traffic, and a packet is size
+  checked after FFmpeg has allocated it. Calls that pass neither keep their existing open policy
+  byte for byte. With limits, the analysis budget stays the ordinary playback one with `probesize`
+  clamped to `maxInputBytes`, so a bounded probe does not answer from a shallower read; the one
+  detail it cannot reach is the recordless Dolby Vision audit, which opens the source a second time
+  by URL. Contributed by Brandon Moore.
 
 ### Fixed
 
-- HDR10+ confirmation validates codec metadata structures and the registered ST 2094-40 payload
-  instead of matching a marker anywhere in compressed bytes. Playback and probing share the validator;
-  Dolby Vision stays primary. Per-pass byte limits now reject oversized packets before inspection or
-  decode.
-- A message the HDR10+ validator has parsed in full is not withdrawn by damage elsewhere in the same
-  packet. Malformed framing after a confirmed ST 2094-40 payload ends the walk and reports the
-  confirmation, where it previously discarded it, which cost a real badge whenever a vendor SEI, a
-  trailing byte or a second unreadable NAL sat next to the metadata.
-- The HDR10+ and Atmos detail passes no longer retract a detection they already made because their
-  soft wall-clock budget expired. The budgets bound what a pass spends; a withheld confirmation is
-  indistinguishable to the caller from a source that carries none.
-- A controlled probe opens with the playback analysis budget, clamped by the caller's own
-  `maxInputBytes`, instead of the still extractor's smaller one, so passing `limits` no longer
-  reports fewer streams than the same call without it. The recordless Dolby Vision audit remains
-  unavailable to it: that audit opens the source a second time by URL, outside the probe's budget.
-- A controlled HTTP probe waits for an origin request slot until its own deadline rather than
-  failing with `sourceBusy` the moment another request holds the origin.
+- **HDR10+ is confirmed by structure rather than by a byte marker.** The scan walks H.264/HEVC NALs
+  and AV1 metadata OBUs, checks the registered ITU-T T.35 identifiers at the start of the SEI
+  payload, and has FFmpeg parse the complete ST 2094-40 body, whose length must come out exact.
+  A matching byte sequence inside compressed picture data is no longer metadata. Playback and the
+  probe share the one validator, so a badge raised mid-session and a badge raised before it cannot
+  disagree. Container-declared Dolby Vision stays primary. Contributed by Brandon Moore.
+- **A confirmation is never taken back by the budget that paid for it.** Three places retracted an
+  answer they already had: the validator discarded a fully parsed message when anything later in the
+  same packet failed the structural walk (a vendor SEI or a trailing byte next to the metadata was
+  enough), and the HDR10+ and Atmos detail passes dropped a detection when their soft wall-clock
+  budget expired mid-pass. A caller cannot tell a withheld confirmation apart from a source that
+  carries none, so on a slow origin that read as "no Atmos". The budgets now bound only what a pass
+  spends.
+- A controlled HTTP probe waits for an origin request slot until its own deadline instead of failing
+  with `sourceBusy` the moment another request holds the origin.
 
 ## [7.9.0] - 2026-09-20
 
