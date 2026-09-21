@@ -10,8 +10,8 @@ import AetherLibavutil
 /// `AtmosDetectionOptions`: a host opts into reading real video packets without the default probe changing
 /// behaviour or cost.
 ///
-/// Unlike the Atmos pass this one opens no decoder. It reads demuxed video packets and looks for the T.35
-/// signature (see `HDR10PlusMetadataScan`), so its cost is I/O and a memory scan, not decode.
+/// Unlike the Atmos pass this one opens no decoder. It reads demuxed video packets and validates codec
+/// metadata (see `HDR10PlusMetadataScan`), so its cost is I/O and structural parsing, not decode.
 public struct HDR10PlusDetectionOptions: Sendable, Equatable {
     /// Stop after this many video packets have been scanned. Default 32.
     ///
@@ -20,16 +20,15 @@ public struct HDR10PlusDetectionOptions: Sendable, Equatable {
     /// the adversarial one that never has it.
     public var maxPackets: Int
 
-    /// Stop after this many cumulative video-packet bytes. Default 16 MiB.
+    /// Inspect at most this many cumulative video-packet bytes. Default 16 MiB.
     ///
     /// This is the cap that actually binds on the content the feature targets: one UHD HEVC keyframe runs to
-    /// several MB, so a handful of packets can cross it long before `maxPackets` does. 16 MiB leaves room for
-    /// a keyframe plus the frames after it on a 4K remux while staying finite on a hostile source.
+    /// several MB, so a handful of packets can exhaust it long before `maxPackets` does. A packet larger
+    /// than the remaining budget stops the pass BEFORE inspection, even if it carries HDR10+.
     public var maxBytes: Int64
 
-    /// Soft wall-clock budget, checked BETWEEN packet reads. NOT preemptive: one blocking `av_read_frame()`
-    /// on a stalled remote socket can still overrun it, the same AVIO-layer limitation `Demuxer.seekBounded`
-    /// documents. Default 2 seconds.
+    /// Soft wall-clock budget, checked before and after reads and after inspection. NOT preemptive:
+    /// one blocking read can still overrun it, but a late result never confirms HDR10+. Default 2 seconds.
     public var timeBudget: TimeInterval
 
     public init(
@@ -49,13 +48,13 @@ struct HDR10PlusDetectionOutcome: Sendable, Equatable {
     enum StopReason: Sendable, Equatable {
         /// No video stream at the resolved index, or the source has no video at all.
         case noVideoTrack
-        /// The T.35 signature (or Matroska's decoded side data) was seen. The only positive answer.
+        /// Structural HDR10+ metadata was validated within the budget. The only positive answer.
         case found
         /// `maxPackets` video packets were scanned without a hit.
         case packetCap
-        /// `maxBytes` cumulative video-packet bytes were scanned without a hit.
+        /// The byte budget was exhausted, or the next packet would exceed it.
         case byteCap
-        /// `timeBudget` elapsed (checked between reads) without a hit.
+        /// `timeBudget` elapsed before a finding could be confirmed.
         case timeCap
         /// The demuxer reached EOF without a hit (a source short enough to scan whole).
         case demuxEOF
@@ -137,7 +136,8 @@ extension AetherEngine {
     nonisolated static func detectHDR10Plus(
         demuxer: Demuxer,
         videoIndex: Int32,
-        options: HDR10PlusDetectionOptions
+        options: HDR10PlusDetectionOptions,
+        now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) -> HDR10PlusDetectionOutcome {
         guard videoIndex >= 0, let stream = demuxer.stream(at: videoIndex),
               let codecpar = stream.pointee.codecpar,
@@ -149,16 +149,18 @@ extension AetherEngine {
         // packets themselves either way; dropping the other streams keeps the byte budget spent on video.
         demuxer.discardAllStreamsExcept([videoIndex])
 
-        let start = DispatchTime.now()
+        let start = now()
+        func elapsed() -> TimeInterval {
+            Double(now() - start) / 1_000_000_000
+        }
         var packetsRead = 0
         var bytesRead: Int64 = 0
         var packetsSeen = 0
         let fuse = Self.hdr10PlusForeignPacketFuse(maxPackets: options.maxPackets)
 
         while true {
-            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
             if let cap = Self.hdr10PlusScanCapReached(
-                packetsRead: packetsRead, bytesRead: bytesRead, elapsed: elapsed, options: options
+                packetsRead: packetsRead, bytesRead: bytesRead, elapsed: elapsed(), options: options
             ) {
                 return HDR10PlusDetectionOutcome(stopReason: cap, packetsRead: packetsRead, bytesRead: bytesRead)
             }
@@ -170,6 +172,16 @@ extension AetherEngine {
                 return HDR10PlusDetectionOutcome(
                     stopReason: .demuxError, packetsRead: packetsRead, bytesRead: bytesRead)
             }
+            defer {
+                if let packet {
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                }
+            }
+            guard elapsed() < options.timeBudget else {
+                return HDR10PlusDetectionOutcome(
+                    stopReason: .timeCap, packetsRead: packetsRead, bytesRead: bytesRead)
+            }
             guard let pkt = packet else {
                 return HDR10PlusDetectionOutcome(
                     stopReason: .demuxEOF, packetsRead: packetsRead, bytesRead: bytesRead)
@@ -178,12 +190,23 @@ extension AetherEngine {
             var found = false
             packetsSeen += 1
             if pkt.pointee.stream_index == videoIndex {
+                let packetBytes = Int64(pkt.pointee.size)
+                guard packetBytes >= 0 else {
+                    return HDR10PlusDetectionOutcome(
+                        stopReason: .demuxError, packetsRead: packetsRead, bytesRead: bytesRead)
+                }
+                guard packetBytes <= options.maxBytes - bytesRead else {
+                    return HDR10PlusDetectionOutcome(
+                        stopReason: .byteCap, packetsRead: packetsRead, bytesRead: bytesRead)
+                }
                 packetsRead += 1
-                bytesRead += Int64(pkt.pointee.size)
-                found = HDR10PlusMetadataScan.packetCarriesHDR10Plus(pkt)
+                bytesRead += packetBytes
+                found = HDR10PlusMetadataScan.packetCarriesHDR10Plus(pkt, codecParameters: codecpar)
             }
-            av_packet_unref(pkt)
-            av_packet_free_safe(pkt)
+            guard elapsed() < options.timeBudget else {
+                return HDR10PlusDetectionOutcome(
+                    stopReason: .timeCap, packetsRead: packetsRead, bytesRead: bytesRead)
+            }
 
             if found {
                 return HDR10PlusDetectionOutcome(

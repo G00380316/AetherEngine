@@ -639,6 +639,14 @@ public final class Demuxer: @unchecked Sendable {
     private func applyProbeBudget(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
         ctx.pointee.probesize = openProfile.probesize
         ctx.pointee.max_analyze_duration = openProfile.maxAnalyzeDuration
+        if let probeControl {
+            ctx.pointee.interrupt_callback = AVIOInterruptCB(
+                callback: { opaque in
+                    guard let opaque else { return 0 }
+                    return Unmanaged<ProbeControl>.fromOpaque(opaque).takeUnretainedValue().isStopped ? 1 : 0
+                },
+                opaque: Unmanaged.passUnretained(probeControl).toOpaque())
+        }
     }
 
     /// Demuxer fflags applied to every avformat_open_input.
@@ -1457,9 +1465,17 @@ public final class Demuxer: @unchecked Sendable {
     /// The read itself. Caller holds `accessLock`.
     private func readPacketLocked() throws -> UnsafeMutablePointer<AVPacket>? {
         guard let ctx = formatContext else { return nil }
+        try probeControl?.willReadPacket()
         var packet: UnsafeMutablePointer<AVPacket>? = trackedPacketAlloc()
         guard packet != nil else { return nil }
         let ret = av_read_frame(ctx, packet)
+        do {
+            try probeControl?.check()
+            if ret >= 0, let packet { try probeControl?.receivedPacket(packet) }
+        } catch {
+            trackedPacketFree(&packet)
+            throw error
+        }
         if ret < 0 {
             trackedPacketFree(&packet)
             let isEOF = (ret == FFmpegErr.eof)
@@ -1698,6 +1714,7 @@ public final class Demuxer: @unchecked Sendable {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return false }
+        guard probeControl?.isStopped != true else { return false }
         // #409: the read position moves, so the repair drops its picture-order anchor and
         // re-anchors on the next keyframe (a seek always lands on one).
         compositionRepair?.noteSeek()
@@ -1733,7 +1750,7 @@ public final class Demuxer: @unchecked Sendable {
         // matroska may return success with a partial index after abort; deadline flag
         // is authoritative, not ret.
         let capped = avioProvider?.readDeadlineFired ?? false
-        return ret >= 0 && !capped
+        return ret >= 0 && !capped && probeControl?.isStopped != true
     }
 
     /// How an off-actor reposition ended (#254). Named to mirror `SeekEvent.Outcome` so the engine's
@@ -1993,6 +2010,9 @@ public final class Demuxer: @unchecked Sendable {
     func markClosed() {
         avioProvider?.markClosed()
     }
+
+    /// Static metadata probes only. Strong ownership outlives the native interrupt callback.
+    var probeControl: ProbeControl?
 
     func close() {
         avioProvider?.markClosed()  // unblocks av_read_frame (tvOS suspends threads in background)

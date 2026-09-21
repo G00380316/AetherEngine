@@ -32,6 +32,7 @@ final class PublicAPIDocumentationTests: XCTestCase {
     private static let hostFacingTypeFiles = [
         "PlayerState.swift",
         "PlaybackErrorInfo.swift",
+        "ProbeControl.swift",
         "PlaybackClock.swift",
         "SeekEvent.swift",
         "StartupProgress.swift",

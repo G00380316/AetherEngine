@@ -4235,7 +4235,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         packet.pointee.stream_index = muxer.videoOutputStreamIndex
 
-        if !hdr10PlusDetected, HDR10PlusMetadataScan.packetCarriesHDR10Plus(packet) {
+        if !hdr10PlusDetected, HDR10PlusMetadataScan.packetCarriesHDR10Plus(
+            packet, codecParameters: videoConfig.codecpar, framing: a53NALFraming
+        ) {
             hdr10PlusDetected = true
             onFirstHDR10PlusDetected?()
         }

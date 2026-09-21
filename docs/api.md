@@ -410,12 +410,67 @@ try await player.reloadAtCurrentPosition()
 | `reloadAtCurrentPosition()` | `async throws`. Background reopen at the current position, preserving options. Session-preserving: it finishes an installed audio tap and keeps the native host where it can. It also preserves the session's TRANSPORT rather than replaying `autoplay`, so a session that was playing comes back playing and one that was paused comes back paused, whatever the mount was given (AE#464 round 2). The one exception is the resume after a background teardown, which has no transport left to read and is the host's call, so there the mount flag still decides. |
 | `prepareForItemReplacement()` | One-shot. Keeps the current native `AVPlayerItem` attached until the next `load()` replaces it atomically, for a host that mounts the engine's own player layer and would otherwise show a black layer across the nil-item gap of a foreground episode or playlist change. Consumed by the next `load()`, cancelled by `stop()`, no effect when the outgoing session is not native. PiP hosts do not need it: an active PiP window already forces the handover (AE#158). |
 | `stop(resetDisplayCriteria:finalTeardown:)` | Ends the session, `state` becomes `.idle`, `startupProgress` becomes nil. `resetDisplayCriteria: false` keeps the panel in its current mode across an item handoff. |
-| `AetherEngine.probe(url:options:)` / `probe(source:options:)` | `nonisolated static throws -> SourceProbe`. Demux-only metadata read, no decoders, no session. `options` is read for `httpHeaders` only. For a custom reader the caller keeps ownership, `close()` is not called, and the cursor is left unspecified. |
+| `AetherEngine.probe(url:options:)` / `probe(source:options:)` | `nonisolated static throws -> SourceProbe`. Container/stream metadata read, no detail-pass decoder or session. `options` is read for `httpHeaders` only. Optional trailing `limits` and `cancellation` control the whole operation (below). For a custom reader the caller keeps ownership, `close()` is not called, and the cursor is left unspecified. |
 | `AetherEngine.probeDetectingAtmos(url:options:atmosDetection:)` | `probe` plus a bounded decode pass that authoritatively resolves E-AC-3 JOC for an Atmos badge. Strictly more expensive; never on the playback-start path. Decode-side failures degrade to "not confirmed" rather than throwing. Same thing as `probe(url:detecting: .atmos)`. |
-| `AetherEngine.probe(url:options:detecting:atmosDetection:hdr10PlusDetection:)` / `probe(source:...)` | `probe` plus the opt-in passes named in `ProbeDetail`, over ONE open handle: `.atmos` (the bounded JOC decode above) and `.hdr10Plus` (a bounded packet scan for ST 2094-40 carriage). Asking for both runs both on one connection. Empty set is exactly `probe(url:)`. Both passes only ever SET `isAtmos` / `carriesHDR10PlusMetadata`; a pass that hits a cap leaves the base answer untouched, and pass-side failures are never thrown. |
+| `AetherEngine.probe(url:options:detecting:atmosDetection:hdr10PlusDetection:)` / `probe(source:...)` | `probe` plus the opt-in passes named in `ProbeDetail`, over one demuxer: `.atmos` (the bounded JOC decode above) and `.hdr10Plus` (structurally validated ST 2094-40 carriage). Both passes share the optional trailing `limits` and `cancellation`. Empty set is the header probe with the same controls. Both passes only ever SET `isAtmos` / `carriesHDR10PlusMetadata`; ordinary pass failures and per-pass caps leave the detail unconfirmed. A whole-probe stop throws, with no partial result. |
 | `ProbeDetail` | `OptionSet`: `.atmos`, `.hdr10Plus`. |
 | `HDR10PlusDetectionOptions` | Bounds for the HDR10+ scan: `maxPackets` (32), `maxBytes` (16 MiB), `timeBudget` (2 s). The byte cap is the one that binds on UHD remuxes, where a single keyframe runs to several MB. |
+| `ProbeLimits` | Optional whole-probe controls: `maxInputBytes` (8 MiB), `maxPackets` (128), `maxPacketBytes` (2 MiB), `timeBudget` (5 s). Nonnegative values required; the time budget must be finite. |
+| `ProbeCancellation` | Thread-safe, one-shot token: `init()`, `isCancelled`, `cancel()`. Available on every URL/custom header, detail and `probeDetectingAtmos` overload. Cancellation is a request, not a completion notification. |
+| `ProbeError` | `invalidLimits`, `inputLimit`, `packetLimit`, `packetSizeLimit`, `timedOut`, `invalidReaderResult`, `unsupportedURL`, `sourceBusy`; `errorDescription` describes the stop. Explicit caller cancellation throws `CancellationError` instead. |
 | `AetherEngine.externalSubtitleTrackIDBase` | `100_000`. Synthetic ids of external subtitle tracks start here. |
+
+### Whole-probe limits and cancellation
+
+Existing calls retain their open policy: `limits: nil, cancellation: nil`. Passing `limits: .init()`
+starts a monotonic deadline before opening the source, shares the input budget across disc recognition,
+container open, `avformat_find_stream_info`, the HDR scan, the Atmos rewind and decode, and disables
+speculative HTTP prefetch. Passing only `cancellation` enables interruption without installing numeric
+limits. The bounded open uses a smaller FFmpeg analysis profile; sparse sources may therefore report less
+metadata or need larger limits. Controlled URL probes support files, HTTP and HTTPS; other transports can
+use an independent `.custom` reader. They do not open a second URL reader for the optional recordless
+Dolby Vision audit. Container-declared Dolby Vision remains primary even when HDR10+ is also confirmed.
+
+`maxInputBytes` counts cumulative bytes the underlying reader delivers to the probe, including bytes
+read again after a seek. Reads are clipped to the remaining allowance **before** calling the reader.
+It is **not a network/wire cap**: HTTP headers, transport buffers, requests used to resolve length, and
+reader-internal prefetch can consume more. `maxPackets` counts all packets returned for inspection across
+both passes, including foreign streams; FFmpeg-internal packets during open/seek are bounded by input
+and time, not that counter. `maxPacketBytes` rejects an oversized packet payload before parsing/decode,
+after FFmpeg has allocated it. None of these is a hard native-memory ceiling. The separate per-pass byte
+caps also reject a packet that would exceed the remaining allowance, rather than accepting an overshoot.
+
+The deadline and token interrupt HTTP requests and call a custom `IOReader.cancel()` concurrently,
+including during open/seek. A blocking custom reader must implement thread-safe cancellation, unblock
+promptly, and handle cancellation racing an operation's start; the default no-op cannot do that.
+FFmpeg also gets an interrupt callback. This is cooperative interruption, **not a hard real-time return
+guarantee**: native computation and a noncooperating reader cannot be forcibly terminated. The call waits
+for native work to return before freeing its state, drains interruption callbacks before returning the
+reader, and never publishes a positive obtained after a stop. Cancelled HTTP requests finish their task
+callbacks before the probe releases their origin slots or returns. A controlled HTTP probe declines with
+`sourceBusy` rather than queueing behind playback's origin request budget. Normal playback's redirect,
+cookie, authentication and response policies are unchanged.
+
+```swift
+let cancellation = ProbeCancellation()
+let worker = Task.detached {
+    try AetherEngine.probe(
+        url: mediaURL, options: .init(httpHeaders: headers),
+        detecting: [.hdr10Plus, .atmos],
+        limits: .init(), cancellation: cancellation)
+}
+let result = try await withTaskCancellationHandler {
+    try await worker.value // completion means the synchronous native call actually returned
+} onCancel: {
+    cancellation.cancel()
+}
+```
+
+Cancelling an awaiting Swift task alone does not cancel synchronous probing; wire the handler as above.
+Do not share a custom reader's cursor with playback. The caller still owns and closes it. A successful
+probe with `carriesHDR10PlusMetadata == false` or an unconfirmed Atmos track means **not confirmed within
+the requested passes/budgets**, never proof of absence. Atmos detection means E-AC-3 JOC, not TrueHD Atmos.
+These are source-metadata answers, not evidence of HDMI output or display mode.
 
 ### Warming a source before it is loaded
 

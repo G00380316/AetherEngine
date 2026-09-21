@@ -153,9 +153,109 @@ struct HDR10PlusProbeIntegrationTests {
         try demuxer.open(url: url)
         defer { demuxer.close() }
         let outcome = AetherEngine.detectHDR10Plus(
-            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex, options: HDR10PlusDetectionOptions())
+            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex,
+            options: HDR10PlusDetectionOptions(maxPackets: 1, maxBytes: 91))
         #expect(outcome.stopReason == .found)
         #expect(outcome.packetsRead == 1)
+        #expect(outcome.bytesRead == 91)
+    }
+
+    @Test("An oversized first video packet cannot confirm HDR10+", arguments: [Int64(1), 90])
+    func oversizedPacketCannotConfirm(maxBytes: Int64) throws {
+        let url = try Self.writeFixture(Self.hdr10PlusBase64, name: "oversized")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let demuxer = Demuxer()
+        try demuxer.open(url: url)
+        defer { demuxer.close() }
+        let outcome = AetherEngine.detectHDR10Plus(
+            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex,
+            options: HDR10PlusDetectionOptions(maxBytes: maxBytes))
+        #expect(outcome.stopReason == .byteCap)
+        #expect(!outcome.carriesHDR10Plus)
+        #expect(outcome.packetsRead == 0)
+        #expect(outcome.bytesRead == 0)
+    }
+
+    @Test("A later carrying packet must fit the remaining byte budget", arguments: [Int64(183), 184])
+    func remainingByteBudget(maxBytes: Int64) throws {
+        var fixture = try #require(Data(base64Encoded: Self.hdr10PlusBase64, options: .ignoreUnknownCharacters))
+        let firstHeader = try #require(fixture.range(of: Data([0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04])))
+        fixture[firstHeader.lowerBound + 2] = 0x3B // First packet has a different registered provider.
+        let url = try Self.writeFixture(fixture.base64EncodedString(), name: "remaining")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let demuxer = Demuxer()
+        try demuxer.open(url: url)
+        defer { demuxer.close() }
+        let outcome = AetherEngine.detectHDR10Plus(
+            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex,
+            options: HDR10PlusDetectionOptions(maxBytes: maxBytes))
+        #expect(outcome.stopReason == (maxBytes == 184 ? .found : .byteCap))
+        #expect(outcome.packetsRead == (maxBytes == 184 ? 2 : 1))
+        #expect(outcome.bytesRead == (maxBytes == 184 ? 184 : 91))
+    }
+
+    @Test("A read that returns at the deadline is rejected before metadata inspection")
+    func deadlineAfterRead() throws {
+        let url = try Self.writeFixture(Self.hdr10PlusBase64, name: "read-deadline")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let demuxer = Demuxer()
+        try demuxer.open(url: url)
+        defer { demuxer.close() }
+        var clockReads = 0
+        let outcome = AetherEngine.detectHDR10Plus(
+            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex,
+            options: HDR10PlusDetectionOptions(timeBudget: 1),
+            now: {
+                defer { clockReads += 1 }
+                return clockReads < 2 ? 0 : 1_000_000_000
+            })
+        #expect(outcome.stopReason == .timeCap)
+        #expect(outcome.packetsRead == 0)
+        #expect(outcome.bytesRead == 0)
+        #expect(clockReads == 3)
+    }
+
+    @Test("Metadata found at the deadline is not published as a positive")
+    func deadlineAfterScan() throws {
+        let url = try Self.writeFixture(Self.hdr10PlusBase64, name: "scan-deadline")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let demuxer = Demuxer()
+        try demuxer.open(url: url)
+        defer { demuxer.close() }
+        var clockReads = 0
+        let outcome = AetherEngine.detectHDR10Plus(
+            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex,
+            options: HDR10PlusDetectionOptions(timeBudget: 1),
+            now: {
+                defer { clockReads += 1 }
+                return clockReads < 3 ? 0 : 1_000_000_000
+            })
+        #expect(outcome.stopReason == .timeCap)
+        #expect(!outcome.carriesHDR10Plus)
+        #expect(outcome.packetsRead == 1)
+        #expect(outcome.bytesRead == 91)
+        #expect(clockReads == 4)
+    }
+
+    @Test("A read returning EOF after the deadline still reports the time cap")
+    func deadlineAtEOF() throws {
+        let url = try Self.writeFixture(Self.hdr10Base64, name: "eof-deadline")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let demuxer = Demuxer()
+        try demuxer.open(url: url)
+        defer { demuxer.close() }
+        var clockReads = 0
+        let outcome = AetherEngine.detectHDR10Plus(
+            demuxer: demuxer, videoIndex: demuxer.videoStreamIndex,
+            options: HDR10PlusDetectionOptions(timeBudget: 1),
+            now: {
+                defer { clockReads += 1 }
+                return clockReads < 8 ? 0 : 1_000_000_000
+            })
+        #expect(outcome.stopReason == .timeCap)
+        #expect(outcome.packetsRead == 2)
+        #expect(outcome.bytesRead == 38)
+        #expect(clockReads == 9)
     }
 
     @Test("A source scanned to its end without a hit reports EOF, not a cap")
@@ -199,5 +299,31 @@ struct HDR10PlusProbeIntegrationTests {
             source: .custom(reader, formatHint: "mp4"), detecting: .hdr10Plus)
         #expect(probe.carriesHDR10PlusMetadata)
         #expect(probe.videoFormat == .hdr10Plus)
+    }
+
+    @Test("Combined HDR/Atmos probing skips audio work for no-audio and non-EAC3 sources",
+          arguments: [0, 1, 2])
+    func combinedDetailsPreserveHDRIndependence(fixtureIndex: Int) throws {
+        let fixtures = [Self.hdr10PlusBase64, Self.hdr10Base64, AtmosDetectionProbeIntegrationTests.aacBase64]
+        let formats: [VideoFormat] = [.hdr10Plus, .hdr10, .sdr]
+        let data = try #require(Data(base64Encoded: fixtures[fixtureIndex], options: .ignoreUnknownCharacters))
+        let hdrReader = ProbeRecordingReader(data: data)
+        let combinedReader = ProbeRecordingReader(data: data)
+        let hdrOnly = try AetherEngine.probe(
+            source: .custom(hdrReader, formatHint: "mp4"), detecting: .hdr10Plus)
+        let combined = try AetherEngine.probe(
+            source: .custom(combinedReader, formatHint: "mp4"), detecting: [.hdr10Plus, .atmos])
+
+        #expect(combined.videoFormat == formats[fixtureIndex])
+        #expect(combined.videoFormat == hdrOnly.videoFormat)
+        #expect(combined.carriesHDR10PlusMetadata == (fixtureIndex == 0))
+        #expect(combined.carriesHDR10PlusMetadata == hdrOnly.carriesHDR10PlusMetadata)
+        #expect(combined.audioTracks == hdrOnly.audioTracks)
+        #expect(combined.audioTracks.count == (fixtureIndex == 2 ? 1 : 0))
+        #expect(combined.audioTracks.allSatisfy { !$0.isAtmos })
+        #expect(combinedReader.seeks.map(\.offset) == hdrReader.seeks.map(\.offset))
+        #expect(combinedReader.seeks.map(\.whence) == hdrReader.seeks.map(\.whence))
+        #expect(combinedReader.reads.map(\.offset) == hdrReader.reads.map(\.offset))
+        #expect(combinedReader.bytesRead == hdrReader.bytesRead)
     }
 }

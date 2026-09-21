@@ -75,4 +75,36 @@ struct HDR10PlusDetectionOptionsTests {
         #expect(!ProbeDetail.atmos.contains(.hdr10Plus))
         #expect(ProbeDetail().isEmpty)
     }
+
+    @Test("HDR10+ enrichment preserves known Atmos and commutes with independent Atmos confirmation")
+    func knownAtmosIsPreserved() {
+        let tracks = [true, false].enumerated().map { index, knownAtmos in
+            TrackInfo(
+                id: index + 1, name: "Audio \(index + 1)", codec: "eac3", language: "eng",
+                channels: 6, bitrate: 768_000, isDefault: index == 0,
+                isForced: false, isHearingImpaired: false, isCommentary: false,
+                isAtmos: knownAtmos, assHeader: nil, isExternal: false)
+        }
+        let base = SourceProbe(
+            url: URL(fileURLWithPath: "/synthetic-hdr-atmos.mkv"), durationSeconds: 1,
+            videoFormat: .hdr10, videoCodecID: 173, videoCodecName: "hevc",
+            videoWidth: 64, videoHeight: 64, videoFrameRate: 24, isDolbyVision: false,
+            audioTracks: tracks, subtitleTracks: [])
+
+        let hdr = AetherEngine.enrichHDR10Plus(base: base)
+        #expect(hdr.audioTracks == tracks)
+        #expect(hdr.videoFormat == .hdr10Plus)
+        #expect(hdr.carriesHDR10PlusMetadata)
+
+        let hdrThenAtmos = AetherEngine.enrichAtmos(base: hdr, confirmedTrackID: 2)
+        let atmosThenHDR = AetherEngine.enrichHDR10Plus(
+            base: AetherEngine.enrichAtmos(base: base, confirmedTrackID: 2))
+        #expect(hdrThenAtmos.audioTracks == atmosThenHDR.audioTracks)
+        #expect(hdrThenAtmos.audioTracks.map(\.isAtmos) == [true, true])
+        #expect(hdrThenAtmos.carriesHDR10PlusMetadata && atmosThenHDR.carriesHDR10PlusMetadata)
+        #expect(hdrThenAtmos.videoFormat == atmosThenHDR.videoFormat)
+        #expect(AetherEngine.enrichAtmos(base: hdr, confirmedTrackID: 99).audioTracks == tracks)
+        #expect(!base.carriesHDR10PlusMetadata)
+        #expect(base.audioTracks.map(\.isAtmos) == [true, false])
+    }
 }
