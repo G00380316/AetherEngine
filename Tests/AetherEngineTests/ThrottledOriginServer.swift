@@ -57,6 +57,9 @@ final class ThrottledOriginServer: @unchecked Sendable {
     private var _requestedRanges: [(start: Int64, end: Int64?)] = []
     private var _requestLog: [(path: String, start: Int64, end: Int64?)] = []
     private var _rangeHeaderPresent: [Bool] = []
+    /// #551 round 2: the headers each request arrived with, lowercased names. A credential that
+    /// must not reach a target is only provably absent at the target.
+    private var _requestHeaders: [[String: String]] = []
     private var _inflight = 0
     private var _peakInflight = 0
     private var _refusedForConcurrency = 0
@@ -102,6 +105,12 @@ final class ThrottledOriginServer: @unchecked Sendable {
     var requestLog: [(path: String, start: Int64, end: Int64?)] {
         lock.lock(); defer { lock.unlock() }
         return _requestLog
+    }
+
+    /// #551 round 2: every request's headers, in `requestLog` order, names lowercased.
+    var requestHeaders: [[String: String]] {
+        lock.lock(); defer { lock.unlock() }
+        return _requestHeaders
     }
 
     /// Whether each logged request carried a Range header at all. A range-less GET is logged in
@@ -263,6 +272,7 @@ final class ThrottledOriginServer: @unchecked Sendable {
         _requestedRanges.append((offset, rangeEnd))
         _requestLog.append((path, offset, rangeEnd))
         _rangeHeaderPresent.append(hadRangeHeader)
+        _requestHeaders.append(Self.parseHeaders(request))
         let requestIndex = _requestLog.count - 1
         // #388: in flight from the moment this origin has a request to answer until its body is
         // written. A request parked in `readRequestHeader` on a kept-alive socket is not one.
@@ -365,6 +375,18 @@ final class ThrottledOriginServer: @unchecked Sendable {
             if throttleUs > 0 { usleep(throttleUs) }
         }
         return true
+    }
+
+    private static func parseHeaders(_ request: String) -> [String: String] {
+        var headers: [String: String] = [:]
+        for line in request.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { continue }
+            headers[name] = value
+        }
+        return headers
     }
 
     private func readRequestHeader(_ fd: Int32) -> String? {

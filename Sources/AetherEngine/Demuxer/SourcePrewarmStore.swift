@@ -20,6 +20,14 @@ struct PrewarmedSource: Sendable {
     /// different sizes, under one URL. A session whose headers differ therefore does not adopt
     /// these bytes, because nothing here could tell that they are the wrong ones.
     let requestHeaders: [String: String]
+    /// The URL that actually served the warm, redirects followed, or nil where none were.
+    ///
+    /// A resolver URL that 302s to a signed edge target is the shape half of IPTV is built out of,
+    /// and the warm resolves that chain. Without this the session resolves it a second time, which
+    /// on the reporting origin in AE#551 round 2 cost 3.2 s of redirect TTFB the warm had already
+    /// paid. The session adopts it as its pinned target (#12), so the existing expiry ladder is
+    /// what handles a lease that has since run out.
+    let resolvedURL: URL?
 
     var byteCount: Int { head.data.count + (tail?.data.count ?? 0) }
 }
