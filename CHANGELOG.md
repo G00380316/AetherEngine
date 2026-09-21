@@ -14,7 +14,8 @@ the public-API contract.
 
 - Optional `ProbeLimits` and `ProbeCancellation` on URL/custom metadata and HDR10+/Atmos detail
   probes. Input and monotonic time limits cover opening, stream analysis, seeks and both passes;
-  cancellation reaches HTTP reads and cooperating custom readers. A whole-probe stop throws without
+  cancellation reaches HTTP reads and cooperating custom readers, and waits for cancelled HTTP request
+  callbacks before releasing origin slots. A whole-probe stop throws without
   a partial result, and caller-owned readers are never closed. Existing calls keep their open policy.
 
 ### Fixed

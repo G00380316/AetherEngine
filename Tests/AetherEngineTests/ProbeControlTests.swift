@@ -1050,6 +1050,69 @@ struct ProbeControlTests {
 
     // MARK: HTTP opening, with an isolated loopback origin and no URLProtocol global hooks
 
+    @Test("Stopped HTTP probes retain their origin slot until the request callback finishes",
+          .timeLimit(.minutes(1)), arguments: ProbeHTTPTestOrigin.Stage.allCases, [false, true])
+    func stoppedHTTPWaitsForCompletion(_ stage: ProbeHTTPTestOrigin.Stage, deadline: Bool) async throws {
+        let token = ProbeCancellation()
+        let clock = ProbeTestBox<TimeInterval>(0)
+        let control = try ProbeControl(
+            limits: deadline ? .init(timeBudget: 1) : nil, cancellation: token,
+            now: { clock.value }, scheduleDeadline: false)
+        let callbacks = OperationQueue()
+        callbacks.maxConcurrentOperationCount = 1
+        let session = URLSession(configuration: .ephemeral, delegate: nil, delegateQueue: callbacks)
+        let origin = try ProbeHTTPTestOrigin(data: ProbeTestFixtures.hdr10Plus(), stage: stage) {
+            // Delay only this reader's callbacks; never park a shared URLSession delegate queue.
+            callbacks.isSuspended = true
+            if deadline {
+                clock.update { $0 = 1 }
+                control.stop(ProbeError.timedOut)
+            } else {
+                token.cancel()
+            }
+        }
+        defer {
+            callbacks.isSuspended = false
+            origin.stop()
+            token.cancel()
+            session.invalidateAndCancel()
+        }
+        let url = try #require(URL(string: "http://127.0.0.1:\(origin.port)/\(UUID().uuidString).mp4"))
+        let reader = AVIOReader(
+            url: url, chunkSize: 64 * 1024, prefetchEnabled: false,
+            chunkRequestTimeout: 3600, chunkMaxRetries: 1,
+            probeControl: control, probeRequestSession: session)
+        control.interrupt { reader.markClosed() }
+        let job = ProbeTestJob {
+            defer {
+                reader.markClosed()
+                reader.finishProbeTransfers()
+                reader.close()
+                control.finish()
+            }
+            try reader.open()
+            try control.check()
+        }
+        try await waitFor { reader.isDrainingProbeRequestForTesting || job.isFinished || origin.failure != nil }
+        try #require(origin.blocked.entered)
+        #expect(reader.isDrainingProbeRequestForTesting)
+        #expect(!job.isFinished, "Cancellation is not completion while the task callback is still queued")
+        #expect(OriginRequestBudget.shared.snapshot(for: url)?.inflight == 1)
+
+        callbacks.isSuspended = false
+        let outcome = try await job.outcome()
+        if deadline {
+            #expect(throws: ProbeError.timedOut) { try outcome.get() }
+        } else {
+            Self.expectCancellation(outcome)
+        }
+        #expect(!reader.isDrainingProbeRequestForTesting)
+        #expect(OriginRequestBudget.shared.snapshot(for: url)?.inflight == 0)
+        #expect(origin.failure == nil)
+        origin.stop()
+        try await waitFor { origin.isStopped }
+    }
+
     @Test("HTTP cancellation ends a blocked header or body request without launching a fallback",
           .timeLimit(.minutes(1)), arguments: ProbeHTTPTestOrigin.Stage.allCases)
     func cancellationDuringHTTPOpen(_ stage: ProbeHTTPTestOrigin.Stage) async throws {

@@ -1014,9 +1014,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let label: String
     /// Only static controlled probes use this; playback retains its existing transport policy.
     private let probeControl: ProbeControl?
+    private let probeRequestSession: URLSession?
+    private let probeDrainLock = NSLock()
+    private var drainingProbeRequest = false
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil) {
         self.probeControl = probeControl
+        self.probeRequestSession = probeControl == nil ? nil : probeRequestSession
         self.url = url
         self.label = label
         self.extraHeaders = extraHeaders
@@ -3731,7 +3735,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { OriginRequestBudget.shared.release(ticket) }
 
         let delegate = ProbeDelegate(extraHeaders: extraHeaders)
-        let task = Self.probeSession.dataTask(with: request)
+        let task = (probeRequestSession ?? Self.probeSession).dataTask(with: request)
         task.delegate = delegate
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -3750,6 +3754,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                                 self?.isClosed == true
                             }) != .signaled {
             task.cancel()
+            finishCancelledProbeRequest(semaphore)
             EngineLog.emit("[AVIOReader] Range probe (\(range)) timed out", category: .demux, level: .verbose)
             return nil
         }
@@ -3980,6 +3985,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         prefetchQueue.sync {}
     }
 
+    var isDrainingProbeRequestForTesting: Bool {
+        probeDrainLock.withLock { drainingProbeRequest }
+    }
+
+    private func finishCancelledProbeRequest(_ completion: DispatchSemaphore) {
+        guard probeControl != nil else { return }
+        probeDrainLock.withLock { drainingProbeRequest = true }
+        defer { probeDrainLock.withLock { drainingProbeRequest = false } }
+        // Keep the origin ticket and callback state until this task acknowledges cancellation.
+        completion.wait()
+    }
+
     private func syncRequest(_ request: URLRequest, budget: TimeInterval = 35) throws -> (Data, URLResponse) {
         // #377: every short fetch the reader makes (detour blocks, size probes, HEAD) funnels
         // through here, so this is the one place that has to take an origin slot for all of them.
@@ -3991,7 +4008,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let delegate = ChunkFetchDelegate(extraHeaders: extraHeaders,
                                           bodyLimit: Self.expectedBodyBytes(for: request))
-        let task = Self.chunkSession.dataTask(with: request)
+        let task = (probeRequestSession ?? Self.chunkSession).dataTask(with: request)
         task.delegate = delegate
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -4009,6 +4026,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         )
         guard outcome == .signaled else {
             task.cancel()
+            finishCancelledProbeRequest(semaphore)
             throw AVIOReaderError.requestTimeout
         }
 

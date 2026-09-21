@@ -446,7 +446,8 @@ promptly, and handle cancellation racing an operation's start; the default no-op
 FFmpeg also gets an interrupt callback. This is cooperative interruption, **not a hard real-time return
 guarantee**: native computation and a noncooperating reader cannot be forcibly terminated. The call waits
 for native work to return before freeing its state, drains interruption callbacks before returning the
-reader, and never publishes a positive obtained after a stop. A controlled HTTP probe declines with
+reader, and never publishes a positive obtained after a stop. Cancelled HTTP requests finish their task
+callbacks before the probe releases their origin slots or returns. A controlled HTTP probe declines with
 `sourceBusy` rather than queueing behind playback's origin request budget. Normal playback's redirect,
 cookie, authentication and response policies are unchanged.
 
