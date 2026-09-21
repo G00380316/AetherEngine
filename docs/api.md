@@ -488,7 +488,9 @@ A cold open is not free. On a non-fast-start MP4 it is two to three sequential r
 | `AetherEngine.defaultPrewarmByteBudget` | `8 * 1024 * 1024`. A byte budget and not a duration, because a duration needs the bitrate, which is known only after the probe this is trying to get ahead of. |
 | `SourcePrewarmReport` | `retainedBytes`, `contentLength`, `declined`, `isWarm`. `declined` is one sentence naming why nothing was retained, and the engine logs it either way. |
 
-What it fetches: one ranged GET from byte zero for the budget, plus a second one for the trailing object only where the head says a cold open would go looking for it (an MP4 whose `moov` sits behind the media). Matroska is never given a second request, because it reads no cues at open whether they sit at the front or the back.
+What it fetches: one ranged GET from byte zero for the budget, plus a second one for the trailing object only where the head says the session that opens this source will go looking for it. Two layouts do: an MP4 whose `moov` sits behind the media, and a Matroska whose SeekHead names a level-1 object past the warm head (its Cues, usually). The Matroska span runs from that object to the end of the source and is declined above 1 MB, because a trailing object that large is a download rather than an index.
+
+A warm also hands the load **where the bytes live**. A resolver URL that answers 302 with a temporary edge target is resolved once, by the warm, and the session starts at that target instead of resolving the chain again; a lease that has since run out falls back to the source URL through the same ladder a mid-session expiry uses. Credential headers (`Authorization`, `Cookie`, `X-Emby-Token` and the rest of the #126 set) never travel to a cross-origin target, whether it was reached through a redirect or pinned from a warm.
 
 Three limits are part of the contract rather than implementation detail:
 

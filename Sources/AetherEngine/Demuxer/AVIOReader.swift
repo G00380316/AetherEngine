@@ -1056,8 +1056,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if sleepNs > 0 { Thread.sleep(forTimeInterval: Double(sleepNs) / 1_000_000_000) }
     }
 
+    /// The caller's headers this request may carry, given where it is actually going.
+    ///
+    /// Not the same set for every target, and that is the point. `RedirectHeaderPolicy` (#126)
+    /// keeps a media-server credential off a cross-origin redirect target, but it only ever ran on
+    /// the redirect HOP. Once a session pinned that target (#12), every later request was built
+    /// straight against it with the full header set, so the credential the hop had just stripped
+    /// went to the edge on the next range anyway. Measured against a logging origin: the 302 hop
+    /// arrived `auth=none`, and the post-seek request to the same pinned host 13 s later carried
+    /// both `Authorization` and `X-Emby-Token`. One policy, applied where the request is built, so
+    /// a pin cannot outflank it.
+    private func headers(for target: URL?) -> [String: String] {
+        RedirectHeaderPolicy.headersToReplay(
+            extraHeaders: extraHeaders, originalURL: url, redirectURL: target ?? url)
+    }
+
     private func applyExtraHeaders(_ request: inout URLRequest) {
-        for (name, value) in extraHeaders {
+        for (name, value) in headers(for: request.url) {
             request.setValue(value, forHTTPHeaderField: name)
         }
     }
@@ -2539,6 +2554,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         adoptedWarmSize = warm.contentLength
         winCond.unlock()
         SourceContentLengthCache.store(warm.contentLength, for: url)
+        // The warm followed the redirect chain and knows where it ended. Pinning that target here
+        // is what keeps this session from resolving it a second time: a resolver 302 measured
+        // 800 ms on the AE#551 round 2 harness and 3.2 s on the reporter's panel, and it was paid
+        // per fresh connection, not once. This is the same pin a redirect records (#12), so the
+        // expiry ladder above handles a lease that has run out in the usual way: drop it and
+        // re-resolve through the source URL. Credential headers do not follow it (`headers(for:)`).
+        recordResolvedURL(warm.resolvedURL)
         EngineLog.emit(
             "[AVIOReader] \(label) adopted a prewarmed source: head=\(warm.head.data.count)B "
             + "tail=\(warm.tail?.data.count ?? 0)B of \(warm.contentLength)B; "
@@ -2609,7 +2631,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let delegate = TailPrefetchDelegate(
             expectedLength: Self.tailPrefetchBytes,
-            extraHeaders: extraHeaders
+            extraHeaders: headers(for: request.url)
         )
         // #281 retest: one line per open, and the line the field needs. The advertised way to check
         // this fix was "does a bytes=-65536 request show up", which the engine never printed, so a
@@ -2889,7 +2911,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             transfer = HeldSourceConnection(
                 url: request.url ?? requestURLForBudget,
                 offset: offset,
-                extraHeaders: extraHeaders,
+                extraHeaders: headers(for: request.url ?? requestURLForBudget),
                 userAgent: nil,
                 label: label,
                 generation: generation,
@@ -2900,7 +2922,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let delegate = PersistentReadDelegate(
                 reader: self,
                 generation: generation,
-                extraHeaders: extraHeaders,
+                extraHeaders: headers(for: request.url),
                 ticket: ticket,
                 originURL: requestURLForBudget
             )
@@ -3373,7 +3395,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
 
         let delegate = StreamingDelegate(
-            extraHeaders: extraHeaders,
+            extraHeaders: headers(for: request.url),
             onResponse: { [weak self] response in
                 // Advisory length for the sequential-origin EOF/EIO distinction; -1 (chunked /
                 // unknown) leaves the clean-end path as the only EOF source.
@@ -3734,7 +3756,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         defer { OriginRequestBudget.shared.release(ticket) }
 
-        let delegate = ProbeDelegate(extraHeaders: extraHeaders)
+        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
         let task = (probeRequestSession ?? Self.probeSession).dataTask(with: request)
         task.delegate = delegate
 
@@ -4006,7 +4028,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             for: slotURL, label: "\(label) fetch", timeout: Self.shortFetchSlotWaitSeconds)
         defer { OriginRequestBudget.shared.release(ticket) }
 
-        let delegate = ChunkFetchDelegate(extraHeaders: extraHeaders,
+        let delegate = ChunkFetchDelegate(extraHeaders: headers(for: request.url),
                                           bodyLimit: Self.expectedBodyBytes(for: request))
         let task = (probeRequestSession ?? Self.chunkSession).dataTask(with: request)
         task.delegate = delegate

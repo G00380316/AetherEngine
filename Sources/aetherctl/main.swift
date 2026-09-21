@@ -848,7 +848,10 @@ if first == "play" {
         let budget = prewarmBytes ?? AetherEngine.defaultPrewarmByteBudget
         let started = Date()
         let done = DispatchSemaphore(value: 0)
-        Task {
+        // Detached, not `Task {}`: top-level code is MainActor-isolated under the Swift 6 language
+        // mode, so an inheriting task enqueues on the main actor that `done.wait()` is blocking,
+        // and the warm never starts. That deadlock is why this flag measured nothing (#551).
+        Task.detached {
             let report = await AetherEngine.prewarm(url: target, httpHeaders: playHeaders,
                                                     byteBudget: budget)
             let ms = Int(Date().timeIntervalSince(started) * 1000)
