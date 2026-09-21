@@ -215,7 +215,10 @@ struct HDR10PlusProbeIntegrationTests {
         #expect(clockReads == 3)
     }
 
-    @Test("Metadata found at the deadline is not published as a positive")
+    /// The budget bounds what the pass SPENDS, not what it may report. A confirmation is already paid
+    /// for by the time the clock is read again, and withholding it hands the caller a `false` it cannot
+    /// tell apart from a source that carries no HDR10+ at all.
+    @Test("Metadata found as the deadline passes is still published")
     func deadlineAfterScan() throws {
         let url = try Self.writeFixture(Self.hdr10PlusBase64, name: "scan-deadline")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -228,13 +231,17 @@ struct HDR10PlusProbeIntegrationTests {
             options: HDR10PlusDetectionOptions(timeBudget: 1),
             now: {
                 defer { clockReads += 1 }
+                // The cap check and the post-read check still fall inside the budget; the read that
+                // used to follow the scan, and retract the finding, is the one that would be over it.
                 return clockReads < 3 ? 0 : 1_000_000_000
             })
-        #expect(outcome.stopReason == .timeCap)
-        #expect(!outcome.carriesHDR10Plus)
+        #expect(outcome.stopReason == .found)
+        #expect(outcome.carriesHDR10Plus)
         #expect(outcome.packetsRead == 1)
         #expect(outcome.bytesRead == 91)
-        #expect(clockReads == 4)
+        // The start stamp, the cap check and the post-read check. The fourth read, the one that was
+        // over budget and used to retract the finding, is never taken.
+        #expect(clockReads == 3)
     }
 
     @Test("A read returning EOF after the deadline still reports the time cap")

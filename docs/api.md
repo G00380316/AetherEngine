@@ -426,10 +426,11 @@ Existing calls retain their open policy: `limits: nil, cancellation: nil`. Passi
 starts a monotonic deadline before opening the source, shares the input budget across disc recognition,
 container open, `avformat_find_stream_info`, the HDR scan, the Atmos rewind and decode, and disables
 speculative HTTP prefetch. Passing only `cancellation` enables interruption without installing numeric
-limits. The bounded open uses a smaller FFmpeg analysis profile; sparse sources may therefore report less
-metadata or need larger limits. Controlled URL probes support files, HTTP and HTTPS; other transports can
-use an independent `.custom` reader. They do not open a second URL reader for the optional recordless
-Dolby Vision audit. Container-declared Dolby Vision remains primary even when HDR10+ is also confirmed.
+limits. The open keeps the ordinary playback analysis budget, with `probesize` clamped to
+`maxInputBytes`, so a controlled probe does not answer from a shallower read than the same call
+without limits. Controlled URL probes support files, HTTP and HTTPS; other transports can
+use an independent `.custom` reader. Container-declared Dolby Vision remains primary even when HDR10+
+is also confirmed.
 
 `maxInputBytes` counts cumulative bytes the underlying reader delivers to the probe, including bytes
 read again after a seek. Reads are clipped to the remaining allowance **before** calling the reader.
@@ -447,9 +448,16 @@ FFmpeg also gets an interrupt callback. This is cooperative interruption, **not 
 guarantee**: native computation and a noncooperating reader cannot be forcibly terminated. The call waits
 for native work to return before freeing its state, drains interruption callbacks before returning the
 reader, and never publishes a positive obtained after a stop. Cancelled HTTP requests finish their task
-callbacks before the probe releases their origin slots or returns. A controlled HTTP probe declines with
-`sourceBusy` rather than queueing behind playback's origin request budget. Normal playback's redirect,
-cookie, authentication and response policies are unchanged.
+callbacks before the probe releases their origin slots or returns. A controlled HTTP probe waits for an
+origin request slot until its own deadline and then gives up with `sourceBusy`; a slot wait is the one
+wait the deadline watchdog cannot interrupt, so the deadline bounds it directly. Normal playback's
+redirect, cookie, authentication and response policies are unchanged.
+
+**One detail a controlled probe cannot reach.** The recordless Dolby Vision audit (AE#567) opens the
+source a SECOND time by URL to read its first RPU, traffic this probe's budget and cancellation do not
+police, so a controlled probe does not run it. An untagged 10-bit HEVC source whose container carries no
+Dolby Vision record therefore comes back without one from `probe(url:limits:)` while `probe(url:)`
+synthesizes it. Probe that class of source without limits, or treat the absence as unconfirmed.
 
 ```swift
 let cancellation = ProbeCancellation()

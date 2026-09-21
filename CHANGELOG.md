@@ -23,7 +23,20 @@ the public-API contract.
 - HDR10+ confirmation validates codec metadata structures and the registered ST 2094-40 payload
   instead of matching a marker anywhere in compressed bytes. Playback and probing share the validator;
   Dolby Vision stays primary. Per-pass byte limits now reject oversized packets before inspection or
-  decode, and a result arriving after the pass deadline cannot confirm metadata.
+  decode.
+- A message the HDR10+ validator has parsed in full is not withdrawn by damage elsewhere in the same
+  packet. Malformed framing after a confirmed ST 2094-40 payload ends the walk and reports the
+  confirmation, where it previously discarded it, which cost a real badge whenever a vendor SEI, a
+  trailing byte or a second unreadable NAL sat next to the metadata.
+- The HDR10+ and Atmos detail passes no longer retract a detection they already made because their
+  soft wall-clock budget expired. The budgets bound what a pass spends; a withheld confirmation is
+  indistinguishable to the caller from a source that carries none.
+- A controlled probe opens with the playback analysis budget, clamped by the caller's own
+  `maxInputBytes`, instead of the still extractor's smaller one, so passing `limits` no longer
+  reports fewer streams than the same call without it. The recordless Dolby Vision audit remains
+  unavailable to it: that audit opens the source a second time by URL, outside the probe's budget.
+- A controlled HTTP probe waits for an origin request slot until its own deadline rather than
+  failing with `sourceBusy` the moment another request holds the origin.
 
 ## [7.9.0] - 2026-09-20
 

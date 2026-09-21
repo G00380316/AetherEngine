@@ -252,9 +252,24 @@ extension AetherEngine {
         return probe
     }
 
+    /// The caller's own limits are the only thing allowed to bind a controlled probe.
+    ///
+    /// Built from `.playback` rather than `.stillExtraction`: a host that asks for limits is asking to
+    /// bound the COST, not to be answered from a shallower read, and a second hidden budget (the still
+    /// extractor's 2 MiB probe and 2 s analysis) would make `probe(url:limits:)` report fewer streams
+    /// than `probe(url:)` on exactly the sparse sources where that matters. `maxInputBytes` clamps the
+    /// probe size, and the deadline plus the FFmpeg interrupt callback bound the analysis instead.
+    /// The profile's AVIO tuning is not read on this path at all: a controlled probe always opens
+    /// through a reader, whose own transport settings live in `ProbeHTTPReader`.
+    ///
+    /// The recordless Dolby Vision audit stays off, and that is a real gap rather than a tuning choice:
+    /// it opens the source a SECOND time by URL (`DolbyVisionRecordAudit.rpuProfileOfSource`), traffic
+    /// this probe's budget and cancellation do not reach, and `open(reader:)` clears `auditSource`
+    /// regardless. A controlled probe of an untagged 10-bit HEVC source therefore reports no Dolby
+    /// Vision record where an uncontrolled one does (AE#567).
     private nonisolated static func probeOpenProfile(limits: ProbeLimits?) -> DemuxerOpenProfile {
         guard let limits else { return .playback }
-        var profile = DemuxerOpenProfile.stillExtraction
+        var profile = DemuxerOpenProfile.playback
         // FFmpeg has a minimum probe size. The input seam still enforces smaller caller limits.
         profile.probesize = max(32, min(profile.probesize, limits.maxInputBytes))
         profile.auditsRecordlessDolbyVision = false

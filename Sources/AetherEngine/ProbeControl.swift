@@ -191,6 +191,12 @@ final class ProbeControl: @unchecked Sendable {
         catch { return true }
     }
 
+    /// Seconds left on the deadline, or nil when no numeric limits were installed. For the one wait the
+    /// watchdog cannot interrupt (an origin request slot), so it can be bounded by the deadline instead.
+    var remainingTime: TimeInterval? {
+        deadline.map { max(0, $0 - now()) }
+    }
+
     func inputAllowance(_ requested: Int32) throws -> Int32 {
         try check()
         guard let limits else { return requested }

@@ -59,6 +59,10 @@ enum HDR10PlusMetadataScan {
 
     // MARK: - H.264 / HEVC
 
+    /// A walk that runs into malformed framing stops and reports what it had already VALIDATED, rather
+    /// than discarding it. Only `validT35` ever sets the answer, so an aborted walk cannot invent one;
+    /// abandoning a confirmed payload because a later NAL in the same packet is malformed would be a
+    /// false negative on the one carriage this scan exists to find.
     private static func scanNALs(
         _ bytes: UnsafeBufferPointer<UInt8>, codecID: AVCodecID, framing: VideoNALFraming
     ) -> Bool {
@@ -86,13 +90,13 @@ enum HDR10PlusMetadataScan {
         case .lengthPrefixed(let width):
             guard (1...4).contains(width) else { return false }
             var offset = 0
-            while offset < bytes.count {
-                guard bytes.count - offset >= width else { return false }
+            while offset < bytes.count, !found {
+                guard bytes.count - offset >= width else { return found }
                 var count = 0
                 for index in offset..<(offset + width) { count = (count << 8) | Int(bytes[index]) }
                 offset += width
                 guard count > 0, count <= bytes.count - offset,
-                      visit(offset, offset + count) else { return false }
+                      visit(offset, offset + count) else { return found }
                 offset += count
             }
         case .annexB:
@@ -103,15 +107,16 @@ enum HDR10PlusMetadataScan {
                 if byte == 1, zeros >= 2 {
                     let end = index - zeros
                     if let start = nalStart {
-                        guard visit(start, end) else { return false }
+                        guard visit(start, end) else { return found }
+                        if found { return true }
                     } else if end != 0 {
-                        return false
+                        return found
                     }
                     nalStart = index + 1
                 }
                 zeros = byte == 0 ? zeros + 1 : 0
             }
-            guard let start = nalStart, visit(start, bytes.count - zeros) else { return false }
+            guard let start = nalStart, visit(start, bytes.count - zeros) else { return found }
         }
         return found
     }
@@ -138,7 +143,9 @@ enum HDR10PlusMetadataScan {
         return rbsp
     }
 
-    /// Nil denotes malformed SEI framing; false is a well-formed SEI without HDR10+.
+    /// Nil denotes malformed SEI framing; false is a well-formed SEI without HDR10+. A message this
+    /// walk has already VALIDATED outranks framing it cannot finish reading, so nil is only ever the
+    /// answer when nothing was confirmed.
     private static func scanSEI(_ bytes: [UInt8]) -> Bool? {
         var offset = 0
         var found = false
@@ -157,7 +164,7 @@ enum HDR10PlusMetadataScan {
         while offset < bytes.count {
             if offset == bytes.count - 1, bytes[offset] == 0x80 { return found }
             guard let type = extendedValue(), let size = extendedValue(),
-                  size <= bytes.count - offset else { return nil }
+                  size <= bytes.count - offset else { return found ? true : nil }
             if type == 4 {
                 let valid = bytes.withUnsafeBufferPointer {
                     validT35($0.baseAddress! + offset, size: size)
@@ -166,40 +173,41 @@ enum HDR10PlusMetadataScan {
             }
             offset += size
         }
-        return nil // rbsp_trailing_bits is mandatory.
+        return found ? true : nil // rbsp_trailing_bits is mandatory.
     }
 
     // MARK: - AV1 low-overhead OBU stream (demuxed packet framing)
 
+    /// Same contract as `scanNALs`: an aborted walk reports what it validated, never less.
     private static func scanOBUs(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
         var offset = 0
         var found = false
-        while offset < bytes.count {
+        while offset < bytes.count, !found {
             let header = bytes[offset]
             offset += 1
-            guard header & 0x81 == 0 else { return false }
+            guard header & 0x81 == 0 else { return found }
             let type = (header >> 3) & 15
             if header & 4 != 0 {
-                guard offset < bytes.count, bytes[offset] & 7 == 0 else { return false }
+                guard offset < bytes.count, bytes[offset] & 7 == 0 else { return found }
                 offset += 1
             }
             let size: Int
             if header & 2 != 0 {
                 guard let declared = leb128(bytes, offset: &offset, end: bytes.count),
-                      declared <= bytes.count - offset else { return false }
+                      declared <= bytes.count - offset else { return found }
                 size = declared
             } else {
                 size = bytes.count - offset
             }
             let end = offset + size
             if type == 5 {
-                guard let metadataType = leb128(bytes, offset: &offset, end: end) else { return false }
+                guard let metadataType = leb128(bytes, offset: &offset, end: end) else { return found }
                 if metadataType == 4 {
                     // AV1 permits arbitrarily many trailing zero bytes after the stop bit.
                     // They belong to the OBU, not to the byte-aligned T.35 payload.
                     var trailing = end
                     while trailing > offset, bytes[trailing - 1] == 0 { trailing -= 1 }
-                    guard trailing > offset, bytes[trailing - 1] == 0x80 else { return false }
+                    guard trailing > offset, bytes[trailing - 1] == 0x80 else { return found }
                     found = validT35(bytes.baseAddress! + offset, size: trailing - offset - 1) || found
                 }
             }

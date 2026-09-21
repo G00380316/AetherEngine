@@ -3989,7 +3989,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         guard !isClosed else { throw CancellationError() }
         try probeControl.check()
-        guard let ticket = OriginRequestBudget.shared.tryAcquire(for: url, label: label) else {
+        // Wait for the slot, but never past the probe's own deadline. A slot wait is the one wait the
+        // watchdog cannot interrupt (it fires at reads), so the deadline has to bound it here instead.
+        // Not waiting at all would fail a probe that merely arrived while one other request held the
+        // origin, which is the ordinary shape when a host probes several items off one server.
+        let slotWait = probeControl.remainingTime.map { min(timeout, $0) } ?? timeout
+        guard let ticket = OriginRequestBudget.shared.acquire(
+            for: url, label: label, timeout: slotWait) else {
             probeControl.stop(ProbeError.sourceBusy)
             throw ProbeError.sourceBusy
         }
