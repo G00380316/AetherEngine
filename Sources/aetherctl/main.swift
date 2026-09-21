@@ -753,6 +753,9 @@ if first == "play" {
     }
     // AE#464 round 2: mount with `autoplay = false`, the shape of a host that owns transport.
     let pausedMount = takeFlag("--paused", from: &rest)
+    // AE#587: LoadOptions.preserveASSMarkup, documented as ASS/SSA only. The report that it leaks
+    // into SubRip could only be argued from the source because no harness set the flag at all.
+    let preserveASSMarkup = takeFlag("--preserve-ass-markup", from: &rest)
     // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
     // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
     // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
@@ -878,6 +881,7 @@ if first == "play" {
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,
                  assertDolbyVision: playAssertDV,
+                 preserveASSMarkup: preserveASSMarkup,
                  dolbyVisionHandling: playDVHandling,
                  record: playRecord))
 }
