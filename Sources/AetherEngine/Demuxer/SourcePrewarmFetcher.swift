@@ -78,19 +78,26 @@ enum SourcePrewarmFetcher {
         }
         if Task.isCancelled { return decline(url, "cancelled") }
 
+        // The tail rides the target the head just resolved, headers filtered the way a redirect
+        // would filter them: re-entering through the source URL would pay the same 302 a second
+        // time, which on the reporting origin in AE#551 round 2 was 800 ms of pure redirect.
+        let tailURL = head.respondedURL ?? url
+        let tailHeaders = RedirectHeaderPolicy.headersToReplay(
+            extraHeaders: extraHeaders, originalURL: url, redirectURL: tailURL)
         var tail: ResidentSpan?
-        if SourcePrewarmPlan.needsTrailingObject(head: head.body),
-           head.total > Int64(head.body.count) + Int64(tailBytes) {
-            let start = head.total - Int64(tailBytes)
-            if let fetched = try? await RangeFetch.run(
-                url: url, extraHeaders: extraHeaders,
-                requestedStart: start, requestedLength: tailBytes,
-                label: "prewarm tail", session: session),
-               fetched.range.start == start {
-                tail = ResidentSpan(start: start, data: fetched.body)
-            } else {
-                EngineLog.emit("[SourcePrewarm] trailing object not retained for \(url.lastPathComponent); "
-                               + "the head alone is warm", category: .demux)
+        switch SourcePrewarmPlan.trailing(head: head.body, total: head.total) {
+        case .none:
+            break
+        case .suffix where head.total > Int64(head.body.count) + Int64(tailBytes):
+            tail = await fetchTail(url: tailURL, extraHeaders: tailHeaders, source: url,
+                                   start: head.total - Int64(tailBytes), length: tailBytes)
+        case .suffix:
+            break
+        case .range(let start):
+            let length = Int(clamping: head.total - start)
+            if length > 0 {
+                tail = await fetchTail(url: tailURL, extraHeaders: tailHeaders, source: url,
+                                       start: start, length: length)
             }
         }
         if Task.isCancelled { return decline(url, "cancelled") }
@@ -98,17 +105,38 @@ enum SourcePrewarmFetcher {
         let warmed = PrewarmedSource(head: ResidentSpan(start: 0, data: head.body),
                                      tail: tail,
                                      contentLength: head.total,
-                                     requestHeaders: extraHeaders)
+                                     requestHeaders: extraHeaders,
+                                     resolvedURL: head.respondedURL)
         guard store.store(warmed, for: url) else {
             return decline(url, "\(warmed.byteCount) bytes exceed the prewarm store's cap")
         }
         EngineLog.emit(
             "[SourcePrewarm] warmed \(url.lastPathComponent): head=\(head.body.count)B "
-            + "tail=\(tail?.data.count ?? 0)B of \(head.total)B (#551)",
+            + "tail=\(tail?.data.count ?? 0)B at \(tail.map { String($0.start) } ?? "-") "
+            + "of \(head.total)B"
+            + (warmed.resolvedURL.map { ", resolved to host=\($0.host ?? "?")" } ?? "")
+            + " (#551)",
             category: .demux)
         return SourcePrewarmReport(retainedBytes: warmed.byteCount,
                                    contentLength: head.total,
                                    declined: nil)
+    }
+
+    private static func fetchTail(url: URL,
+                                  extraHeaders: [String: String],
+                                  source: URL,
+                                  start: Int64,
+                                  length: Int) async -> ResidentSpan? {
+        if let fetched = try? await RangeFetch.run(
+            url: url, extraHeaders: extraHeaders,
+            requestedStart: start, requestedLength: length,
+            label: "prewarm tail", session: session),
+           fetched.range.start == start {
+            return ResidentSpan(start: start, data: fetched.body)
+        }
+        EngineLog.emit("[SourcePrewarm] trailing object not retained for \(source.lastPathComponent); "
+                       + "the head alone is warm", category: .demux)
+        return nil
     }
 
     private static func decline(_ url: URL, _ reason: String) -> SourcePrewarmReport {
@@ -135,6 +163,9 @@ enum RangeFetch {
         let body: Data
         let range: (start: Int64, end: Int64)
         let total: Int64
+        /// The URL that actually answered, redirects followed. A warm that resolved a 302 knows the
+        /// target the session would otherwise resolve again (#551 round 2).
+        let respondedURL: URL?
     }
 
     static func run(url: URL,
@@ -191,6 +222,7 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
     private var buffer = Data()
     private var contentRange: (start: Int64, end: Int64, total: Int64)?
     private var rejection: String?
+    private var respondedURL: URL?
 
     /// Guards the handoff between the caller's thread, which installs the handler, and the
     /// session's delegate queue, which produces the outcome. Either can be first.
@@ -295,6 +327,9 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
             return
         }
         contentRange = parsed
+        // `http.url` is the URL that answered, redirects followed, which is the one a later load
+        // should start at instead of resolving the chain again (#551 round 2).
+        respondedURL = http.url
         completionHandler(.allow)
     }
 
@@ -324,7 +359,8 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         }
         return .body(RangeFetch.Result(body: buffer,
                                        range: (start: range.start, end: range.end),
-                                       total: range.total))
+                                       total: range.total,
+                                       respondedURL: respondedURL))
     }
 
     /// `bytes <start>-<end>/<total>`. A `*` total is a range the origin will not size, which is

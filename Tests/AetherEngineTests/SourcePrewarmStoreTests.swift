@@ -18,7 +18,8 @@ struct SourcePrewarmStoreTests {
         PrewarmedSource(head: ResidentSpan(start: start, data: Data(count: head)),
                         tail: nil,
                         contentLength: contentLength,
-                        requestHeaders: [:])
+                        requestHeaders: [:],
+                        resolvedURL: nil)
     }
 
     @Test("a stored source is served once and then gone")
@@ -86,7 +87,8 @@ struct SourcePrewarmStoreTests {
         let withTail = PrewarmedSource(head: ResidentSpan(start: 0, data: Data(count: 1000)),
                                        tail: ResidentSpan(start: 9000, data: Data(count: 500)),
                                        contentLength: 9500,
-                                       requestHeaders: [:])
+                                       requestHeaders: [:],
+                                       resolvedURL: nil)
         store.store(withTail, for: url("a"))
         #expect(store.retainedBytes == 1500)
 
