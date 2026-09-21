@@ -294,23 +294,37 @@ struct ProbeControlTests {
     func oversizedReaderResult() throws {
         final class LyingReader: IOReader, @unchecked Sendable {
             let discImageProbeEnabled = false
-            func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { size + 1 }
-            func seek(offset: Int64, whence: Int32) -> Int64 {
-                whence == 0x10000 ? -1 : offset
+            let reader: ProbeRecordingReader
+
+            init(reader: ProbeRecordingReader) { self.reader = reader }
+            func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
+                let count = reader.read(buffer, size: size)
+                return count > 0 ? size + 1 : count
             }
-            func close() {}
+            func seek(offset: Int64, whence: Int32) -> Int64 {
+                reader.seek(offset: offset, whence: whence)
+            }
+            func cancel() { reader.cancel() }
+            func close() { reader.close() }
         }
+        let data = try ProbeTestFixtures.hdr10Plus()
         let control = try Self.control(.init(maxInputBytes: 3))
         defer { control.finish() }
-        let counted = ProbeIOReader(reader: LyingReader(), control: control)
+        let counted = ProbeIOReader(
+            reader: LyingReader(reader: ProbeRecordingReader(data: data)), control: control)
         #expect(Self.read(counted, size: 10) == -1)
         #expect(throws: ProbeError.invalidReaderResult) { try control.check() }
         #expect(throws: ProbeError.invalidReaderResult) { try control.complete() }
+        let nativeReader = ProbeRecordingReader(data: data)
         #expect(throws: ProbeError.invalidReaderResult) {
             try AetherEngine.probe(
-                source: .custom(LyingReader(), formatHint: "mp4"),
+                source: .custom(LyingReader(reader: nativeReader), formatHint: "mp4"),
                 limits: .init(maxInputBytes: 3, timeBudget: 3600))
         }
+        #expect(nativeReader.reads.map(\.requested) == [3])
+        #expect(nativeReader.bytesRead == 3)
+        #expect(nativeReader.cancelCount == 1)
+        #expect(nativeReader.closeCount == 0)
     }
 
     @Test("One packet budget covers every stream and later pass")
@@ -923,14 +937,16 @@ struct ProbeControlTests {
         try #require(mayReturn.entered)
         #expect(!job.isFinished, "The native avio_seek call still owns the parked callback")
         mayReturn.open()
-        #expect(try await job.outcome().get() < 0)
+        let nativeResult = try await job.outcome().get()
+        #expect(nativeResult < 0)
         if expireDeadline {
             #expect(throws: ProbeError.timedOut) { try control.check() }
         } else {
             #expect(throws: CancellationError.self) { try control.check() }
         }
-        let requestedOffset = reader.seeks.last?.offset
-        let expectedOffset: Int64 = 1024 * 1024
+        let recordedSeeks = reader.seeks
+        let requestedOffset = try #require(recordedSeeks.last?.offset)
+        let expectedOffset: Int64 = 1_048_576
         #expect(requestedOffset == expectedOffset)
         #expect(reader.reads.isEmpty)
         #expect(reader.cancelCount == 1)
