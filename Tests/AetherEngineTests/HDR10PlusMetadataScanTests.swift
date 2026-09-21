@@ -14,9 +14,12 @@ struct HDR10PlusMetadataScanTests {
             for shift in (0..<width).reversed() { bits.append(UInt8((value >> shift) & 1)) }
         }
         var bytes: [UInt8] {
-            stride(from: 0, to: bits.count, by: 8).map { start in
-                (0..<8).reduce(UInt8(0)) { byte, bit in
-                    (byte << 1) | (start + bit < bits.count ? bits[start + bit] : 0)
+            stride(from: 0, to: bits.count, by: 8).map { (start: Int) -> UInt8 in
+                (0..<8).reduce(UInt8(0)) { (byte: UInt8, bit: Int) -> UInt8 in
+                    let index: Int = start + bit
+                    let nextBit: UInt8 = index < bits.count ? bits[index] : 0
+                    let shiftedByte: UInt8 = byte << 1
+                    return shiftedByte | nextBit
                 }
             }
         }
@@ -111,9 +114,14 @@ struct HDR10PlusMetadataScanTests {
 
     private static func obu(_ payload: [UInt8], type: UInt8 = 5, sized: Bool = true,
                             extensionByte: UInt8? = nil) -> [UInt8] {
-        [type << 3 | (sized ? 2 : 0) | (extensionByte == nil ? 0 : 4)]
-            + (extensionByte.map { [$0] } ?? [])
-            + (sized ? leb128(payload.count) : []) + payload
+        let sizeFlag: UInt8 = sized ? 2 : 0
+        let extensionFlag: UInt8 = extensionByte == nil ? 0 : 4
+        let header: UInt8 = (type << 3) | sizeFlag | extensionFlag
+        var bytes: [UInt8] = [header]
+        if let extensionByte { bytes.append(extensionByte) }
+        if sized { bytes.append(contentsOf: leb128(payload.count)) }
+        bytes.append(contentsOf: payload)
+        return bytes
     }
 
     private func scan(_ bytes: [UInt8], codecID: AVCodecID = AV_CODEC_ID_HEVC,
