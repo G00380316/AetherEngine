@@ -9,36 +9,35 @@ extension AetherEngine {
 
     // MARK: - Probe
 
-    /// One-shot container + stream metadata read; no HLS server or decoders. Network sources pull a HEAD probe + small initial range (typically a few MB). File sources read directly via FFmpeg's file protocol.
+    /// One-shot container + stream metadata read; no HLS server or detail-pass decoders.
+    /// Omit `limits` and `cancellation` to retain the existing open path. Opting in controls the entire
+    /// probe, starting before source I/O; see `ProbeLimits` and `ProbeCancellation`.
     ///
     /// - Parameters:
     ///   - url: Media source (`file://`, `http://`, or `https://`).
     ///   - options: Forwarded for `httpHeaders` only; other flags ignored (no playback session).
-    /// - Throws: Any error the demuxer raises during open / probe.
+    ///   - limits: Optional shared input, packet and monotonic time limits.
+    ///   - cancellation: Optional one-shot token, callable from another thread or a task cancellation handler.
+    /// - Throws: Open errors, `ProbeError` for a controlled stop, or `CancellationError`.
     public nonisolated static func probe(
         url: URL,
-        options: LoadOptions = .init()
+        options: LoadOptions = .init(),
+        limits: ProbeLimits? = nil,
+        cancellation: ProbeCancellation? = nil
     ) throws -> SourceProbe {
-        try probe(source: .url(url), options: options)
+        try probe(source: .url(url), options: options, detecting: [],
+                  limits: limits, cancellation: cancellation)
     }
 
     /// `probe(url:)` for a custom byte source (AetherEngine#27). Caller retains reader ownership; cursor is left at an unspecified position and `close()` is NOT called. Pass a fresh (or rewound) reader to `load(source:)` afterwards. `SourceProbe.url` is `aether-custom://source` for custom readers.
     public nonisolated static func probe(
         source: MediaSource,
-        options: LoadOptions = .init()
+        options: LoadOptions = .init(),
+        limits: ProbeLimits? = nil,
+        cancellation: ProbeCancellation? = nil
     ) throws -> SourceProbe {
-        let demuxer = Demuxer()
-        let displayURL: URL
-        switch source {
-        case .url(let u):
-            try demuxer.open(url: u, extraHeaders: options.httpHeaders)
-            displayURL = u
-        case .custom(let reader, let formatHint):
-            try demuxer.open(reader: reader, formatHint: formatHint)
-            displayURL = URL(string: "aether-custom://source")!
-        }
-        defer { demuxer.close() }
-        return makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
+        try probe(source: source, options: options, detecting: [],
+                  limits: limits, cancellation: cancellation)
     }
 
     // MARK: - Bounded, opt-in Atmos/JOC detail probe
@@ -54,8 +53,7 @@ extension AetherEngine {
     /// host specifically needs an authoritative "Dolby Atmos" badge (e.g. a details screen): it is strictly
     /// more expensive than `probe(url:)` (it opens a real EAC3 decoder and decodes at least one frame) and
     /// MUST NOT be used on the playback-start critical path. `probe(url:)` / `probe(source:)` themselves are
-    /// completely unmodified by this API and remain byte-for-byte the same lightweight demux-only probe --
-    /// this is an additive, separate entry point, not a flag on the existing one.
+    /// demux-only unless detail detection is requested. Whole-probe controls are separately opt-in.
     ///
     /// The decode pass is bounded by `atmosDetection` (packet-count / byte / wall-clock caps -- see
     /// `AtmosDetectionOptions`): it stops at the first successfully decoded audio frame, or at whichever cap
@@ -74,15 +72,18 @@ extension AetherEngine {
     ///     packets / 8 MiB / 2 s wall clock (soft -- see `AtmosDetectionOptions` doc for the same
     ///     AVIO-blocking caveat `Demuxer.seekBounded` already documents: a single blocking `av_read_frame()`
     ///     on a stalled remote socket can still run past the wall-clock budget before the next check fires).
-    /// - Throws: Any error the demuxer raises during open / probe -- identical to `probe(url:)`. Decode-side
+    /// - Throws: Open errors, `ProbeError` for whole-probe stops, or `CancellationError`. Decode-side
     ///   failures (bad EAC3 extradata, no decoder built, a malformed frame, EOF before any frame decodes) are
     ///   NEVER thrown; they only affect whether Atmos gets confirmed.
     public nonisolated static func probeDetectingAtmos(
         url: URL,
         options: LoadOptions = .init(),
-        atmosDetection: AtmosDetectionOptions = .init()
+        atmosDetection: AtmosDetectionOptions = .init(),
+        limits: ProbeLimits? = nil,
+        cancellation: ProbeCancellation? = nil
     ) throws -> SourceProbe {
-        try probe(source: .url(url), options: options, detecting: .atmos, atmosDetection: atmosDetection)
+        try probe(source: .url(url), options: options, detecting: .atmos, atmosDetection: atmosDetection,
+                  limits: limits, cancellation: cancellation)
     }
 
     /// `probeDetectingAtmos(url:)` for a custom byte source. Same reader-ownership contract as `probe(source:)`:
@@ -90,9 +91,12 @@ extension AetherEngine {
     public nonisolated static func probeDetectingAtmos(
         source: MediaSource,
         options: LoadOptions = .init(),
-        atmosDetection: AtmosDetectionOptions = .init()
+        atmosDetection: AtmosDetectionOptions = .init(),
+        limits: ProbeLimits? = nil,
+        cancellation: ProbeCancellation? = nil
     ) throws -> SourceProbe {
-        try probe(source: source, options: options, detecting: .atmos, atmosDetection: atmosDetection)
+        try probe(source: source, options: options, detecting: .atmos, atmosDetection: atmosDetection,
+                  limits: limits, cancellation: cancellation)
     }
 
     // MARK: - Bounded, opt-in detail probe
@@ -107,9 +111,9 @@ extension AetherEngine {
     /// - **HDR10+**, whose ST 2094-40 metadata rides an in-band ITU-T T.35 SEI that no demuxer parses
     ///   (`.hdr10Plus`, see `HDR10PlusDetectionOptions`).
     ///
-    /// Both cost reads past `avformat_find_stream_info`, which is why `probe(url:)` does neither and stays
-    /// byte-for-byte what it was. Neither is for the playback-start critical path. Asking for both runs both
-    /// over one open, one connection: the HDR10+ scan first, out of the packets `find_stream_info` already
+    /// Both cost reads past `avformat_find_stream_info`, which is why `probe(url:)` does neither.
+    /// Neither is for the playback-start critical path. Asking for both runs both
+    /// over one demuxer: the HDR10+ scan first, out of the packets `find_stream_info` already
     /// queued, then the queue-flushing seek the Atmos decode pass needs.
     ///
     /// Both passes are additive and one-directional. They can only ever SET `isAtmos` /
@@ -119,20 +123,25 @@ extension AetherEngine {
     /// - Parameters:
     ///   - url: Media source, forwarded verbatim to `probe(url:)`.
     ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only).
-    ///   - detecting: Which extra passes to run. Empty is exactly `probe(url:)`.
+    ///   - detecting: Which extra passes to run. Empty is the header probe with the same controls.
     ///   - atmosDetection: Bounds + optional track override for the Atmos decode pass. Ignored without `.atmos`.
     ///   - hdr10PlusDetection: Bounds for the HDR10+ scan. Ignored without `.hdr10Plus`.
-    /// - Throws: Only what `probe(url:)` throws (demuxer open / probe). Pass-side failures are never thrown:
-    ///   they only mean a detail stays unconfirmed.
+    ///   - limits: Whole-probe limits, shared across open, stream analysis, seeks and both passes.
+    ///   - cancellation: Cancellation reaches HTTP I/O or the custom reader's `cancel()`.
+    /// - Throws: Open errors, `ProbeError` for whole-probe stops, or `CancellationError`. Ordinary
+    ///   pass-side failures and per-pass caps only mean a detail stays unconfirmed.
     public nonisolated static func probe(
         url: URL,
         options: LoadOptions = .init(),
         detecting: ProbeDetail,
         atmosDetection: AtmosDetectionOptions = .init(),
-        hdr10PlusDetection: HDR10PlusDetectionOptions = .init()
+        hdr10PlusDetection: HDR10PlusDetectionOptions = .init(),
+        limits: ProbeLimits? = nil,
+        cancellation: ProbeCancellation? = nil
     ) throws -> SourceProbe {
         try probe(source: .url(url), options: options, detecting: detecting,
-                  atmosDetection: atmosDetection, hdr10PlusDetection: hdr10PlusDetection)
+                  atmosDetection: atmosDetection, hdr10PlusDetection: hdr10PlusDetection,
+                  limits: limits, cancellation: cancellation)
     }
 
     /// `probe(url:detecting:)` for a custom byte source (SMB, WebDAV, a disc image, anything behind an
@@ -143,19 +152,64 @@ extension AetherEngine {
         options: LoadOptions = .init(),
         detecting: ProbeDetail,
         atmosDetection: AtmosDetectionOptions = .init(),
-        hdr10PlusDetection: HDR10PlusDetectionOptions = .init()
+        hdr10PlusDetection: HDR10PlusDetectionOptions = .init(),
+        limits: ProbeLimits? = nil,
+        cancellation: ProbeCancellation? = nil
     ) throws -> SourceProbe {
+        let control = try limits != nil || cancellation != nil
+            ? ProbeControl(limits: limits, cancellation: cancellation) : nil
         let demuxer = Demuxer()
-        let displayURL: URL
-        switch source {
-        case .url(let u):
-            try demuxer.open(url: u, extraHeaders: options.httpHeaders)
-            displayURL = u
-        case .custom(let reader, let formatHint):
-            try demuxer.open(reader: reader, formatHint: formatHint)
-            displayURL = URL(string: "aether-custom://source")!
+        demuxer.probeControl = control
+        var ownedReader: IOReader?
+        func closeInput() {
+            demuxer.close()
+            ownedReader?.close()
+            ownedReader = nil
         }
-        defer { demuxer.close() }
+        defer {
+            closeInput()
+            // Native calls have ended; join interruption callbacks before the host can reuse its reader.
+            control?.finish()
+        }
+        let displayURL: URL
+        do {
+            try control?.check()
+            switch source {
+            case .url(let u):
+                displayURL = u
+                if let control {
+                    let reader: IOReader
+                    if u.isFileURL {
+                        guard let file = FileIOReader(url: u) else { throw DemuxerError.openFailed(code: -1) }
+                        reader = file
+                    } else if ["http", "https"].contains(u.scheme?.lowercased() ?? "") {
+                        reader = ProbeHTTPReader(url: u, headers: options.httpHeaders, control: control)
+                    } else {
+                        throw ProbeError.unsupportedURL
+                    }
+                    ownedReader = reader
+                    let counted = ProbeIOReader(reader: reader, control: control)
+                    try control.check()
+                    if let http = reader as? ProbeHTTPReader { try http.open() }
+                    try control.check()
+                    try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits))
+                } else {
+                    try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+                }
+            case .custom(let reader, let formatHint):
+                displayURL = URL(string: "aether-custom://source")!
+                if let control {
+                    try demuxer.open(reader: ProbeIOReader(reader: reader, control: control),
+                                     formatHint: formatHint, profile: probeOpenProfile(limits: limits))
+                } else {
+                    try demuxer.open(reader: reader, formatHint: formatHint)
+                }
+            }
+            try control?.check()
+        } catch {
+            try control?.check()
+            throw error
+        }
 
         var probe = makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
 
@@ -165,12 +219,18 @@ extension AetherEngine {
         if detecting.contains(.hdr10Plus) {
             let outcome = Self.detectHDR10Plus(
                 demuxer: demuxer, videoIndex: demuxer.videoStreamIndex, options: hdr10PlusDetection)
+            try control?.check()
             if outcome.carriesHDR10Plus {
                 probe = Self.enrichHDR10Plus(base: probe)
             }
         }
 
-        if detecting.contains(.atmos) {
+        let targetIndex = Self.atmosDecodeTargetIndex(
+            options: atmosDetection, defaultAudioStreamIndex: demuxer.audioStreamIndex)
+        if detecting.contains(.atmos),
+           demuxer.stream(at: targetIndex)?.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_EAC3,
+           !probe.audioTracks.contains(where: { $0.id == Int(targetIndex) && $0.isAtmos }) {
+            try control?.check()
             // Flush what is still queued before the decode pass starts. Those packets were read before
             // `detectAtmos` sets AVDISCARD_ALL, so libavformat hands them back regardless of the hint: on a
             // source whose audio does not sit at the head, the pass burns its whole foreign-packet fuse on
@@ -179,15 +239,27 @@ extension AetherEngine {
             // A source that cannot seek is no worse off than before. (It also puts a source the HDR10+ scan
             // has just walked back at the start.)
             demuxer.seekBounded(to: 0, timeout: Self.atmosProbeFlushSeekTimeout)
-            let targetIndex = Self.atmosDecodeTargetIndex(
-                options: atmosDetection, defaultAudioStreamIndex: demuxer.audioStreamIndex)
+            try control?.check()
             let outcome = Self.detectAtmos(demuxer: demuxer, targetIndex: targetIndex, options: atmosDetection)
+            try control?.check()
             if outcome.confirmedAtmos {
                 probe = Self.enrichAtmos(base: probe, confirmedTrackID: Int(targetIndex))
             }
         }
 
+        closeInput()
+        try control?.complete()
         return probe
+    }
+
+    private nonisolated static func probeOpenProfile(limits: ProbeLimits?) -> DemuxerOpenProfile {
+        guard let limits else { return .playback }
+        var profile = DemuxerOpenProfile.stillExtraction
+        // FFmpeg has a minimum probe size. The input seam still enforces smaller caller limits.
+        profile.probesize = max(32, min(profile.probesize, limits.maxInputBytes))
+        profile.auditsRecordlessDolbyVision = false
+        profile.readerLabel = "probe"
+        return profile
     }
 
     /// Flip `isAtmos` to `true` on exactly the one confirmed audio track, leaving everything else identical.

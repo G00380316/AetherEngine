@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- Optional `ProbeLimits` and `ProbeCancellation` on URL/custom metadata and HDR10+/Atmos detail
+  probes. Input and monotonic time limits cover opening, stream analysis, seeks and both passes;
+  cancellation reaches HTTP reads and cooperating custom readers. A whole-probe stop throws without
+  a partial result, and caller-owned readers are never closed. Existing calls keep their open policy.
+
+### Fixed
+
+- HDR10+ confirmation validates codec metadata structures and the registered ST 2094-40 payload
+  instead of matching a marker anywhere in compressed bytes. Playback and probing share the validator;
+  Dolby Vision stays primary. Per-pass byte limits now reject oversized packets before inspection or
+  decode, and a result arriving after the pass deadline cannot confirm metadata.
 
 ## [7.9.0] - 2026-09-20
 

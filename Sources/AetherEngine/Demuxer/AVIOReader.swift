@@ -1012,8 +1012,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// #240: which reader this is, for the connection log. Several readers run against the same
     /// origin at once and the line used to name none of them.
     private let label: String
+    /// Only static controlled probes use this; playback retains its existing transport policy.
+    private let probeControl: ProbeControl?
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, heldConnection: Bool = false) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil) {
+        self.probeControl = probeControl
         self.url = url
         self.label = label
         self.extraHeaders = extraHeaders
@@ -1056,6 +1059,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     func open() throws {
+        try probeControl?.check()
         guard let buf = av_malloc(Int(Self.avioBufferSize)) else {
             throw AVIOReaderError.allocationFailed
         }
@@ -1187,6 +1191,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         // resilience to all of those cases (issue #70 review #1/#3/#4).
                         EngineLog.emit("[AVIOReader] Data connection resolved no size, falling back to probe", category: .demux, level: .verbose)
                         fileSize = resolveInitialFileSize()
+                        try probeControl?.check()
                     }
                     if isStreaming {
                         startStreamingDownload()
@@ -3348,8 +3353,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // function does not return until the transfer ends. A streaming-mode source has no detour
         // or ranged probe to starve (they are all switched off on this path), so a held slot here
         // blocks nothing but a second reader on the same origin, which is the point.
-        let streamTicket = OriginRequestBudget.shared.acquire(
-            for: request.url ?? url, label: "\(label) stream", timeout: Self.pumpSlotWaitSeconds)
+        let streamTicket: OriginRequestBudget.Ticket?
+        do {
+            streamTicket = try requestTicket(
+                for: request.url ?? url, label: "\(label) stream", timeout: Self.pumpSlotWaitSeconds)
+        } catch {
+            streamLock.lock()
+            streamEnded = true
+            streamLock.unlock()
+            streamDataReady.signal()
+            return
+        }
         defer { OriginRequestBudget.shared.release(streamTicket) }
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -3618,6 +3632,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     private func probeFileSize() -> Int64 {
+        if let probeControl {
+            // No staggered worker outlives a one-shot probe, and no fallback starts after a stop.
+            if let size = rangeProbeFileSize(range: "bytes=0-"), size > 0 { return size }
+            guard !probeControl.isStopped else { return -1 }
+            let head = headProbeFileSize()
+            if head > 0 { return head }
+            guard !probeControl.isStopped else { return -1 }
+            return rangeProbeFileSize(range: "bytes=0-1") ?? -1
+        }
         // Staggered-concurrent ladder (#107 follow-up). The probes themselves are unchanged:
         // Range bytes=0- primary (AetherEngine#8: HEAD breaks on Cloudflare-fronted origins
         // returning 405), HEAD for live-transcode endpoints that reject Range, and the #126
@@ -3697,9 +3720,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // on a metered origin is three requests where one was refused. The budget serialises them
         // (each waits its short slot, then proceeds), so the fan keeps its latency win on a healthy
         // origin and stops being a burst on a capped one.
-        let ticket = OriginRequestBudget.shared.acquire(
-            for: request.url ?? url, label: "\(label) size probe",
-            timeout: Self.shortFetchSlotWaitSeconds)
+        let ticket: OriginRequestBudget.Ticket?
+        do {
+            ticket = try requestTicket(
+                for: request.url ?? url, label: "\(label) size probe",
+                timeout: Self.shortFetchSlotWaitSeconds)
+        } catch {
+            return nil
+        }
         defer { OriginRequestBudget.shared.release(ticket) }
 
         let delegate = ProbeDelegate(extraHeaders: extraHeaders)
@@ -3927,12 +3955,37 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// last reset. Written on the delegate queue, read once the fetch it belongs to has completed.
     nonisolated(unsafe) static var peakBodyReserveForTesting = 0
 
+    private func requestTicket(for url: URL, label: String,
+                               timeout: TimeInterval) throws -> OriginRequestBudget.Ticket? {
+        guard let probeControl else {
+            return OriginRequestBudget.shared.acquire(for: url, label: label, timeout: timeout)
+        }
+        guard !isClosed else { throw CancellationError() }
+        try probeControl.check()
+        guard let ticket = OriginRequestBudget.shared.tryAcquire(for: url, label: label) else {
+            probeControl.stop(ProbeError.sourceBusy)
+            throw ProbeError.sourceBusy
+        }
+        do { try probeControl.check() }
+        catch {
+            OriginRequestBudget.shared.release(ticket)
+            throw error
+        }
+        return ticket
+    }
+
+    /// Only the probe adapter calls this, after cancelling the transfer.
+    func finishProbeTransfers() {
+        precondition(probeControl != nil)
+        prefetchQueue.sync {}
+    }
+
     private func syncRequest(_ request: URLRequest, budget: TimeInterval = 35) throws -> (Data, URLResponse) {
         // #377: every short fetch the reader makes (detour blocks, size probes, HEAD) funnels
         // through here, so this is the one place that has to take an origin slot for all of them.
         // Scoped to the call: unlike the pump's, this request's life IS this function's.
         let slotURL = request.url ?? url
-        let ticket = OriginRequestBudget.shared.acquire(
+        let ticket = try requestTicket(
             for: slotURL, label: "\(label) fetch", timeout: Self.shortFetchSlotWaitSeconds)
         defer { OriginRequestBudget.shared.release(ticket) }
 

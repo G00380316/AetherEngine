@@ -25,8 +25,8 @@ public struct AtmosDetectionOptions: Sendable, Equatable {
     /// empty-audio source.
     public var maxPackets: Int
 
-    /// Stop after this many cumulative packet bytes, independent of packet count. Guards a stream with
-    /// abnormally large packets from exhausting the `maxPackets` budget slowly. Default 8 MiB.
+    /// Maximum cumulative bytes offered to the decoder. A packet exceeding the remaining allowance is
+    /// rejected before decode. This is not an input-read or native allocation ceiling. Default 8 MiB.
     public var maxBytes: Int64
 
     /// Soft wall-clock budget checked BETWEEN packet reads. This is NOT preemptive: a single blocking
@@ -247,10 +247,21 @@ extension AetherEngine {
             guard let pkt = packet else {
                 return stopped(.demuxEOF)
             }
+            let afterRead = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+            if afterRead >= options.timeBudget {
+                av_packet_unref(pkt)
+                av_packet_free_safe(pkt)
+                return stopped(.timeCap)
+            }
 
             var confirmed = false
             packetsSeen += 1
             if pkt.pointee.stream_index == targetIndex {
+                guard Int64(pkt.pointee.size) <= options.maxBytes - bytesRead else {
+                    av_packet_unref(pkt)
+                    av_packet_free_safe(pkt)
+                    return stopped(.byteCap)
+                }
                 // Charge the decode budget only for packets actually offered to the decoder, so a coarse
                 // interleave or a large leading video run can never starve the probe of audio.
                 packetsRead += 1
@@ -272,6 +283,11 @@ extension AetherEngine {
             av_packet_free_safe(pkt)
 
             if confirmed {
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+                guard elapsed < options.timeBudget else {
+                    return AtmosDetectionOutcome(stopReason: .timeCap, packetsRead: packetsRead,
+                                                 bytesRead: bytesRead, decodedProfile: nil)
+                }
                 return AtmosDetectionOutcome(
                     stopReason: .frameDecoded, packetsRead: packetsRead, bytesRead: bytesRead,
                     decodedProfile: lastProfile

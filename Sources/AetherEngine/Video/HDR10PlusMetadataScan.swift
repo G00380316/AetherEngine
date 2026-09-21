@@ -2,63 +2,350 @@ import Foundation
 import AetherLibavcodec
 import AetherLibavutil
 
-/// Where HDR10+ (SMPTE ST 2094-40) can be seen in a demuxed packet, without decoding a frame.
+/// Shared, decoder-free HDR10+ confirmation for playback and the detail probe.
 ///
-/// One definition for both readers: the segment producer's per-packet scan during playback
-/// (`HLSSegmentProducer.finalizeAndWriteVideo`) and the pre-playback pass behind
-/// `AetherEngine.probeDetectingHDR10Plus`. They used to be one call site and a literal byte array; a probe
-/// that answered differently from the session it precedes would be worse than no probe at all.
-///
-/// Two carriages, because FFmpeg produces exactly two (checked against the pinned FFmpeg tree):
-///
-/// - **In-band ITU-T T.35 SEI.** This is where HEVC HDR10+ lives, and NO demuxer parses it: `mov`, `mpegts`
-///   and `matroska` hand the SEI through inside the video packet, and only `hevc/hevcdec.c` surfaces it,
-///   post-decode, as `AV_FRAME_DATA_DYNAMIC_HDR_PLUS`. Hence the byte scan: it is the only way to see HDR10+
-///   without opening a decoder.
-/// - **`AV_PKT_DATA_DYNAMIC_HDR10_PLUS` packet side data.** `matroskadec.c` alone attaches this, from a
-///   BlockAdditional whose T.35 header it has already stripped (the VP9/AV1-in-Matroska carriage). The bytes
-///   are a decoded `AVDynamicHDRPlus` by then, so the signature scan cannot see it and the type has to be
-///   asked for separately.
-///
-/// The byte scan is a signature match over the whole packet payload, not a NAL walk, and it can in principle
-/// match those six bytes inside compressed slice data. That is the trade the producer has always made, and it
-/// is kept here deliberately: one false positive mislabels a badge, while a NAL walk that disagrees with the
-/// producer's scan would mislabel the session against its own probe.
+/// Only registered T.35 messages in H.264/HEVC SEI or AV1 metadata OBUs are candidates.
+/// FFmpeg validates their complete ST 2094-40 body. Matroska's already-decoded packet
+/// side data is checked separately; neither a byte marker nor a side-data type is proof.
 enum HDR10PlusMetadataScan {
+    private static let t35Header: [UInt8] = [0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04]
 
-    /// `country_code` 0xB5 (US), `provider_code` 0x003C (Samsung), `provider_oriented_code` 0x0001,
-    /// `application_identifier` 0x04: the four fields that open every ST 2094-40 T.35 payload, in bitstream
-    /// order. `matroskadec.c` gates its BlockAdditional conversion on the same four values.
-    ///
-    /// All four are needed. Dolby's RPU rides a T.35 payload too, under provider code 0x003B, so a scan for
-    /// the country code alone would call every Profile 5 / 8 source HDR10+.
-    static let t35Signature: [UInt8] = [0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04]
+    static func packetCarriesHDR10Plus(
+        _ packet: UnsafePointer<AVPacket>,
+        codecParameters: UnsafePointer<AVCodecParameters>,
+        framing: VideoNALFraming? = nil
+    ) -> Bool {
+        let parameters = codecParameters.pointee
+        let resolvedFraming = framing ?? NALUnitChain.lengthPrefixSize(
+            codecID: parameters.codec_id,
+            extradata: parameters.extradata,
+            extradataSize: Int(parameters.extradata_size)
+        ).map { .lengthPrefixed(size: $0) } ?? .annexB
+        return packetCarriesHDR10Plus(packet, codecID: parameters.codec_id, framing: resolvedFraming)
+    }
 
-    /// Whether the ST 2094-40 T.35 signature appears anywhere in `size` bytes at `data`.
-    ///
-    /// `nil` data, a non-positive size, or a payload shorter than the signature answer `false` without a read.
-    static func bytesCarrySignature(_ data: UnsafePointer<UInt8>?, size: Int) -> Bool {
-        guard let data, size >= t35Signature.count else { return false }
-        return t35Signature.withUnsafeBufferPointer { needle -> Bool in
-            memmem(data, size, needle.baseAddress, needle.count) != nil
+    static func packetCarriesHDR10Plus(
+        _ packet: UnsafePointer<AVPacket>, codecID: AVCodecID, framing: VideoNALFraming = .annexB
+    ) -> Bool {
+        switch codecID {
+        case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC, AV_CODEC_ID_AV1, AV_CODEC_ID_VP9:
+            break
+        default:
+            return false
         }
-    }
-
-    /// Array convenience for tests and call sites that already hold the bytes.
-    static func bytesCarrySignature(_ bytes: [UInt8]) -> Bool {
-        bytes.withUnsafeBufferPointer { bytesCarrySignature($0.baseAddress, size: $0.count) }
-    }
-
-    /// Whether this packet carries HDR10+ in either of the two carriages.
-    ///
-    /// Side data is asked first: it is a type lookup over a short list, while the signature scan walks the
-    /// whole payload, and on the one container that produces side data the payload no longer holds the T.35
-    /// header at all.
-    static func packetCarriesHDR10Plus(_ packet: UnsafePointer<AVPacket>) -> Bool {
         var sideDataSize = 0
-        if av_packet_get_side_data(packet, AV_PKT_DATA_DYNAMIC_HDR10_PLUS, &sideDataSize) != nil {
+        if let sideData = av_packet_get_side_data(packet, AV_PKT_DATA_DYNAMIC_HDR10_PLUS, &sideDataSize),
+           validSideData(sideData, size: sideDataSize) {
             return true
         }
-        return bytesCarrySignature(packet.pointee.data, size: Int(packet.pointee.size))
+        return bytesCarryHDR10Plus(
+            packet.pointee.data, size: Int(packet.pointee.size), codecID: codecID, framing: framing)
+    }
+
+    static func bytesCarryHDR10Plus(
+        _ data: UnsafePointer<UInt8>?, size: Int, codecID: AVCodecID, framing: VideoNALFraming = .annexB
+    ) -> Bool {
+        guard let data, size > 0 else { return false }
+        let bytes = UnsafeBufferPointer(start: data, count: size)
+        switch codecID {
+        case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC:
+            return scanNALs(bytes, codecID: codecID, framing: framing)
+        case AV_CODEC_ID_AV1:
+            return scanOBUs(bytes)
+        default:
+            return false
+        }
+    }
+
+    // MARK: - H.264 / HEVC
+
+    private static func scanNALs(
+        _ bytes: UnsafeBufferPointer<UInt8>, codecID: AVCodecID, framing: VideoNALFraming
+    ) -> Bool {
+        var found = false
+        func visit(_ start: Int, _ end: Int) -> Bool {
+            let headerSize = codecID == AV_CODEC_ID_HEVC ? 2 : 1
+            guard end - start >= headerSize, bytes[start] & 0x80 == 0 else { return false }
+            let isSEI: Bool
+            if codecID == AV_CODEC_ID_HEVC {
+                guard bytes[start + 1] & 7 != 0 else { return false }
+                let type = (bytes[start] >> 1) & 0x3F
+                isSEI = type == 39 || type == 40
+            } else {
+                isSEI = bytes[start] & 0x1F == 6
+                if isSEI, bytes[start] & 0x60 != 0 { return false }
+            }
+            guard isSEI else { return true }
+            guard let rbsp = unescape(bytes, start: start + headerSize, end: end),
+                  let carriesMetadata = scanSEI(rbsp) else { return false }
+            found = found || carriesMetadata
+            return true
+        }
+
+        switch framing {
+        case .lengthPrefixed(let width):
+            guard (1...4).contains(width) else { return false }
+            var offset = 0
+            while offset < bytes.count {
+                guard bytes.count - offset >= width else { return false }
+                var count = 0
+                for index in offset..<(offset + width) { count = (count << 8) | Int(bytes[index]) }
+                offset += width
+                guard count > 0, count <= bytes.count - offset,
+                      visit(offset, offset + count) else { return false }
+                offset += count
+            }
+        case .annexB:
+            var nalStart: Int?
+            var zeros = 0
+            for index in bytes.indices {
+                let byte = bytes[index]
+                if byte == 1, zeros >= 2 {
+                    let end = index - zeros
+                    if let start = nalStart {
+                        guard visit(start, end) else { return false }
+                    } else if end != 0 {
+                        return false
+                    }
+                    nalStart = index + 1
+                }
+                zeros = byte == 0 ? zeros + 1 : 0
+            }
+            guard let start = nalStart, visit(start, bytes.count - zeros) else { return false }
+        }
+        return found
+    }
+
+    /// Reject malformed escapes as well as unescaped start-code emulation in an SEI NAL.
+    private static func unescape(
+        _ bytes: UnsafeBufferPointer<UInt8>, start: Int, end: Int
+    ) -> [UInt8]? {
+        var rbsp: [UInt8] = []
+        var zeros = 0
+        for index in start..<end {
+            let byte = bytes[index]
+            if zeros >= 2 {
+                if byte == 3 {
+                    guard index + 1 < end, bytes[index + 1] <= 3 else { return nil }
+                    zeros = 0
+                    continue
+                }
+                if byte < 3 { return nil }
+            }
+            rbsp.append(byte)
+            zeros = byte == 0 ? zeros + 1 : 0
+        }
+        return rbsp
+    }
+
+    /// Nil denotes malformed SEI framing; false is a well-formed SEI without HDR10+.
+    private static func scanSEI(_ bytes: [UInt8]) -> Bool? {
+        var offset = 0
+        var found = false
+        func extendedValue() -> Int? {
+            var value = 0
+            while offset < bytes.count {
+                let byte = bytes[offset]
+                offset += 1
+                let (sum, overflow) = value.addingReportingOverflow(Int(byte))
+                guard !overflow else { return nil }
+                value = sum
+                if byte != 255 { return value }
+            }
+            return nil
+        }
+        while offset < bytes.count {
+            if offset == bytes.count - 1, bytes[offset] == 0x80 { return found }
+            guard let type = extendedValue(), let size = extendedValue(),
+                  size <= bytes.count - offset else { return nil }
+            if type == 4 {
+                let valid = bytes.withUnsafeBufferPointer {
+                    validT35($0.baseAddress! + offset, size: size)
+                }
+                found = found || valid
+            }
+            offset += size
+        }
+        return nil // rbsp_trailing_bits is mandatory.
+    }
+
+    // MARK: - AV1 low-overhead OBU stream (demuxed packet framing)
+
+    private static func scanOBUs(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        var offset = 0
+        var found = false
+        while offset < bytes.count {
+            let header = bytes[offset]
+            offset += 1
+            guard header & 0x81 == 0 else { return false }
+            let type = (header >> 3) & 15
+            if header & 4 != 0 {
+                guard offset < bytes.count, bytes[offset] & 7 == 0 else { return false }
+                offset += 1
+            }
+            let size: Int
+            if header & 2 != 0 {
+                guard let declared = leb128(bytes, offset: &offset, end: bytes.count),
+                      declared <= bytes.count - offset else { return false }
+                size = declared
+            } else {
+                size = bytes.count - offset
+            }
+            let end = offset + size
+            if type == 5 {
+                guard let metadataType = leb128(bytes, offset: &offset, end: end) else { return false }
+                if metadataType == 4 {
+                    // AV1 permits arbitrarily many trailing zero bytes after the stop bit.
+                    // They belong to the OBU, not to the byte-aligned T.35 payload.
+                    var trailing = end
+                    while trailing > offset, bytes[trailing - 1] == 0 { trailing -= 1 }
+                    guard trailing > offset, bytes[trailing - 1] == 0x80 else { return false }
+                    found = validT35(bytes.baseAddress! + offset, size: trailing - offset - 1) || found
+                }
+            }
+            offset = end
+        }
+        return found
+    }
+
+    private static func leb128(
+        _ bytes: UnsafeBufferPointer<UInt8>, offset: inout Int, end: Int
+    ) -> Int? {
+        var value: UInt64 = 0
+        for index in 0..<8 {
+            guard offset < end else { return nil }
+            let byte = bytes[offset]
+            offset += 1
+            value |= UInt64(byte & 0x7F) << (index * 7)
+            if byte & 0x80 == 0 {
+                // AV1 restricts leb128 values to 32 bits, even with an eight-byte encoding.
+                return value <= UInt32.max ? Int(value) : nil
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Complete ST 2094-40 validation
+
+    private static func validT35(_ bytes: UnsafePointer<UInt8>, size: Int) -> Bool {
+        guard size > t35Header.count, size - t35Header.count <= Int(AV_HDR_PLUS_MAX_PAYLOAD_SIZE),
+              t35Header.indices.allSatisfy({ bytes[$0] == t35Header[$0] }),
+              let metadata = av_dynamic_hdr_plus_alloc(nil) else { return false }
+        defer { av_free(metadata) }
+        let body = bytes + t35Header.count
+        let bodySize = size - t35Header.count
+        guard av_dynamic_hdr_plus_from_t35(metadata, body, bodySize) >= 0,
+              let bitCount = validatedBitCount(metadata.pointee),
+              (bitCount + 7) / 8 == bodySize else { return false }
+        let padding = bodySize * 8 - bitCount
+        return body[bodySize - 1] & UInt8((1 << padding) - 1) == 0
+    }
+
+    private static func validSideData(_ bytes: UnsafePointer<UInt8>, size: Int) -> Bool {
+        var allocationSize = 0
+        guard let metadata = av_dynamic_hdr_plus_alloc(&allocationSize) else { return false }
+        defer { av_free(metadata) }
+        guard size == allocationSize else { return false }
+        // Packet side data is not required to have the alignment of AVDynamicHDRPlus.
+        memcpy(metadata, bytes, size)
+        // matroskadec validates and strips the T.35 header, leaving this field zero.
+        guard metadata.pointee.itu_t_t35_country_code == 0 ||
+              metadata.pointee.itu_t_t35_country_code == 0xB5 else { return false }
+        return validatedBitCount(metadata.pointee) != nil
+    }
+
+    /// Check every active field before trusting a decoded struct. In particular, FFmpeg's
+    /// serializer is not a validator: invalid counts can read out of bounds, and a zero
+    /// rational denominator can divide by zero. Do not feed untrusted side data to it.
+    private static func validatedBitCount(_ metadata: AVDynamicHDRPlus) -> Int? {
+        let windows = Int(metadata.num_windows)
+        guard (1...3).contains(windows), metadata.application_version <= 1,
+              rational(metadata.targeted_system_display_maximum_luminance, scale: 1, maximum: 0x7FFFFFF),
+              metadata.targeted_system_display_actual_peak_luminance_flag <= 1,
+              metadata.mastering_display_actual_peak_luminance_flag <= 1 else { return nil }
+        var bits = 8 + 2 + 153 * (windows - 1) + 27 + 1 + 1
+
+        func grid<T>(_ flag: UInt8, _ rows: UInt8, _ columns: UInt8, _ values: T) -> Bool {
+            guard flag != 0 else { return true }
+            guard (2...25).contains(rows), (2...25).contains(columns) else { return false }
+            bits += 10 + Int(rows) * Int(columns) * 4
+            return withUnsafeBytes(of: values) { storage in
+                let entries = storage.bindMemory(to: AVRational.self)
+                for row in 0..<Int(rows) {
+                    for column in 0..<Int(columns) {
+                        if !rational(entries[row * 25 + column], scale: 15, maximum: 15) { return false }
+                    }
+                }
+                return true
+            }
+        }
+        guard grid(metadata.targeted_system_display_actual_peak_luminance_flag,
+                   metadata.num_rows_targeted_system_display_actual_peak_luminance,
+                   metadata.num_cols_targeted_system_display_actual_peak_luminance,
+                   metadata.targeted_system_display_actual_peak_luminance),
+              grid(metadata.mastering_display_actual_peak_luminance_flag,
+                   metadata.num_rows_mastering_display_actual_peak_luminance,
+                   metadata.num_cols_mastering_display_actual_peak_luminance,
+                   metadata.mastering_display_actual_peak_luminance) else { return nil }
+
+        let valid = withUnsafeBytes(of: metadata.params) { storage in
+            let params = storage.bindMemory(to: AVHDRPlusColorTransformParams.self)
+            for index in 0..<windows {
+                let window = params[index]
+                if index > 0 {
+                    guard rational(window.window_upper_left_corner_x, scale: 1, maximum: 65535),
+                          rational(window.window_upper_left_corner_y, scale: 1, maximum: 65535),
+                          rational(window.window_lower_right_corner_x, scale: 1, maximum: 65535),
+                          rational(window.window_lower_right_corner_y, scale: 1, maximum: 65535),
+                          window.rotation_angle <= 180,
+                          window.semimajor_axis_internal_ellipse > 0,
+                          window.semimajor_axis_external_ellipse >= window.semimajor_axis_internal_ellipse,
+                          window.semiminor_axis_external_ellipse > 0,
+                          (window.overlap_process_option.rawValue == 0 ||
+                           window.overlap_process_option.rawValue == 1) else { return false }
+                }
+                let percentiles = Int(window.num_distribution_maxrgb_percentiles)
+                guard percentiles <= 15,
+                      rational(window.maxscl.0, scale: 100000, maximum: 100000),
+                      rational(window.maxscl.1, scale: 100000, maximum: 100000),
+                      rational(window.maxscl.2, scale: 100000, maximum: 100000),
+                      rational(window.average_maxrgb, scale: 100000, maximum: 100000),
+                      rational(window.fraction_bright_pixels, scale: 1000, maximum: 1000),
+                      window.tone_mapping_flag <= 1,
+                      window.color_saturation_mapping_flag <= 1 else { return false }
+                let validPercentiles = withUnsafeBytes(of: window.distribution_maxrgb) { storage in
+                    storage.bindMemory(to: AVHDRPlusPercentile.self).prefix(percentiles).allSatisfy {
+                        $0.percentage <= 100 && rational($0.percentile, scale: 100000, maximum: 100000)
+                    }
+                }
+                guard validPercentiles else { return false }
+                bits += 82 + percentiles * 24 + 1 + 1
+                if window.tone_mapping_flag != 0 {
+                    let anchors = Int(window.num_bezier_curve_anchors)
+                    guard anchors <= 15,
+                          rational(window.knee_point_x, scale: 4095, maximum: 4095),
+                          rational(window.knee_point_y, scale: 4095, maximum: 4095) else { return false }
+                    let validAnchors = withUnsafeBytes(of: window.bezier_curve_anchors) { storage in
+                        storage.bindMemory(to: AVRational.self).prefix(anchors).allSatisfy {
+                            rational($0, scale: 1023, maximum: 1023)
+                        }
+                    }
+                    guard validAnchors else { return false }
+                    bits += 28 + anchors * 10
+                }
+                if window.color_saturation_mapping_flag != 0 {
+                    guard rational(window.color_saturation_weight, scale: 8, maximum: 63) else { return false }
+                    bits += 6
+                }
+            }
+            return true
+        }
+        return valid ? bits : nil
+    }
+
+    private static func rational(_ value: AVRational, scale: Int64, maximum: Int64) -> Bool {
+        guard value.den > 0, value.num >= 0 else { return false }
+        let scaled = Int64(value.num) * scale
+        return scaled % Int64(value.den) == 0 && scaled / Int64(value.den) <= maximum
     }
 }
