@@ -65,10 +65,6 @@ extension AetherEngine {
     public func reloadAtCurrentPosition(
         applying change: (inout LoadOptions) -> Void
     ) async throws -> SessionOptionCorrectionOutcome {
-        // AE#560: a reload re-opens the source, which can come back with different codecs or a
-        // different program, so the recording ends as a source reset rather than as a session end.
-        // stopInternal's own call further down is then a no-op.
-        endRecordingIfRunning(reason: .sourceReset)
         var proposed = loadedOptions
         change(&proposed)
 
@@ -175,6 +171,16 @@ extension AetherEngine {
         // `loadedOptions` field by field at reload time and never takes a struct. One write covers
         // both, and the didSet's route recompute cannot move (`nativeRemoteHLS` is refused above).
         applySessionOptionCorrection(proposed)
+        // AE#560: a reload re-opens the source, which can come back with different codecs or a
+        // different program, so the recording ends as a source reset rather than as a session end.
+        // stopInternal's own call further down is then a no-op.
+        //
+        // It has to sit HERE rather than at the top of the call, which is where it landed first.
+        // Four exits above this line never reach the rebuild - three refusals and the field the
+        // session owns - and rule 2 says none of them may cost the session anything. From the top,
+        // all four finished the recording and wrote `recordingState = .ended` while the session
+        // played on, saying nothing. Nothing between this line and the rebuild can refuse.
+        endRecordingIfRunning(reason: .sourceReset)
         try await reloadAtCurrentPosition()
         return SessionOptionCorrectionOutcome(
             applied: applied, sessionOwned: sessionOwned, rebuilt: true)
