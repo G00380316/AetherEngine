@@ -927,11 +927,36 @@ public final class AetherEngine: ObservableObject {
     ///
     /// Keeping a host a load then has no use for is safe and already the contract: the software and
     /// audio-only dispatch branches each release a preserved-but-unused host before they build.
+    /// AE#597: a media services reset outranks every reason above. After one, the platform has
+    /// invalidated every audio and video object this process holds, so the host that would be
+    /// preserved is precisely the object that can no longer work, and reusing it is how a session
+    /// spends its whole recovery ladder reloading onto a dead AVPlayer.
     nonisolated static func shouldPreserveNativeHostAcrossLoad(
         backend: PlaybackBackend,
-        nativeHostSurvives: Bool
+        nativeHostSurvives: Bool,
+        mediaServicesWereReset: Bool = false
     ) -> Bool {
-        backend == .native || nativeHostSurvives
+        if mediaServicesWereReset { return false }
+        return backend == .native || nativeHostSurvives
+    }
+
+    /// AE#597: raised by the platform's reset/lost notifications, lowered by the load that acts on
+    /// it. A flag rather than an immediate teardown: a reset says the objects are dead, not that
+    /// anyone stopped watching, and the host owns that second question.
+    private var mediaServicesResetPending = false
+
+    func noteMediaServicesReset(lost: Bool) {
+        mediaServicesResetPending = true
+        EngineLog.emit(
+            "[AetherEngine] #597 media services were \(lost ? "lost" : "reset"): every audio and "
+            + "video object this process holds is invalid, so the next load builds a fresh host",
+            category: .engine)
+    }
+
+    func consumeMediaServicesReset() -> Bool {
+        let pending = mediaServicesResetPending
+        mediaServicesResetPending = false
+        return pending
     }
 
     /// Consume the one-shot host request at the load boundary, folded with PiP's mandatory handover.
@@ -3566,7 +3591,8 @@ public final class AetherEngine: ObservableObject {
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
         let preserveNativeHost = Self.shouldPreserveNativeHostAcrossLoad(
-            backend: playbackBackend, nativeHostSurvives: nativeHost != nil)
+            backend: playbackBackend, nativeHostSurvives: nativeHost != nil,
+            mediaServicesWereReset: consumeMediaServicesReset())
         // AE#158: while a PiP window is live, or when the host asked for it, the running item must
         // survive this load's teardown; the loopback host.load callsite finishes the handover
         // (inPlaceSwap). The host request is consumed here so it can affect only this load. The
@@ -6891,6 +6917,25 @@ public final class AetherEngine: ObservableObject {
         }
         lifecycleObservers.append(fgObserver)
 
+        // AE#597: mediaserverd can reset or be lost underneath a running process, and the platform
+        // contract is that every audio and video object the process holds is invalid afterwards and
+        // must be rebuilt. Nothing here observed that, so a session came back from a suspension,
+        // reused the AVPlayer it had deliberately kept (Sodalite#149), and spent its whole recovery
+        // ladder reloading onto an object that could no longer work: item after item reaching
+        // readyToPlay with no usable tracks and failing with CoreMedia 'nope'.
+        //
+        // The flag is consumed by the next load rather than acted on here, because a reset says
+        // nothing about whether anyone still wants to watch: the host decides that, and the engine
+        // only has to stop pretending its old objects survived.
+        for name in [AVAudioSession.mediaServicesWereResetNotification,
+                     AVAudioSession.mediaServicesWereLostNotification] {
+            let observer = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let lost = note.name == AVAudioSession.mediaServicesWereLostNotification
+                Task { @MainActor in self?.noteMediaServicesReset(lost: lost) }
+            }
+            lifecycleObservers.append(observer)
+        }
+
         // Foreign-session interruption handling (Sodalite device-verify 2026-07-15): a live-camera
         // PiP re-claims the audio session on every play() and the system pauses AVPlayer ~10ms after
         // .playing (interruption BEGAN reason=default). The system pause never goes through pause(),
@@ -6973,9 +7018,24 @@ public final class AetherEngine: ObservableObject {
         // #357: park the selection first. The foreground reload snapshots at reload time, which on
         // this path is long after stopInternal wiped what it wants.
         captureBackgroundTeardownSelection()
+        // AE#597: this path emitted nothing at all, so a field log could not say whether the
+        // session was released before a suspension or carried through it whole. Which of the two
+        // happened is the first question every wake-from-sleep report asks.
+        EngineLog.emit(
+            "[AetherEngine] #597 background teardown: releasing the video pipeline "
+            + "(backend=\(playbackBackend), state=\(state))",
+            category: .engine)
+        let teardownStart = DispatchTime.now()
         stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
         // Session torn down; host will reload + repause on foreground return.
         state = .paused
+        let teardownMs = Double(
+            DispatchTime.now().uptimeNanoseconds - teardownStart.uptimeNanoseconds) / 1_000_000
+        EngineLog.emit(
+            "[AetherEngine] #597 background teardown done in "
+            + "\(String(format: "%.0f", teardownMs))ms; the audio session and the native host "
+            + "shell stay",
+            category: .engine)
         // Wait for the loopback server's detached cleanup (<=3 s producer drain + socket shutdown) before releasing.
         try? await Task.sleep(nanoseconds: 3_500_000_000)
         if bgTask != .invalid { app.endBackgroundTask(bgTask) }

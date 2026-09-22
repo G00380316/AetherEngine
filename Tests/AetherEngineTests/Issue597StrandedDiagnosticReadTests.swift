@@ -78,8 +78,10 @@ struct Issue597StrandedDiagnosticReadTests {
         let reader = AVPlayerItemDiagnostics(item: item(), pool: pool, read: stranded.read)
         reader.request(.counters)
         try await waitFor(upTo: .seconds(5)) { stranded.count == 1 }
-        #expect(reader.inFlight)
 
+        // Deliberately not asserting that it is in flight first: under a loaded runner the lane's
+        // own budget can expire before the assertion runs, and that would pin the harness rather
+        // than the contract. What is being pinned is that it does not STAY in flight.
         try await waitFor(upTo: .seconds(5)) { !reader.inFlight }
         #expect(!reader.inFlight, "the reader stayed in flight behind a read nobody will answer")
 
