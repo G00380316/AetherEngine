@@ -931,6 +931,27 @@ public final class AetherEngine: ObservableObject {
     /// invalidated every audio and video object this process holds, so the host that would be
     /// preserved is precisely the object that can no longer work, and reusing it is how a session
     /// spends its whole recovery ladder reloading onto a dead AVPlayer.
+    /// AE#597 defect 3: may the background teardown release the remote-HLS subtitle proxy?
+    ///
+    /// `Prepared` owns an `HLSLocalServer` bound on `0.0.0.0` with an accept thread and up to 32
+    /// connection threads, plus an optional `HLSOriginRelay`. It is released in `load(source:)`'s
+    /// prologue and in `stop()`, and `stopInternal` never mentions it, so the one teardown the
+    /// background path runs is the one that leaves it standing. On tvOS it then rides the whole
+    /// suspension.
+    ///
+    /// The release has to be conditional, and that is the difficulty of this defect rather than a
+    /// nicety: it may only be dropped where the foreground return rebuilds it. A URL session
+    /// returns through `reloadAtCurrentPosition()`'s URL branch into `load()`, whose prologue
+    /// re-prepares the stand-in from the carryover registry. A custom source returns through
+    /// `reloadWithAudioOverride` into `loadNative`/`loadSoftware`, neither of which ever reaches
+    /// `loadRemoteHLS`, so dropping it there would take the injected renditions with it for the
+    /// rest of the session. A socket held for an hour is the smaller cost than subtitles that
+    /// never come back.
+    nonisolated static func shouldReleaseSubtitleProxyForBackground(
+        hasProxy: Bool, isCustomSource: Bool) -> Bool {
+        hasProxy && !isCustomSource
+    }
+
     nonisolated static func shouldPreserveNativeHostAcrossLoad(
         backend: PlaybackBackend,
         nativeHostSurvives: Bool,
@@ -7012,6 +7033,20 @@ public final class AetherEngine: ObservableObject {
     /// A UIApplication background-task assertion is held across teardown so the loopback server's detached
     /// socket close (HLSVideoEngine.stop drains the producer up to 3 s) completes before suspension.
     @MainActor
+    /// AE#597: `stopInternal` does not touch the proxy, so without this its loopback socket rides
+    /// the suspension. Both background teardowns call it, the awaited one and the synchronous
+    /// backstop the system takes when it reclaims the grace assertion early.
+    private func releaseSubtitleProxyForBackground() {
+        guard Self.shouldReleaseSubtitleProxyForBackground(
+            hasProxy: remoteHLSSubtitleProxy != nil, isCustomSource: isCustomSource) else { return }
+        remoteHLSSubtitleProxy?.tearDown()
+        remoteHLSSubtitleProxy = nil
+        injectedSubtitleRenditionNames = [:]
+        EngineLog.emit(
+            "[AetherEngine] #597 background teardown: remote-HLS subtitle proxy released",
+            category: .engine)
+    }
+
     private func teardownVideoForBackground() async {
         let app = UIApplication.shared
         let bgTask = app.beginBackgroundTask(withName: "AetherEngine.bgVideoTeardown")
@@ -7027,6 +7062,7 @@ public final class AetherEngine: ObservableObject {
             category: .engine)
         let teardownStart = DispatchTime.now()
         stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
+        releaseSubtitleProxyForBackground()
         // Session torn down; host will reload + repause on foreground return.
         state = .paused
         let teardownMs = Double(
@@ -7099,6 +7135,7 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AetherEngine] background grace assertion expired early, synchronous teardown (#127)", category: .engine)
             captureBackgroundTeardownSelection()   // #357, as in teardownVideoForBackground
             stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
+            releaseSubtitleProxyForBackground()
             state = .paused
         }
         endBackgroundGraceAssertion()
