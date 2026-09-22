@@ -263,6 +263,18 @@ where AVPlayer then PUT it. Per tick it appends `pic` (source seconds decoded fr
 honest axis), `capErr` (the same error as a host placing a cue at `sourceTime` would make it) and
 `capFr`, that same error in frames.
 
+`--picture-origin S` (AE#534) tells it where the SOURCE's timeline starts, for a container whose
+timeline does not start at zero. The picture states a frame index, which an `-output_ts_offset`
+remux does not move, while `sourceTime` is on the container's own axis, so on a 600 s twin `capErr`
+reads about `-599.942` while everything is working correctly and the honest value is `+0.017`.
+`axisErr` needs no such lift, both of its terms are on the item axis. Measured on the pair:
+`tc-cues-lie.mkv` and `tc-cues-lie-600.mkv` at `--start-position 53` read `capErr +0.017` and
+`axisErr -9.000` alike once the origin is given, and the twin reads `-599.942` without it.
+
+Build the twin with `Scripts/timecode-fixture.sh <dir> 600`, which writes an offset copy of each
+fixture. The ORDER matters when the run also needs a lying Cues table: offset first, inject after,
+because a matroska remux regenerates Cues from the real keyframes and would undo the lie.
+
 The two errors do NOT have the same resolution, which is why `capFr` is printed. `axisErr`
 differences two frame-grid values read out of one `copyPixelBuffer` call, so it is a whole number of
 frames and every digit of it is a reading. `capErr` differences that same grid value against the

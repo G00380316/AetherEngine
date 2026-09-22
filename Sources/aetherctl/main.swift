@@ -691,6 +691,9 @@ if first == "play" {
     let frameTimes = takeFlag("--frame-times", from: &rest)
     let presentTimes = takeFlag("--present-times", from: &rest)
     let pictureProbe = takeFlag("--picture-probe", from: &rest)
+    // AE#534: the source axis's origin, for a container whose timeline does not start at zero.
+    // The picture states a frame index, which an -output_ts_offset remux does not move.
+    let pictureOrigin = takeDoubleFlag("--picture-origin", from: &rest) ?? 0
     // #316: declare sidecar subtitles at load, the LoadOptions.externalSubtitles a host passes.
     // Comma-separated `lang=path-or-url` entries, e.g. --sidecar en=/tmp/en.srt,de=/tmp/de.srt.
     // On the nativeRemoteHLS bypass this is what makes the engine stand up its rewritten master.
@@ -869,7 +872,7 @@ if first == "play" {
         done.wait()
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
-                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars,
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
                  audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches,
