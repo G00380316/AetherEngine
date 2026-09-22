@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A correction that does not rebuild no longer ends a running recording.**
+  `reloadAtCurrentPosition(applying:)` has four exits that never reach a rebuild: the three
+  refusals (a field that names the session, a session that cannot be rebuilt in place, and the
+  decode-path refusal) and the early return for a field the session owns. Since 7.8.0 all four ran
+  behind the source-reset teardown of a running recording, so a refused correction finished the
+  file and published `.ended` while the session played on, with nothing said. The teardown now sits
+  with the rebuild it belongs to, after the last statement that can still refuse.
 
 ## [7.10.0] - 2026-09-21
 
