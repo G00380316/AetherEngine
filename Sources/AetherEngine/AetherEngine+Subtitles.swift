@@ -2217,19 +2217,16 @@ extension AetherEngine {
 
     /// Index of the legible option backing (track language, same-language rank). AVFoundation
     /// normalizes HLS LANGUAGE tags (matroska "ger" reads back as extendedLanguageTag "de", often
-    /// with a region subtag), so matching goes through the ISO-synonym table on the primary
-    /// subtag, not a prefix compare. Deliberately NO cross-language fallback: selecting a
-    /// wrong-language option is worse than selecting nothing (device: German pick rendered the
-    /// English rendition in PiP).
+    /// with a region subtag), so matching goes through `languageMatches`, which spans the ISO
+    /// forms and ignores a region or script subtag on either side (#590: it used to be handed a
+    /// hand-split primary subtag, because the matcher could not see past one itself). Deliberately
+    /// NO cross-language fallback: selecting a wrong-language option is worse than selecting
+    /// nothing (device: German pick rendered the English rendition in PiP).
     nonisolated static func nativeOptionIndex(
         forLanguage language: String?, rank: Int, optionLanguageTags: [String?]
     ) -> Int? {
         guard let language, rank >= 0 else { return nil }
-        let matching = optionLanguageTags.indices.filter { idx in
-            guard let tag = optionLanguageTags[idx],
-                  let primary = tag.split(separator: "-").first else { return false }
-            return languageMatches(String(primary), language)
-        }
+        let matching = optionLanguageTags.indices.filter { languageMatches(optionLanguageTags[$0], language) }
         guard rank < matching.count else { return nil }
         return matching[rank]
     }

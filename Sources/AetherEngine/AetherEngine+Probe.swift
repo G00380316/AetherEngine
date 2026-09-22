@@ -607,18 +607,19 @@ extension AetherEngine {
             return override
         }
         // Each preference is scanned across all tracks in order, so an earlier preference on a later
-        // track still beats a later preference on an earlier track.
-        for preferred in preferredLanguages {
-            if let match = tracks.first(where: { languageMatches($0.language, preferred) }) {
-                return Int32(match.id)
-            }
-        }
-        return nil
+        // track still beats a later preference on an earlier track. Within one preference the most
+        // specific tag wins, so an "en-GB" preference takes en-GB over eng over en-US (#590).
+        guard let index = bestLanguageMatchIndex(
+            languages: tracks.map(\.language),
+            preferredLanguages: preferredLanguages,
+            kind: .audio
+        ) else { return nil }
+        return Int32(tracks[index].id)
     }
 
     /// Resolve the subtitle track to auto-activate from `LoadOptions.preferredSubtitleLanguages`: within the
-    /// first preference (scanned in order) that has any language match, the best-ranked track by
-    /// `subtitlePickRank`; else nil. Preference order dominates rank, so an earlier preference always beats a
+    /// first preference (scanned in order) that has any language match, the best track by language
+    /// specificity and then by `subtitlePickRank`; else nil. Preference order dominates rank, so an earlier preference always beats a
     /// later one. Unlike audio there is no explicit index override and no default fallback: nil means "keep
     /// subtitles off" (the default). Pure and nonisolated; the engine calls this at the end of a successful
     /// load and, on a hit, activates the track via the host-overlay path so a host without container metadata
@@ -627,14 +628,13 @@ extension AetherEngine {
         tracks: [TrackInfo],
         preferredLanguages: [String]
     ) -> Int32? {
-        for preferred in preferredLanguages {
-            let matches = tracks.filter { languageMatches($0.language, preferred) }
-            // min(by:) is stable, so equal-rank ties keep container order.
-            if let best = matches.min(by: { subtitlePickRank($0) < subtitlePickRank($1) }) {
-                return Int32(best.id)
-            }
-        }
-        return nil
+        guard let index = bestLanguageMatchIndex(
+            languages: tracks.map(\.language),
+            preferredLanguages: preferredLanguages,
+            kind: .subtitle,
+            secondaryRank: { subtitlePickRank(tracks[$0]) }
+        ) else { return nil }
+        return Int32(tracks[index].id)
     }
 
     /// Lower rank wins. The descriptor axis (full > SDH > forced > commentary, from container dispositions)
@@ -682,21 +682,22 @@ extension AetherEngine {
         return c == "eia_608" || c == "eia_708" || c == "cea708" || c == "cea_708"
     }
 
-    /// Case-insensitive language match across ISO 639-1 / 639-2 (B and T) / English name, e.g.
-    /// `"en" == "eng" == "english"`, `"de" == "deu" == "ger"`. Empty / nil track language never matches.
-    /// Shared by audio (#72) and subtitle (#73) language selection. Pure and unit-tested.
+    /// Whether the two labels name the same language, ignoring how specific either one is: case,
+    /// ISO 639-1 / 639-2 (B and T) / 639-3 / English name, and any region or script subtag. So
+    /// `"en" == "eng" == "english" == "en-US"`, `"de" == "deu" == "ger"`. Empty / nil / `und` / a
+    /// free-form track name never matches. Shared by audio (#72) and subtitle (#73) selection.
+    ///
+    /// This is the plain yes-or-no question, for callers that only need to know whether a track is
+    /// in the right language. Selection goes through `languageMatchRank` instead, which keeps the
+    /// specificity this deliberately drops (#590).
     nonisolated static func languageMatches(_ trackLanguage: String?, _ preferred: String) -> Bool {
-        guard let track = trackLanguage?.lowercased().trimmingCharacters(in: .whitespaces),
-              !track.isEmpty else { return false }
-        let want = preferred.lowercased().trimmingCharacters(in: .whitespaces)
-        guard !want.isEmpty else { return false }
-        if track == want { return true }
-        return languageSynonyms.contains { $0.contains(track) && $0.contains(want) }
+        languageMatchRank(trackLanguage, preferred, kind: .audio) != nil
     }
 
-    /// ISO 639-1 / 639-2/T / 639-2/B equivalence classes (plus common English names); anything outside
-    /// falls back to strict equality. Mirrors the host-side table so engine-resolved selection matches
-    /// what hosts computed before #72.
+    /// ISO 639-1 / 639-2/T / 639-2/B equivalence classes plus the common English names, which is the
+    /// part ICU cannot resolve: `LanguageTag.canonicalPrimary` reads every set through
+    /// `AudioLanguageMap` first and only falls back to this table. Mirrors the host-side table so
+    /// engine-resolved selection matches what hosts computed before #72.
     nonisolated static let languageSynonyms: [Set<String>] = [
         ["de", "deu", "ger", "german"], ["en", "eng", "english"], ["fr", "fra", "fre", "french"],
         ["es", "spa", "spanish"], ["it", "ita", "italian"], ["ja", "jpn", "japanese"],
