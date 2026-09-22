@@ -12,6 +12,41 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.11.0] - 2026-09-22
+
+### Changed
+
+- **Language preferences normalize BCP-47 region and script subtags.** `preferredAudioLanguages`,
+  `preferredSubtitleLanguages` and `nativeSubtitlePreferredLanguages` compared labels exactly and
+  fell back to fixed synonym sets, so every structured tag a media server writes missed: `en-US` did
+  not answer `en`, `ara` did not answer `ar-SA`, `zh-TW` did not answer `zh-Hant`, and a `pt-BR`
+  track missed a bare `pt` preference. A label is now parsed into canonical language, script and
+  region. Identity folds ISO 639-1, 639-2/B, 639-2/T, 639-3 and the English names onto one code, and
+  a 639-3 member CLDR aliases onto its macrolanguage folds with it (`cmn` answers `zh`) while one it
+  does not keeps its own identity (`yue` and `nan` never answer `zh`). There is deliberately no weak
+  generic tier: wrong audio is worse than the container default.
+- **The most specific same-language tag now wins within one preference.** Preference order still
+  dominates, but inside it the ranking scores script and then region, so an `en-GB` preference takes
+  `en-GB` over `eng` over `en-US`. For subtitles an explicitly opposite script is no answer at all
+  rather than a weak one, so a `zh-Hant` preference leaves subtitles off rather than render a
+  `zh-CN` track; audio has no such reading failure, so there a script mismatch only ranks last.
+  `zh-CN`/`zh-SG` count as Simplified and `zh-TW`/`zh-HK`/`zh-MO` as Traditional, because that is the
+  only field a server has to carry the distinction, while bare `zh`/`chi`/`zho` states no script and
+  falls back to either. Language specificity ranks before the existing full > SDH > forced >
+  commentary and text > bitmap order, which still resolves the ties. The native rendition's
+  `DEFAULT=YES` ordinal runs through the same resolution, so the inline overlay and the PiP/AirPlay
+  rendition cannot disagree about which track was meant.
+- **A label that is not a language is no longer a match, even against itself.** An empty or missing
+  tag, `und`, a track title and an unrecognized marker such as `dub` all fail closed. Exact string
+  equality used to match any two identical labels ahead of everything else, which made a non-language
+  marker a selectable language whenever both sides spelled it the same way. Nothing is inferred from
+  `TrackInfo.name`, `ExternalSubtitleTrack.name` or a sidecar filename, and script specificity is
+  read from the tag's own subtags rather than `Locale.Language.script`, which infers a script for
+  every language ICU knows (`zh` gives Hans, `en` gives Latn, `nan` gives Hans) and would make an
+  unspecified track explicit and sometimes explicitly wrong.
+
+  Reported by Ziyue Nie (@alsoeoe) in #590.
+
 ## [7.10.1] - 2026-09-22
 
 ### Fixed
