@@ -10,8 +10,22 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.10.1] - 2026-09-22
+
 ### Fixed
 
+- **The master-refusal latch no longer outlives the output format it describes.**
+  `panelRefusedHDRMaster` records that AVFoundation refused an HDR master, and it kept that answer
+  for the life of the process. The answer is about an output CONFIGURATION, which the user changes
+  in Settings and which the platform never reports, so a latch taken in a mode that genuinely
+  refused went on routing every HDR title media-direct long after the mode was changed back. On a
+  box that holds one app process for days the only cure was a force quit, and the cost was larger
+  than the comment claimed: the SDR label on every title, Dolby Vision signalling for Profile 7, and
+  bitmap subtitles in PiP. The latch is now cleared on a real return from the background, which is
+  the only guaranteed event after a visit to Settings; a resign that never backgrounded the app does
+  not clear it.
 - **A correction that does not rebuild no longer ends a running recording.**
   `reloadAtCurrentPosition(applying:)` has four exits that never reach a rebuild: the three
   refusals (a field that names the session, a session that cannot be rebuilt in place, and the
