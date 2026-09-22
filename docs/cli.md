@@ -666,6 +666,36 @@ The seal line is where the whole derivation is now readable, once per session:
 
 **And this harness cannot reproduce the last term of it (AE#447 round 2).** After the four fixes above, the reporter's device still sealed at 3 while that same line printed `max EXTINF 2.000s`. A live EXTINF is `nextStart - startSeconds`, a difference of two accumulated item-axis doubles, so a strictly 2.000 s GOP whose first segment starts at 0.060 s yields the odd `2.0000000000000004`; `ceil` charges a whole second for it, and the seal takes the max over the window, so one such segment is enough (6 of his 80 were). The fixture here starts its first segment at exactly 0 and cuts at a binary-exact duration, so its differences are exactly 2.0 and five joins in a row sealed at 2. The case lives in `Issue447TargetDurationEvidenceTests` instead, built by accumulating the way the producer accumulates. Since **6.56.0** every term is taken at the resolution the playlist serves (`#EXTINF` is written with `%.3f`), so the seal line can be checked against itself: what it prints is what decided it.
 
+### Pricing the bounded start (AE#594)
+
+`fastZap`'s bounded start serves once two segments exist plus a clamped grace, and that window can be
+shallower than the holdback the same manifest advertises. `AETHER_BOUNDED_START_FLOOR=1` is a
+measurement arm, not a policy: it skips the bounded branch, so the wait ends at the full cushion or
+at the 30 s outer deadline. Both arms against an `hlsfixture` origin of pre-cut GOP-aligned segments,
+`play --live --fast-zap --seconds 45`, two passes per row (three for 6 s / A):
+
+| origin cut | arm | gate held | first manifest | first picture | `-16832` |
+|---|---|---|---|---|---|
+| 1 s | A (bounded) | 3.028 s | 2 segs / 2.000 s **<** 3 s holdback | 3.47 s | 0 |
+| 1 s | B (floored) | 3.068 s | 3 segs / 3.000 s >= 3 s holdback | 3.26 s | 0 |
+| 3 s | A | 8.252 s | 2 segs / 6.000 s **<** 9 s holdback | 9.64 s | 0 |
+| 3 s | B | 9.458 s | 3 segs / 9.000 s >= 9 s holdback | 9.65 s | 0 |
+| 6 s | A | 14.342 s | 2 segs / 12.000 s **<** 18 s holdback | 16.72 s | 0 |
+| 6 s | B | 18.597 s | 3 segs / 18.000 s >= 18 s holdback | 18.79 s | 0 |
+
+**The floor costs exactly one more segment minus the grace**, which is what the gate deltas say:
++0.04 s at a 1 s cut (grace 1.0 s covers the whole wait), +1.21 s at 3 s and +4.26 s at 6 s, where the
+grace clamps to 2.0 s. At the picture it is +0.00, +0.01 and +2.07 s. So the trade is real only at
+coarse cadences, and free at fine ones.
+
+**What this harness cannot price is the other half.** `-16832` never appeared, in any cadence, in
+either arm, across thirteen runs. Before reading that as "the shallow window is safe", note that the
+session here joins at the HEAD of the served window (`cur` starts at the window's first sample and
+advances 1x) rather than seeking to edge-minus-holdback, so the state the issue is about is never
+entered. The per-tick `edge=` and `behind=` are not usable as a check on that: `edge` stays pinned at
+its first value for the whole run and `behind` is derived from it, with or without `--dvr-window`.
+The stall half needs a field capture or an origin that reproduces the seek, not this table.
+
 ### The header-enforcing origin (AE#363)
 
 A tokenized IPTV origin refuses anything that arrives without its per-request header, which is a shape none of the fixtures could produce, so neither live client could be driven against one:
