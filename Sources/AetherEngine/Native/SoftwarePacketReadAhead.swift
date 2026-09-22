@@ -216,6 +216,54 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         return false
     }
 
+    /// AE#605: the retained video packets a scrub still at `seconds` needs, keyframe first, or nil
+    /// when the store cannot answer it. Any thread except main: it reads the disk.
+    ///
+    /// Eligibility is the cached seek's own rule, coverage past the target plus a retained keyframe
+    /// at or before it, so a still is offered exactly where a commit to that position would be a
+    /// cache hit, and the card never shows a picture the seek then has to fetch. Unlike the live
+    /// ring there is no clamp at the end: a VOD target past the frontier has a real frame the store
+    /// does not hold yet, and the frame before it is the wrong answer. The consumer cursor is not
+    /// touched, so playback reads on from where it stood.
+    func stillRun(atSeconds seconds: Double, maxPackets: Int, maxSpanSeconds: Double,
+                  reorderTail: Int) -> [SoftwareStoredPacket]? {
+        guard seconds.isFinite, maxPackets > 0 else { return nil }
+        condition.lock()
+        let eligible = !closed && !sourceRepositioning && !resetPending && failure == nil
+            && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
+        let anchor = eligible
+            ? keyframes.filter { $0.seconds <= seconds }.max { $0.seconds < $1.seconds } : nil
+        condition.unlock()
+        guard let anchor, seconds - anchor.seconds <= maxSpanSeconds else { return nil }
+
+        var run: [SoftwareStoredPacket] = []
+        var reached = false
+        var tail = reorderTail
+        var overflow = false
+        do {
+            try fifo.readHistory(from: anchor.cursor) { data in
+                let packet = try SoftwareStoredPacket.decode(data)
+                guard packet.streamIndex == video.index else { return true }
+                if run.isEmpty, packet.flags & 1 == 0 { overflow = true; return false }
+                run.append(packet)
+                if run.count > maxPackets { overflow = true; return false }
+                if reached {
+                    tail -= 1
+                    return tail > 0
+                }
+                if let pts = videoSeconds(pts: packet.pts), pts >= seconds {
+                    reached = true
+                    return tail > 0
+                }
+                return true
+            }
+        } catch {
+            return nil
+        }
+        guard reached, !overflow else { return nil }
+        return run
+    }
+
     func endSeek(_ token: UInt64, sourceClock: Double) {
         condition.lock(); defer { condition.unlock() }
         guard token == generation, !closed else { return }

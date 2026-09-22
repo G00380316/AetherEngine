@@ -990,21 +990,39 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         if hostCalls.contains("still"), [15, 20, 25].contains(tick) {
             // The third aim is the live EDGE itself, not the playhead: a target a fraction past the
             // newest packet is the clamp case, and it is where a live viewer sits most.
+            // AE#605: a VOD session aims behind the playhead (retained history), ahead of it (the
+            // forward buffer) and far past what is retained, where the right answer is a MISS: the
+            // frame there exists, the cache just does not hold it, and the one before it is wrong.
+            let isLive = engine.isLive
             let target: Double
             let label: String
-            switch tick {
-            case 15:
+            switch (tick, isLive) {
+            case (15, true):
                 target = max(0, engine.currentTime - 20)
                 label = "playhead-20"
-            case 20:
+            case (20, true):
                 target = max(0, engine.currentTime - 5)
                 label = "playhead-5"
-            default:
+            case (_, true):
                 target = engine.seekableLiveRange?.upperBound ?? engine.currentTime
                 label = "edge"
+            case (15, false):
+                target = max(0, engine.currentTime - 10.5)
+                label = "playhead-10.5"
+            case (20, false):
+                target = engine.currentTime + 4.5
+                label = "playhead+4.5"
+            default:
+                target = min(engine.currentTime + 600, max(0, engine.duration - 1))
+                label = "past-frontier"
+            }
+            if tick == 15 {
+                print("  HOSTCALL supportsCacheBackedStills -> \(engine.supportsCacheBackedStills)")
             }
             let started = Date()
-            let image = await engine.liveScrubThumbnail(atSessionSeconds: target, maxWidth: 320)
+            let image = isLive
+                ? await engine.liveScrubThumbnail(atSessionSeconds: target, maxWidth: 320)
+                : await engine.scrubThumbnail(atSeconds: target, maxWidth: 320)
             let ms = Int(Date().timeIntervalSince(started) * 1000)
             stillAttempts += 1
             if let image {

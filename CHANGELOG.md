@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Scrub stills on the software VOD path, with no second connection (AE#605).** A VOD session the
+  device cannot hardware-decode (MPEG-4 Part 2, MPEG-2, interlaced H.264, everything on the iOS
+  Simulator) already spools its packets to a disk cache its seeks land in, but `scrubThumbnail`
+  had no arm for it, so every such session scrubbed blind on a source that refuses a second
+  request. It now decodes the still out of that cache, keyframe to target, through the same
+  extractor, queue and newest-wins ticket the live software path uses (#544), and the consumer
+  cursor is never moved, so playback reads on undisturbed. A target past what is retained answers
+  nil rather than the frame before it. `supportsCacheBackedStills` is true for such a session, and
+  now also for a software live session, which already served stills but reported false.
 
 ## [7.14.0] - 2026-09-22
 

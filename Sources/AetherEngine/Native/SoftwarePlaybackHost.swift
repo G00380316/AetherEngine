@@ -1433,6 +1433,40 @@ final class SoftwarePlaybackHost {
         }
     }
 
+    /// AE#605: true when this VOD session keeps a packet cache a still can be decoded from. A local
+    /// file has none (it is read directly, see the spool's setup), and neither does a session whose
+    /// cache could not be built.
+    var servesPacketCacheStills: Bool { !isLive && vodPacketReadAhead != nil }
+
+    /// AE#605: the VOD twin of `liveScrubStill`, decoded out of the retained packet cache.
+    ///
+    /// Same queue, same newest-wins ticket and same extractor as the live still, and the same session
+    /// axis conversion `seek` uses, so the card and the commit name one moment. The disk read runs on
+    /// the still queue too, never on the demux or feed loop.
+    func vodScrubStill(atSessionSeconds seconds: Double, maxWidth: Int) async -> CGImage? {
+        guard !isLive, let cache = vodPacketReadAhead, let extractor = resolveStillExtractor() else {
+            return nil
+        }
+        let targetSource = sourceSeconds(forSession: seconds)
+        let limits = SoftwareStillExtractor.Limits.vod
+        let requests = stillRequests
+        let ticket = requests.next()
+        return await withCheckedContinuation { continuation in
+            stillQueue.async {
+                guard ticket == requests.latest,
+                      let run = cache.stillRun(atSeconds: targetSource,
+                                               maxPackets: limits.maxPackets,
+                                               maxSpanSeconds: limits.maxSpanSeconds,
+                                               reorderTail: limits.reorderTail) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(
+                    returning: extractor.still(from: run, targetPts: targetSource, maxWidth: maxWidth))
+            }
+        }
+    }
+
     /// Live DVR rewind: reseeds decoder from the ring (source PTS axis; maps via sessionStartPts) without touching the live demuxer. After return, the loop reads new packets forward and plays back to live.
     private func seekLiveDVR(to targetSession: Double, ring: PacketRingBuffer, wasPlaying: Bool) async {
         let targetSource = sourceSeconds(forSession: targetSession)
