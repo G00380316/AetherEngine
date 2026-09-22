@@ -102,9 +102,20 @@ struct ItemDiagnosticSnapshot: Sendable {
 final class ItemDiagnosticReadPool {
     static let shared = ItemDiagnosticReadPool()
     nonisolated static let maximumConcurrentReads = 2
+
+    /// AE#597: how long a lane waits for a read before it stops waiting. Generous, because the
+    /// point is not latency: a media server under momentary load is expected to be slow, and a
+    /// media server that has gone away never answers at all.
+    nonisolated static let defaultReadTimeout: TimeInterval = 15
+
+    private let readTimeout: TimeInterval
     private var pending: [AVPlayerItemDiagnostics] = []
     private(set) var runningCount = 0
     var pendingCount: Int { pending.count }
+
+    init(readTimeout: TimeInterval = ItemDiagnosticReadPool.defaultReadTimeout) {
+        self.readTimeout = readTimeout
+    }
 
     fileprivate func schedule(_ reader: AVPlayerItemDiagnostics) {
         guard !reader.inFlight else { return }
@@ -133,12 +144,17 @@ final class ItemDiagnosticReadPool {
             runningCount += 1
             let item = reader.item
             let read = reader.read
+            let timeout = readTimeout
             Task { @MainActor in
-                let snapshot = await AVFoundationOffMain.read(item) { item in
+                let snapshot = await AVFoundationOffMain.read(item, timeout: timeout) { item in
                     read(item, request)
                 }
                 runningCount -= 1
-                reader.complete(snapshot, request: request)
+                if let snapshot {
+                    reader.complete(snapshot, request: request)
+                } else {
+                    reader.abandon()
+                }
                 drain()
             }
         }
@@ -152,6 +168,8 @@ final class AVPlayerItemDiagnostics {
     typealias Read = @Sendable (AVPlayerItem, ItemDiagnosticRequest) -> ItemDiagnosticSnapshot
     static let accessLogLimit = 5
     static let maximumPendingRetirements = 1
+    /// Once per process: a wedged media server produces one of these per lane per event otherwise.
+    private static var loggedAbandonedRead = false
 
     fileprivate let item: AVPlayerItem
     fileprivate let read: Read
@@ -216,6 +234,27 @@ final class AVPlayerItemDiagnostics {
         pending = []
         inFlight = true
         return request
+    }
+
+    /// AE#597: the read was given up on, so the reader is free again and the request is gone with
+    /// it. Deliberately not re-queued: the server that did not answer will not answer a retry
+    /// either, and the next notification asks again anyway. A retirement waiting on that reading
+    /// is finished without it, or the item it holds is never handed back.
+    fileprivate func abandon() {
+        inFlight = false
+        guard active else { return }
+        if !Self.loggedAbandonedRead {
+            Self.loggedAbandonedRead = true
+            EngineLog.emit(
+                "[AetherEngine] #597 a diagnostic read was given up on: the media server did not "
+                + "answer within the lane's budget. Further ones are silent.",
+                category: .engine)
+        }
+        if retired {
+            finishRetirement(complete: false)
+            return
+        }
+        if !pending.isEmpty { pool.schedule(self) }
     }
 
     fileprivate func complete(_ snapshot: ItemDiagnosticSnapshot, request: ItemDiagnosticRequest) {
