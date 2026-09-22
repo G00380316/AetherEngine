@@ -1349,10 +1349,40 @@ public final class AetherEngine: ObservableObject {
     /// manifest was filtered at parse time (#130), which is a statement about the playlist and not about
     /// the display; latching on it would teach the process a fact about the panel from an unrelated bug.
     ///
-    /// Not cleared when the user changes the output format mid-process, because nothing reports that
-    /// either. A stale refusal costs the master route until the app restarts, which is the behaviour this
-    /// replaces rather than a regression from it.
+    /// AE#588: cleared on a real return from the background, because the answer is about an output
+    /// CONFIGURATION and the user changes that in Settings, which they can only reach by leaving the app.
+    /// Nothing reports the change itself, so the return is the one event guaranteed to follow it. See
+    /// `clearPanelRefusalOnForegroundReturn`.
     nonisolated(unsafe) static var panelRefusedHDRMaster = false
+
+    /// AE#588: forget a refusal on a real return from the background.
+    ///
+    /// The latch is true at the moment it is set and stale from the moment the output format changes.
+    /// It was originally left to the process lifetime, on the reading that a stale refusal costs "the
+    /// master route until the app restarts". Measured on a stuck box, it costs more than the route and
+    /// all of it is visible: the label reads SDR for every title, a Profile 7 source builds its
+    /// supplemental descriptor and then has no variant to carry it, and no master means no
+    /// `TYPE=SUBTITLES` rendition, so bitmap subtitles vanish from PiP while the overlay keeps
+    /// publishing cues to a window nobody can see. An Apple TV holds one app process for days, so that
+    /// bill runs until a force-quit the user has no reason to suspect.
+    ///
+    /// What the clear costs when the panel really does refuse again: one in-place media fallback,
+    /// measured at 223 ms with no visible black frame, at the next HDR load after a foregrounding
+    /// rather than once per process. The latch keeps its whole job inside a viewing session, which is
+    /// where the per-title repetition it was built to prevent would have happened.
+    ///
+    /// Deliberately not keyed to a fingerprint of the display configuration, which would be more
+    /// precise: the latch can only be set while `eligibleForHDRPlayback` is true, so the capability
+    /// table at refusal time may be identical to the table afterwards, and a fingerprint built on that
+    /// assumption would hold the stale latch silently. The return needs no such assumption.
+    nonisolated static func clearPanelRefusalOnForegroundReturn() {
+        guard panelRefusedHDRMaster else { return }
+        panelRefusedHDRMaster = false
+        EngineLog.emit(
+            "[DisplayCriteria] return from the background clears the panel's HDR-master refusal (#588); "
+            + "the next HDR load asks the display again",
+            category: .engine)
+    }
 
     nonisolated(unsafe) static var forceMasterPlaylistForTesting = false
 
@@ -6851,7 +6881,12 @@ public final class AetherEngine: ObservableObject {
                 self.cancelBackgroundGraceWindow()
                 self.softwareHost?.exitBackgroundAudioOnly()
                 #endif
+                // AE#588: read the flag before clearing it. `didBecomeActive` also follows a resign that
+                // never backgrounded the app (a system alert, a volume HUD), and the user cannot have
+                // reached the output format in that gap, so only a real return forgets the refusal.
+                let returnedFromBackground = self.isBackgrounded
                 self.isBackgrounded = false
+                if returnedFromBackground { Self.clearPanelRefusalOnForegroundReturn() }
             }
         }
         lifecycleObservers.append(fgObserver)
