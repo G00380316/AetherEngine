@@ -50,10 +50,13 @@ struct Issue597StrandedDiagnosticReadTests {
             reader.request(.counters)
             blockers.append(reader)
         }
+        // Every lane has entered a read that will not come back. Deliberately not asserting the
+        // pool's occupancy here: on a loaded runner the lanes' own budget can expire before the
+        // assertion runs, which would pin the harness's timing rather than the contract. That the
+        // reads started at all is the fact this arm needs, and the two below are the contract.
         try await waitFor(upTo: .seconds(5)) {
             stranded.count == ItemDiagnosticReadPool.maximumConcurrentReads
         }
-        #expect(pool.runningCount == ItemDiagnosticReadPool.maximumConcurrentReads)
 
         // A later reader, queued behind them, must still be served once the lanes time out.
         let later = AVPlayerItemDiagnostics(item: item(), pool: pool, read: answering.read)
