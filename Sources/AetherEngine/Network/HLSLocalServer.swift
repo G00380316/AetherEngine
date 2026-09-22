@@ -527,7 +527,13 @@ final class HLSLocalServer: @unchecked Sendable {
         mediaPlaylistBuildCount = 0
         let clients = clientFds
         clientFds.removeAll()
+        let closingPort = port
         stateLock.unlock()
+        // AE#597: the one line that says a listener went away. Without it a log cannot tell a
+        // server that was released from one that outlived its session on a port of its own.
+        EngineLog.emit(
+            "[HLSLocalServer] stop: port \(closingPort) released, \(clients.count) connection(s) "
+            + "shut down", category: .hlsServer)
 
         // shutdown() BEFORE close() on the listen fd: close releases the fd number while the accept loop may have captured it; a new session could recycle that number and the dying loop would accept on the new session's socket. shutdown() wakes the blocked accept without releasing the number.
         if fdToClose >= 0 {

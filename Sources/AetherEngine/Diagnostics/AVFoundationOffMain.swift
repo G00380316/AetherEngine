@@ -29,6 +29,31 @@ enum AVFoundationOffMain {
         let refs: Refs
     }
 
+    /// AE#597: a continuation that exactly one of two racers gets to resume.
+    private final class OneShotResume<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T?, Never>?
+
+        init(_ continuation: CheckedContinuation<T?, Never>) {
+            self.continuation = continuation
+        }
+
+        func resume(_ value: T?) {
+            let taken = lock.withLock {
+                let c = continuation
+                continuation = nil
+                return c
+            }
+            taken?.resume(returning: value)
+        }
+    }
+
+    /// The deadline's own carrier. A serial queue rather than `DispatchQueue.global()` for the
+    /// reason in the header: the state this deadline exists for is the state in which the global
+    /// pool has stopped starting work, and a timer that cannot run is not a timeout.
+    private static let deadlineQueue = DispatchQueue(
+        label: "com.aetherengine.avfoundation.read.deadline")
+
     static func read<Refs, T: Sendable>(
         _ refs: Refs,
         on queue: DispatchQueue,
@@ -52,6 +77,35 @@ enum AVFoundationOffMain {
         return await withCheckedContinuation { continuation in
             let worker = Thread {
                 continuation.resume(returning: body(boxed.refs))
+            }
+            worker.name = "com.aetherengine.avfoundation.read"
+            worker.qualityOfService = .utility
+            worker.start()
+        }
+    }
+
+    /// AE#597: the same hop, abandoned after `timeout`, answering nil.
+    ///
+    /// These getters are synchronous XPC round trips, and a media server that has gone away does
+    /// not answer one late, it does not answer it at all. The thread cannot be taken back (it is
+    /// parked inside a platform getter and will finish if the server ever replies), so what is
+    /// returned here is the CALLER's right to stop waiting, which is the only part a bounded pool
+    /// needs in order to keep working.
+    static func read<Refs, T: Sendable>(
+        _ refs: Refs,
+        timeout: TimeInterval,
+        _ body: @escaping @Sendable (Refs) -> T
+    ) async -> T? {
+        let boxed = UncheckedRefs(refs: refs)
+        return await withCheckedContinuation { continuation in
+            let gate = OneShotResume<T>(continuation)
+            let deadline = DispatchWorkItem { gate.resume(nil) }
+            deadlineQueue.asyncAfter(deadline: .now() + timeout, execute: deadline)
+            let boxedDeadline = UncheckedRefs(refs: deadline)
+            let worker = Thread {
+                let value = body(boxed.refs)
+                boxedDeadline.refs.cancel()
+                gate.resume(value)
             }
             worker.name = "com.aetherengine.avfoundation.read"
             worker.qualityOfService = .utility
