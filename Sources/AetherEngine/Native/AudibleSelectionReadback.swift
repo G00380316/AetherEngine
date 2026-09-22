@@ -58,10 +58,11 @@ enum AudibleSelectionReadback {
     }
 
     /// AVFoundation normalizes what it is handed (matroska "ger" reads back as "de", usually with a region
-    /// subtag), so the comparison runs on the primary subtag through the engine's own synonym table. A raw
-    /// compare would flag every second German title, and a line that cries wolf is worse than no line.
+    /// subtag), so the comparison runs through the engine's own matcher, which spans the ISO forms and
+    /// ignores a region or script subtag on either side (#590: it used to be handed a hand-split primary
+    /// subtag, because the matcher could not see past one itself). A raw compare would flag every second
+    /// German title, and a line that cries wolf is worse than no line.
     private static func matches(served: String, resolved: String?) -> Bool {
-        guard let primary = resolved?.split(separator: "-").first else { return false }
-        return AetherEngine.languageMatches(String(primary), served)
+        AetherEngine.languageMatches(resolved, served)
     }
 }

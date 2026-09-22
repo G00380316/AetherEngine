@@ -989,13 +989,15 @@ extension AetherEngine {
         // Sodalite#32: AVKit reliably renders only the FIRST native subtitle rendition (ordinal 0 / subs_0);
         // device-confirmed that a programmatic selection of a later rendition is fetched then dropped after one
         // segment. So move the preferred-language track to ordinal 0 and have the host select ordinal 0.
-        if !loadedOptions.nativeSubtitlePreferredLanguages.isEmpty {
-            for pref in loadedOptions.nativeSubtitlePreferredLanguages {
-                if let idx = textTracks.firstIndex(where: { AetherEngine.languageMatches($0.language, pref) }) {
-                    if idx != 0 { textTracks.insert(textTracks.remove(at: idx), at: 0) }
-                    break
-                }
-            }
+        // #590: the same BCP-47 ranking the overlay path uses, so an inline pick and the native
+        // rendition cannot disagree about which zh-Hant track was meant.
+        if let idx = AetherEngine.bestLanguageMatchIndex(
+            languages: textTracks.map(\.language),
+            preferredLanguages: loadedOptions.nativeSubtitlePreferredLanguages,
+            kind: .subtitle,
+            secondaryRank: { AetherEngine.subtitlePickRank(textTracks[$0]) }
+        ), idx != 0 {
+            textTracks.insert(textTracks.remove(at: idx), at: 0)
         }
         nativeSubtitleTrackTable = textTracks.map { track in
             NativeSubtitleTrackEntry(sourceStreamIndex: track.isExternal ? nil : track.id,
@@ -1052,13 +1054,11 @@ extension AetherEngine {
             // DEFAULT=YES one, because a host-selected legible track only renders if it is the group default
             // (AVKit hides a non-default selection as mute-only). Resolved here, before start() builds the
             // master, so the default is correct on AVKit's first fetch; the host selects this same ordinal.
-            var defaultOrdinal = 0
-            for pref in loadedOptions.nativeSubtitlePreferredLanguages {
-                if let idx = nativeSubtitleTrackTable.firstIndex(where: { AetherEngine.languageMatches($0.language, pref) }) {
-                    defaultOrdinal = idx
-                    break
-                }
-            }
+            let defaultOrdinal = AetherEngine.bestLanguageMatchIndex(
+                languages: nativeSubtitleTrackTable.map(\.language),
+                preferredLanguages: loadedOptions.nativeSubtitlePreferredLanguages,
+                kind: .subtitle
+            ) ?? 0
             session.nativeSubtitleDefaultOrdinal = defaultOrdinal
             nativeSubtitleDefaultOrdinal = defaultOrdinal
             // #98: bridge the in-band CEA-608 track into a native rendition. Its cues come from the
