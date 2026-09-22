@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A warmed source no longer re-downloads its own head.** The reader's open phase ends when the
+  demuxer has parsed the container, and the next thing the native path does is the cue prewarm, a
+  bounded seek to the middle of the title so libavformat loads the index. That read landed outside
+  the retained head, which read as playback moving away, so the head was released one read before
+  the cursor was reset to zero and playback asked for exactly those bytes. Measured on a 46.7 MB
+  MKV over a Range-logging origin, a prewarmed session fetched 50.3 MB in five requests, 8 MB of it
+  the warm head a second time; it now fetches 41.9 MB in three. A session without a warm is
+  unchanged (AE#585).
 
 ## [7.11.0] - 2026-09-22
 
