@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.12.0] - 2026-09-22
+
 ### Fixed
 
 - **A warmed source no longer re-downloads its own head.** The reader's open phase ends when the
@@ -20,6 +24,26 @@ the public-API contract.
   MKV over a Range-logging origin, a prewarmed session fetched 50.3 MB in five requests, 8 MB of it
   the warm head a second time; it now fetches 41.9 MB in three. A session without a warm is
   unchanged (AE#585).
+
+- **A diagnostic read stops waiting for a media server that stopped answering.** The item
+  diagnostics are synchronous XPC round trips to mediaserverd, and the pool that bounds them assumed
+  every one comes back. In the one state those reads exist to describe, a media server that has gone
+  away, none does: the lane was never given back and the shared pool admitted no read again for the
+  lifetime of the process, pinning two `AVPlayerItem`s. A lane now has a deadline, on a one-shot
+  continuation so exactly one racer resumes it, and its timer runs on a serial queue rather than the
+  global pool, because the state it exists for is the state in which the global pool has stopped
+  starting work (AE#597).
+- **A media services reset is noticed.** `mediaServicesWereReset` and `mediaServicesWereLost` were
+  observed nowhere in the package, while the engine keeps its `AVPlayer` across a load on purpose.
+  After a reset that preserved host is exactly the object the platform has already invalidated, so a
+  session spent its whole recovery ladder reloading onto it: item after item reaching `readyToPlay`
+  with no usable tracks. A reset now outranks every reason to keep the host (AE#597).
+
+### Changed
+
+- **The tvOS background teardown and the loopback server's stop say so.** Both emitted nothing at
+  all, so a field log from a wake-from-sleep report could not answer its own first question, whether
+  the session was released before the suspension or carried through it whole (AE#597).
 
 ## [7.11.0] - 2026-09-22
 
