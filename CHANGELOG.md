@@ -12,6 +12,38 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.13.0] - 2026-09-22
+
+### Performance
+
+- **The software VOD route stopped walking a list it had already sorted.** `SoftwarePacketCoverage`
+  carried two frontier queries over the same ranges: one binary search, and one linear walk that
+  converted two `Int64` bounds to `Double` and ran two exactness guards per range. The read-ahead
+  called the walking one on every produced packet, for video and audio coverage both. Over the
+  4096-range cap a single query cost 326 us and grew exactly linearly with the island count, which
+  is the shape of a session that is cheap early and expensive later. Now that same query costs 0.74 us at
+  that size, and a 4K HEVC session's process CPU falls from 15.25% to 14.17% (AE#592).
+
+### Fixed
+
+- **The remote-HLS subtitle proxy no longer rides a suspension.** It owns a loopback server bound on
+  `0.0.0.0` with an accept thread and up to 32 connection threads, and it was released only in
+  `load(source:)` and `stop()`. The background teardown runs neither, so on tvOS the socket was held
+  for the whole time the app was away. Released now where the foreground return rebuilds it, which
+  is a URL session; a custom source still keeps it, because its return never reaches `loadRemoteHLS`
+  and dropping it there would take the injected subtitle renditions with it (AE#597).
+
+### Added
+
+- **The live still extractor is built by the first request** instead of eagerly at session start
+  (AE#595).
+- **A harness arm for sources whose timestamps do not start at zero**, so an axis run can be read on
+  offset media (AE#534).
+- **A measurement arm that prices `fastZap`'s bounded start against the holdback**, behind
+  `AETHER_BOUNDED_START_FLOOR`. The policy is unchanged: the floor costs one more segment minus the
+  grace, and the harm it would buy is not demonstrable on a harness whose client joins at the head
+  of the window (AE#594).
+
 ## [7.12.0] - 2026-09-22
 
 ### Fixed
