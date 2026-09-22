@@ -933,6 +933,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// winCond-guarded.
     private var openPhaseActive = false
 
+    /// AE#585: true while the host runs a bounded index pass after the open phase, which is index
+    /// work rather than playback. winCond-guarded.
+    private var indexPassActive = false
+
     /// Playback path (known size + prefetch) or live feeds. Live always uses the
     /// persistent reader; the streaming reader has no reconnect machinery.
     private var usePersistentReader: Bool {
@@ -1844,7 +1848,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // #281 retest: the head has now done the job it was kept past the parse for. This read
             // is not at the head, so playback has either moved beyond it or started nowhere near it,
             // and holding megabytes for a return that is not coming is just footprint.
-            if !openPhaseActive, !headSpan.isEmpty, spanPos < 0 || spanPos >= Int64(headSpan.count) {
+            //
+            // AE#585: unless the host is running its index pass, where neither half of that premise
+            // holds. The cue prewarm seeks to the middle for the container's index and the cursor is
+            // reset to zero straight after, so a drop here throws the head away one read before
+            // playback asks for exactly those bytes.
+            if !openPhaseActive, !indexPassActive, !headSpan.isEmpty,
+               spanPos < 0 || spanPos >= Int64(headSpan.count) {
                 headSpan = Data()
             }
             if !windowCanServe, !headSpan.isEmpty || tailSpan != nil,
@@ -2759,6 +2769,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     func markOpenPhaseFinished() {
         winCond.lock()
         openPhaseActive = false
+        winCond.unlock()
+    }
+
+    /// AE#585: the reads that follow are a bounded index pass, not playback.
+    func beginIndexPass() {
+        winCond.lock()
+        indexPassActive = true
+        winCond.unlock()
+    }
+
+    /// AE#585: the index pass is over; the next read that cannot be answered from a resident span
+    /// is playback's, and #281's rule applies to it unchanged.
+    func endIndexPass() {
+        winCond.lock()
+        indexPassActive = false
         winCond.unlock()
     }
 

@@ -1165,6 +1165,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // a repaired stream and the container's own index have to describe one ladder.
             dem.decideCompositionOffsetRepair()
 
+            // AE#585: everything from here to the cursor reset in step 6 is index work, and it ends
+            // where it began. Without this bracket the prewarm's seek to the middle reads as
+            // playback moving away, the retained head is released, and playback's first read at
+            // offset zero re-fetches the bytes the open (or the warm) already paid for.
+            dem.beginIndexPass()
+
             // 2. Prewarm MKV Cues so libavformat's keyframe index is populated (1-2 byte-range reads).
             //    Bounded: a missing/out-of-bounds Cues index degrades into a multi-GB linear scan;
             //    abort past the deadline and fall back to the uniform-stride plan.
@@ -1400,6 +1406,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    (no prewarm, forward-only feed).
         if !isLiveSession {
             dem.seek(to: 0)
+            dem.endIndexPass()      // AE#585: the next read that lands outside a span is playback's
         }
 
         // volumeAvailableCapacityForImportantUsage is unavailable on tvOS; the plain capacity key
