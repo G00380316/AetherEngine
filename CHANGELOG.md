@@ -12,6 +12,45 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.14.0] - 2026-09-22
+
+### Fixed
+
+- **A seek could leave the software VP9 decoder pointing at frames it had already released
+  (FFmpegBuild 3.5.0, FFmpeg n8.1.3).** `SoftwareVideoDecoder` opens VP9 with frame and slice
+  threading and flushes the codec context on every reposition, which is exactly the shape upstream's
+  `vp9_decode_flush()` mishandled: it released `frames[]`, `refs[]` and `ref_frames[]` but left
+  `next_refs[]` referenced, and a worker seeds its own references from another worker's `next_refs[]`,
+  so the pre-flush set survived and the first inter frame after a seek could decode against buffers
+  that were gone. A heap out-of-bounds read and write, found by Mozilla's bugmon automation.
+
+- **A Dolby Vision RPU with trailing zero padding keeps its dynamic metadata.** The RPU parser
+  stopped trimming zero padding in `ef167512ab`, which shipped in n8.1.2, so a heavily padded RPU
+  could fail the extension block size check and the file played without its dynamic metadata. Both
+  the HEVC and the AV1 decoder pull in the RPU parser, so this was on the path of every Dolby Vision
+  source, and a second fix bounds the RPU partition counts that were read without one.
+
+- **A VC-1 picture no longer loses its last macroblock.** The per-macroblock guards upstream added
+  in n8.1.2 bail out to error concealment when one bit is left, but a skipped P or B macroblock can
+  legitimately cost exactly one bit, and a Simple or Main profile picture is byte-aligned with no
+  stop bit, so a picture ending on such a macroblock lost it.
+
+- **The DTS core bitstream filter no longer passes on a profile it has just stripped.** It removes
+  the extension substreams, so a declared DTS-HD MA profile no longer described the bitstream that
+  came out of it.
+
+- **A channel layout read from the container survives a decoder that fails to open.** Probing copies
+  codec parameters back from the decoder context even after a failed `avcodec_open2()`, and the
+  failure zeroes the layout, so what the demuxer had read from the container was overwritten with
+  nothing.
+
+### Changed
+
+- **FFmpegBuild 3.5.0, built on FFmpeg n8.1.3.** 268 upstream commits over n8.1.2, of which the five
+  above touch code this engine ships. dav1d 1.5.4, zimg 3.0.6 and libzvbi 0.2.45 are unchanged (they
+  are the newest upstream releases), the component set and the six local FFmpeg patches are
+  unchanged, and the soname majors are the same, so nothing in the public API moves.
+
 ## [7.13.0] - 2026-09-22
 
 ### Performance
