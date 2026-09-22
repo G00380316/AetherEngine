@@ -206,7 +206,14 @@ final class SoftwarePlaybackHost {
     /// #544: decodes a scrub still out of `dvrRing`. Built beside the playback decoder so it never
     /// holds a stream pointer of its own, and driven only from `stillQueue`, off the demux and feed
     /// loops, so a preview frame never costs playback a packet.
-    private var stillExtractor: SoftwareStillExtractor?
+    ///
+    /// AE#595: built on the first request rather than at session start. It is a second decoder and
+    /// its frame buffers, roughly 12 MB on a 1080i channel, standing for the whole session on a box
+    /// with under 4 GB of RAM, for a feature most viewers of a live channel never touch. The first
+    /// scrub already pays a decode of a whole GOP out of the ring, so the codec open rides along
+    /// inside a cost the caller is waiting on anyway. The slot is what keeps a source it cannot
+    /// open from being retried sixteen times a second.
+    private var stillExtractorSlot = OneShotSlot<SoftwareStillExtractor>()
     private let stillQueue = DispatchQueue(label: "engine.sw.still", qos: .userInitiated)
     private let stillRequests = StillRequestCounter()
 
@@ -835,19 +842,6 @@ final class SoftwarePlaybackHost {
                 )
             }
         }
-        if isLive, dvrRing != nil {
-            do {
-                stillExtractor = try SoftwareStillExtractor(
-                    stream: vStream,
-                    videoStreamIndex: videoStreamIndex,
-                    timeBaseSeconds: videoTimeBaseSeconds,
-                    deinterlace: deinterlaceConfig)
-            } catch {
-                // A session without scrub stills still plays; the preview just stays empty.
-                EngineLog.emit("[SWHost] #544 still extractor unavailable (\(error))", category: .swPlayback)
-                stillExtractor = nil
-            }
-        }
 
         videoDecoder.onFirstHDR10PlusDetected = { [weak self] in
             self?.onFirstHDR10PlusDetected?()
@@ -1383,6 +1377,38 @@ final class SoftwarePlaybackHost {
         return outcome
     }
 
+    /// AE#595: the extractor, built on the first ask and kept for the rest of the session.
+    ///
+    /// The stream pointer is re-read from the demuxer rather than held from session start: the
+    /// demuxer is assigned once and closed once, both on this actor, so it is valid for exactly as
+    /// long as a still can be asked for, and re-reading it means nothing has to outlive teardown.
+    private func resolveStillExtractor() -> SoftwareStillExtractor? {
+        stillExtractorSlot.resolve {
+            guard let dem = demuxer, let stream = dem.stream(at: videoStreamIndex) else {
+                EngineLog.emit("[SWHost] #544 still extractor unavailable (no video stream)",
+                               category: .swPlayback)
+                return nil
+            }
+            do {
+                let built = try SoftwareStillExtractor(
+                    stream: stream,
+                    videoStreamIndex: videoStreamIndex,
+                    timeBaseSeconds: videoTimeBaseSeconds,
+                    deinterlace: deinterlaceConfig)
+                // Once per session, and its absence is the point: a session that never scrubs
+                // should never print it, which is the whole of AE#595 stated as an observable.
+                EngineLog.emit("[SWHost] #595 still extractor built on the first request",
+                               category: .swPlayback)
+                return built
+            } catch {
+                // A session without scrub stills still plays; the preview just stays empty.
+                EngineLog.emit("[SWHost] #544 still extractor unavailable (\(error))",
+                               category: .swPlayback)
+                return nil
+            }
+        }
+    }
+
     /// #544: a scrub still for the live DVR window, decoded out of the packet ring.
     ///
     /// Takes the session axis, exactly as `seek` does, and converts it with the same `sessionStartPts`
@@ -1390,7 +1416,7 @@ final class SoftwarePlaybackHost {
     /// own queue: the ring is internally locked and safe to read alongside the feeder, but decoding on
     /// the demux or feed loop would make the viewer pay for the preview in dropped packets.
     func liveScrubStill(atSessionSeconds seconds: Double, maxWidth: Int) async -> CGImage? {
-        guard isLive, let ring = dvrRing, let extractor = stillExtractor else { return nil }
+        guard isLive, let ring = dvrRing, let extractor = resolveStillExtractor() else { return nil }
         let targetSource = sourceSeconds(forSession: seconds)
         let requests = stillRequests
         let ticket = requests.next()
@@ -1506,8 +1532,7 @@ final class SoftwarePlaybackHost {
         vodPacketReadAhead = nil
         renderer.subtitleCompositor.reset()
 
-        if let extractor = stillExtractor {
-            stillExtractor = nil
+        if let extractor = stillExtractorSlot.reset() {
             // Torn down ON the still queue, so a decode already in flight finishes against a codec
             // context that is still open rather than one freed out from under it.
             stillQueue.async { extractor.close() }
