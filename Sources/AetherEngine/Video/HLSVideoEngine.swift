@@ -1879,6 +1879,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 retentionBudgetBytes: retentionBudgetBytes
             ),
             allowsBoundedDegradedStart: liveJoinProfile == .fastZap,
+            boundedStartFloorsAtHoldback: LiveEdgePolicy.boundedStartFloorArmed,
             blockingReloadOverride: blockingReloadOverride,
             liveCadencePolicy: liveCadencePolicy,
             restartHandler: isLiveSession ? nil : { [weak self] idx in

@@ -98,6 +98,12 @@ enum LiveEdgePolicy {
     /// Never serve an empty or single-segment live playlist (a 1-segment window is an instant -12888).
     static let minStartupSegments = 2
 
+    /// AE#594 arm B, env-gated (`AETHER_BOUNDED_START_FLOOR=1`) because it is a measurement arm and
+    /// not a policy: it floors `fastZap`'s bounded start at the holdback, leaving the outer
+    /// wall-clock deadline as the only shortcut. Read once, so a run cannot change arms midway.
+    static let boundedStartFloorArmed =
+        ProcessInfo.processInfo.environment["AETHER_BOUNDED_START_FLOOR"] == "1"
+
     /// AVPlayer's unchanged-playlist patience: it tolerates a playlist that has not changed for this
     /// multiple of the served TARGETDURATION before drawing `-12888`. The one number the cadence floor
     /// is answerable to.
@@ -550,6 +556,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let liveWindowSizing: LiveWindowSizing
     /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
     private let allowsBoundedDegradedStart: Bool
+    /// AE#594 arm B: skip the bounded branch, so the wait ends at the full holdback cushion or at the
+    /// outer wall-clock deadline. Measurement arm, off unless the environment asks for it.
+    private let boundedStartFloorsAtHoldback: Bool
     /// AE#374: whether the first-serve gate has already reported the interval it held. Read and written
     /// only under `firstSegmentCondition`, inside `waitForFirstLiveSegment` and its two account helpers.
     private var didAccountForFirstServe = false
@@ -771,6 +780,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         allowsBoundedDegradedStart: Bool = false,
+        boundedStartFloorsAtHoldback: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
         restartHandler: ((Int) -> Void)? = nil,
@@ -800,6 +810,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.sequentialAppendPlaylist = sequentialAppendPlaylist
         self.liveWindowSizing = liveWindowSizing
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
+        self.boundedStartFloorsAtHoldback = boundedStartFloorsAtHoldback
         self.blockingReloadOverride = blockingReloadOverride
         self.liveCadencePolicy = liveCadencePolicy
         self.codecsString = codecsString
@@ -2346,6 +2357,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 return true
             }
             if allowsBoundedDegradedStart,
+               !boundedStartFloorsAtHoldback,
                snap.count >= LiveEdgePolicy.minStartupSegments,
                degradedDeadline == nil {
                 let grace = LiveEdgePolicy.fastZapDegradedGraceSeconds(
