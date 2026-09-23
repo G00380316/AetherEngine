@@ -2551,12 +2551,21 @@ public final class AetherEngine: ObservableObject {
     /// survived cut `seg0+` on a title 15 s in. While a load is in flight the position that describes
     /// the session is the one THAT load was handed, which it received before the clock was cleared.
     ///
-    /// `.loading` is the whole of that window and nothing else: the only other writer of it holds it
-    /// through startup before the first roll (`host.$timeControlStatus`, which cannot reach it once
-    /// the session has played), so the parked value can never be read after the load it belongs to.
+    /// Round 5 (cmcpherson274, E8-F4): `.loading` was NOT the whole window. The autostart at the tail
+    /// of `load()` writes `.playing` before the new host has published a position, so for the next
+    /// ~50 ms the clock still reads the zero `load()` wrote, and a correction raised the moment a
+    /// rebuild returned rebuilt at the head. `setAudioDelay`'s own catch-up pass sits exactly there,
+    /// and so did a second stepper press 50-90 ms after the first on `.loopback` (measured on the CLI:
+    /// `#3 mount seek: item axis 0.00s`, `cutting seg0+`). A playable session whose clock reads exactly
+    /// the reset zero has not published yet, and the parked value is what it is mounted at. A seek
+    /// retires the parked value (`seek(to:origin:)`), so a genuine seek to 0 is never overridden.
     nonisolated static func rebuildPosition(state: PlaybackState, clock: Double, underReconstruction: Double?) -> Double {
-        guard state == .loading, let parked = underReconstruction else { return clock }
-        return parked
+        guard let parked = underReconstruction else { return clock }
+        switch state {
+        case .loading: return parked
+        case .playing, .paused: return clock == 0 ? parked : clock
+        case .idle, .seeking, .ended, .error: return clock
+        }
     }
 
     /// #227 round 2: whether a finishing session-preserving rebuild is the one that owns the held
@@ -3231,9 +3240,10 @@ public final class AetherEngine: ObservableObject {
 
     /// AE#464 round 2: the position the load currently in flight was handed, parked across the window
     /// in which `load` has already zeroed the clock but the rebuilt session has not reached it yet.
-    /// Written at the two sites that raise `state = .loading` for a load; read only through
-    /// `positionForSessionRebuild`, which is what makes a reload stacked behind another one rebuild at
-    /// the playhead instead of at the head.
+    /// Written at the two sites that raise `state = .loading` for a load, retired by an accepted seek;
+    /// read only through `positionForSessionRebuild`, which is what makes a reload stacked behind
+    /// another one, or raised the moment one returned (round 5), rebuild at the playhead instead of at
+    /// the head.
     var positionUnderReconstruction: Double?
 
     /// AE#464 round 3: the transport intent the load in flight was handed, parked across the same
@@ -5072,6 +5082,9 @@ public final class AetherEngine: ObservableObject {
                 + (held ? ", the place it held" : ", which is as close to it as the cache still reaches"),
                 category: .engine)
         }
+        // AE#464 round 5: from here the seek target describes the session, not the load before it,
+        // so a landing at exactly 0 is never read as a clock that has not published yet.
+        positionUnderReconstruction = nil
         state = .seeking
         // Span isSeeking across the real landing, not just the optimistic .playing flip (#38).
         // Generation guard at each finalize point prevents a superseded seek from clearing it.

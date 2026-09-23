@@ -74,6 +74,24 @@ struct Issue464RebuildPositionTests {
         // what a reload stacked onto it must read: the previous session's playhead is gone.
         #expect(AetherEngine.rebuildPosition(state: .loading, clock: 0, underReconstruction: 0) == 0)
     }
+
+    @Test("a load that has returned but not yet published a playhead still answers with its parked position")
+    func returnedLoadBeforeFirstPublishKeepsThePosition() {
+        // Round 5 (cmcpherson274, E8-F4): the autostart at the tail of `load()` writes `.playing`
+        // before the new host has published a position, so a correction raised the moment a rebuild
+        // returned read the zeroed clock and rebuilt at the head. Measured on the CLI with two
+        // `setAudioDelay` presses 50-90 ms apart on `.loopback`: `#3 mount seek: item axis 0.00s`.
+        #expect(AetherEngine.rebuildPosition(state: .playing, clock: 0, underReconstruction: 312.8) == 312.8)
+        #expect(AetherEngine.rebuildPosition(state: .paused, clock: 0, underReconstruction: 312.8) == 312.8)
+    }
+
+    @Test("once the session has published a playhead, or has none, the clock answers again")
+    func publishedOrTerminalReadsTheClock() {
+        #expect(AetherEngine.rebuildPosition(state: .playing, clock: 312.9, underReconstruction: 312.8) == 312.9)
+        #expect(AetherEngine.rebuildPosition(state: .seeking, clock: 0, underReconstruction: 312.8) == 0)
+        #expect(AetherEngine.rebuildPosition(state: .idle, clock: 0, underReconstruction: 312.8) == 0)
+        #expect(AetherEngine.rebuildPosition(state: .ended, clock: 0, underReconstruction: 312.8) == 0)
+    }
 }
 
 /// AE#464 round 3 (measured on the CLI while building the in-flight latch): the window round 2

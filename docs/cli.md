@@ -226,6 +226,16 @@ rebuild window, where `videoRoute` is `.none` because there is no route to ask: 
 cutting with the value, and now answers `set while the session is being rebuilt; the load in flight
 reads it from the options and delivers it`.
 
+Round 5 is two presses a re-anchor apart rather than inside one (`--switch-audio-delay 50@15000
+--switch-audio-delay 100@15060`, the band is 50 to 90 ms on an M1 against a 300 s H.264 + AAC fixture).
+The second press arrives after the first rebuild has returned and written `.playing` but before the new
+host has published a position, so before the fix it read the zero `load()` had written and rebuilt at
+the head: `#3 mount seek: item axis 0.00s`, `cutting seg0+`, on every run from 15050 to 15090. After
+it, `#3 mount seek: item axis 14.90s` and `cutting seg3+` on every run. The control is
+`--start-position 100 --seek-every 12 --seek-count 1 --seek-pattern 0 --switch-audio-delay 50@12450`:
+a seek retires the parked position, so the rebuild after a genuine seek to 0 still mounts at `0.00s`
+and not at the 100 s the load was handed.
+
 `play --live` without `--dvr-window` is the live-only shape, and it is the one that shows the re-anchor
 gate: `AE#464: audio delay = +150 ms stands, but this session cannot re-anchor at the playhead
 (state=playing, live=true); it arrives at the next seam`. With `--dvr-window 1800` the same run takes the
