@@ -242,6 +242,60 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         }
     }
 
+    /// AE#605: walks retained records from `cursor` on without touching the consumer's reader, so a
+    /// scrub still can decode out of history while playback keeps reading its own position.
+    ///
+    /// The lock is held only to validate the cursor and to snapshot the tail. The disk reads run
+    /// outside it on handles of their own, because a GOP is megabytes and the producer and the
+    /// consumer both serialize on this lock. That is safe for two reasons: an unlinked chunk stays
+    /// readable through a handle opened before the unlink, and the tail is read only up to the
+    /// length snapshotted here, never into a record still being written. What it cannot see is a
+    /// reset recreating the same chunk names underneath it, so the generation is checked again
+    /// once the walk ends, and a walk that raced a reset throws `invalidCursor` AFTER visiting: the
+    /// caller discards whatever it collected. `visit` returns false to stop early. Failures never
+    /// poison the store: a still is optional, playback is not.
+    func readHistory(from cursor: Cursor, visit: (Data) throws -> Bool) throws {
+        lock.lock()
+        do { try requireUsable() } catch { lock.unlock(); throw error }
+        guard retainConsumed else { lock.unlock(); throw Failure.retentionDisabled }
+        guard cursor.generation == generation, chunks > 0,
+              cursor.chunkID >= oldestChunkID, cursor.chunkID <= tailID,
+              cursor.recordIndex >= 0, cursor.recordIndex < writtenRecordCount else {
+            lock.unlock()
+            throw Failure.invalidCursor
+        }
+        let lastChunk = tailID
+        let lastChunkBytes = tailBytes
+        lock.unlock()
+
+        var chunkID = cursor.chunkID
+        var offset = cursor.offset
+        walk: while chunkID <= lastChunk {
+            guard let handle = try? FileHandle(forReadingFrom: chunkURL(chunkID)) else {
+                throw Failure.invalidCursor
+            }
+            defer { try? handle.close() }
+            let limit = chunkID == lastChunk ? lastChunkBytes : try handle.seekToEnd()
+            try handle.seek(toOffset: offset)
+            while offset < limit {
+                guard limit - offset >= 8 else { throw Failure.corruptRecord }
+                let header = try readExactly(8, from: handle)
+                let length = header.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+                guard length <= limit - offset - 8 else { throw Failure.corruptRecord }
+                let record = try readExactly(Int(length), from: handle)
+                offset += 8 + length
+                if try !visit(record) { break walk }
+            }
+            chunkID += 1
+            offset = 0
+        }
+
+        lock.lock()
+        let stillValid = cursor.generation == generation && !isClosed
+        lock.unlock()
+        guard stillValid else { throw Failure.invalidCursor }
+    }
+
     /// Evict only complete history chunks strictly before the reader, oldest first. A budget is
     /// not permission to discard unread packets or the current reader/writer chunk; the resident
     /// count can therefore remain above budget until the consumer advances. No packet/chunk index
