@@ -190,12 +190,17 @@ Runtime cache corruption is a reported playback failure, not silently skipped da
 
 The cache frontier is the intersection of selected audio and video presentation
 coverage containing the playhead. Unknown intervals remain unknown; byte counts
-are not converted to guessed seconds. H.264 uses a bounded presentation reorder
-queue and confirmed successor timestamps, because a VFR packet's decode duration
-can be shorter than the picture's actual display hold. Larger discontinuities,
+are not converted to guessed seconds. H.264 and HEVC use a bounded presentation
+reorder queue and confirmed successor timestamps, because a VFR packet's decode
+duration can be shorter than the picture's actual display hold, and a container
+that rounds durations down (41 ms against 41/42 ms deltas at 23.976 fps) would
+otherwise split the coverage at every frame (#613). Larger discontinuities,
 invalid or unexpectedly late timestamps invalidate or split coverage. Other
-codecs retain strict packet-duration coverage. Without a proven compressed
-frontier, the existing decoded-cushion fallback still applies.
+codecs retain strict packet-duration coverage. Coverage keeps its history behind
+the playhead for backward cached seeks, up to 4096 ranges per stream; a full
+coverage forgets the ranges wholly behind the playhead rather than stop
+describing new packets. Without a proven compressed frontier, the existing
+decoded-cushion fallback still applies.
 
 A cached seek restores a retained keyframe cursor, including an earlier keyframe
 for available preroll, and keeps the producer at its existing source frontier.

@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The software VOD buffer frontier on HEVC, and after a long session (AE#613).** HEVC kept the
+  strict `pts + duration` packet coverage, so a Matroska file muxed with 41 ms durations against
+  41/42 ms deltas split it at every 42 ms step: `bufferedPosition` read about half a second ahead
+  of the playhead over a twenty-second reservoir, and cached seeks saw the same short frontier.
+  HEVC now takes the successor-timestamp model H.264 already used, under FFmpeg's own reorder
+  bound. Separately, a coverage that reached its 4096-range cap stopped describing new packets
+  (or, on the successor model, invalidated itself), so every frontier after the cap was nil; it
+  now forgets the ranges behind the playhead instead.
 
 ## [7.15.0] - 2026-09-23
 

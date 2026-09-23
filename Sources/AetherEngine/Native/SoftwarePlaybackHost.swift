@@ -11,6 +11,18 @@ import AetherLibavutil
 /// Intentionally skips EAC3+JOC and DV HDMI handshake (AV1 sources rarely carry Atmos or DV).
 @MainActor
 final class SoftwarePlaybackHost {
+    /// Codecs whose presentation reordering has an established bound get the read-ahead's
+    /// successor-PTS coverage; every other codec keeps strict packet-duration coverage. HEVC's bound
+    /// is FFmpeg's own: `sps_max_num_reorder_pics > HEVC_MAX_DPB_SIZE - 1` (15) is rejected
+    /// (n8.1.2 hevc/ps.c:1397-1403), inside the 32-timestamp queue. On the duration model a Matroska
+    /// file muxed with 41 ms durations against 41/42 ms deltas split at every 42 ms step (#613).
+    nonisolated static func presentationReorderDepth(codecID: UInt32) -> Int? {
+        switch codecID {
+        case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue: return 32
+        default: return nil
+        }
+    }
+
 
     // MARK: - Published state (mirrors NativeAVPlayerHost surface)
 
@@ -945,7 +957,7 @@ final class SoftwarePlaybackHost {
                           denominator: $0.pointee.time_base.den)
                 } : nil
             let initialSourceClock = initialClockTime.seconds
-            let videoReorderDepth: Int? = vCodecID == AV_CODEC_ID_H264.rawValue ? 32 : nil
+            let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
             let cacheResult = await Task.detached(priority: .utility) { () throws -> SoftwarePacketReadAhead? in
                 let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 let available = (try? temp.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
