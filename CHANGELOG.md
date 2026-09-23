@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.15.0] - 2026-09-23
+
 ### Added
 
 - **Scrub stills on the software VOD path, with no second connection (AE#605).** A VOD session the
