@@ -65,8 +65,8 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// limit in force on material the coverage model cannot describe.
     private var storedVideoSeconds: Double?
     private var consumedVideoSeconds: Double?
-    private var videoCoverage = SoftwarePacketCoverage()
-    private var audioCoverage = SoftwarePacketCoverage()
+    private var videoCoverage: SoftwarePacketCoverage
+    private var audioCoverage: SoftwarePacketCoverage
     private var presentationCoverage: SoftwareVideoPacketCoverage?
     private struct Keyframe {
         let seconds: Double
@@ -79,6 +79,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
          initialSourceClock: Double, fifo: SoftwarePacketDiskFIFO,
          videoReorderDepth: Int? = nil,
+         coverageRangeCap: Int = 4096,
          beforeConsumerOperation: (@Sendable () -> Void)? = nil,
          readSource: @escaping @Sendable (@Sendable () -> Bool) throws -> SoftwareStoredPacket?) {
         self.video = video
@@ -87,9 +88,12 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         self.forwardSeconds = max(1, forwardSeconds)
         self.sourceClock = initialSourceClock
         self.fifo = fifo
+        self.videoCoverage = SoftwarePacketCoverage(maximumRangeCount: coverageRangeCap)
+        self.audioCoverage = SoftwarePacketCoverage(maximumRangeCount: coverageRangeCap)
         self.presentationCoverage = videoReorderDepth.map {
             SoftwareVideoPacketCoverage(timeBaseNumerator: video.numerator,
-                timeBaseDenominator: video.denominator, reorderDepth: $0)
+                timeBaseDenominator: video.denominator, reorderDepth: $0,
+                maximumRangeCount: coverageRangeCap)
         }
         self.beforeConsumerOperation = beforeConsumerOperation
         self.readSource = readSource
@@ -368,6 +372,21 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             video: videoEnd, audio: audioEnd, requiresAudio: audio != nil)
     }
 
+    /// The playhead in a stream's ticks, rounded down so a prune never reaches past it.
+    ///
+    /// #613: coverage keeps its history behind the playhead for backward cached seeks, so a long
+    /// session fills the range cap. A full coverage used to stop describing new packets (duration
+    /// model) or invalidate itself (successor model), which left every frontier after the cap nil.
+    /// Forgetting what lies wholly behind the playhead instead costs a backward cached seek into that
+    /// history, which then goes cold.
+    private func playheadTick(_ stream: Stream) -> Int64? {
+        guard stream.numerator > 0, stream.denominator > 0 else { return nil }
+        let ticks = (sourceClock * Double(stream.denominator) / Double(stream.numerator))
+            .rounded(.down)
+        guard ticks.isFinite, ticks > -9.0e18, ticks < 9.0e18 else { return nil }
+        return Int64(ticks)
+    }
+
     private func clearSourceMetadataLocked() {
         count = 0; bytes = 0; residentBytes = 0
         ended = false; failure = nil
@@ -466,8 +485,14 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                         copyDiskStateLocked(state)
                         if packet.streamIndex == video.index {
                             if presentationCoverage != nil {
+                                if presentationCoverage?.isFull == true, let tick = playheadTick(video) {
+                                    presentationCoverage?.prune(before: tick)
+                                }
                                 presentationCoverage?.insert(pts: packet.pts)
                             } else {
+                                if videoCoverage.isFull, let tick = playheadTick(video) {
+                                    videoCoverage.prune(before: tick)
+                                }
                                 videoCoverage.insert(pts: packet.pts, duration: packet.duration)
                             }
                             if let seconds = videoSeconds(pts: packet.pts) { storedVideoSeconds = seconds }
@@ -477,7 +502,10 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                                     keyframes.removeFirst(min(1024, keyframes.count))
                                 }
                             }
-                        } else if packet.streamIndex == audio?.index {
+                        } else if let audio, packet.streamIndex == audio.index {
+                            if audioCoverage.isFull, let tick = playheadTick(audio) {
+                                audioCoverage.prune(before: tick)
+                            }
                             audioCoverage.insert(pts: packet.pts, duration: packet.duration)
                         }
                     }
