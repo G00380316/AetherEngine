@@ -1098,16 +1098,26 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // staged on macOS; its outcome can.
         if hostCalls.contains("stallclock") {
             if tick == 4 {
+                #if DEBUG
                 stallClockStalled = engine.stallRendererClockForTesting()
                 stallClockAtStall = engine.currentTime
                 print(String(format: "  HOSTCALL AE#549 stopped the master clock behind the host's back at %.2f%@",
                              engine.currentTime,
                              stallClockStalled ? "" : " -- NO renderer clock on this backend"))
+                #else
+                print("  HOSTCALL stallclock needs a DEBUG build (its engine hooks are compiled out of Release): "
+                      + "swift build --product aetherctl")
+                #endif
             }
             if tick == 6 { stallClockBeforeResume = engine.currentTime }
             if tick == 7 {
+                #if DEBUG
+                let stalledRate = engine.rendererClockRateForTesting ?? -1
+                #else
+                let stalledRate: Float = -1
+                #endif
                 print(String(format: "  HOSTCALL play() on the stalled clock (playhead %.2f, rate %.2f)",
-                             engine.currentTime, engine.rendererClockRateForTesting ?? -1))
+                             engine.currentTime, stalledRate))
                 engine.play()
             }
             if tick >= 9 { stallClockAtEnd = engine.currentTime }
