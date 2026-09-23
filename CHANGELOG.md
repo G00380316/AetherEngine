@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.15.1] - 2026-09-23
+
 ### Fixed
 
 - **The software VOD buffer frontier on HEVC, and after a long session (AE#613).** HEVC kept the
@@ -20,6 +24,22 @@ the public-API contract.
   bound. Separately, a coverage that reached its 4096-range cap stopped describing new packets
   (or, on the successor model, invalidated itself), so every frontier after the cap was nil; it
   now forgets the ranges behind the playhead instead.
+- **A master refused while the display is ineligible for HDR no longer latches (AE#535).** An
+  audio route death right after a display mode switch opens a window in which the criteria readout
+  reads `hdrEligible=no`. A session-preserving reload that landed in it got -11868 from AVPlayer
+  and latched `panelRefusedHDRMaster`, so every later HDR title in the session went media-direct.
+  The latch now also needs `AVPlayer.eligibleForHDRPlayback` to read true at the refusal; the item
+  still takes its media fallback either way, and a refusal that is not latched says so in the log.
+- **An audio-delay rebuild raised the moment one returned keeps the playhead (AE#464).**
+  `rebuildPosition` honoured the parked position only while `state == .loading`, but `load()`'s
+  autostart writes `.playing` before the new host publishes a position, so for about 50 ms the
+  clock still read zero and a correction in that window rebuilt the session at its head. A
+  playable session whose clock reads exactly the reset zero now answers with the parked position;
+  an accepted seek retires it, so a genuine seek to 0 is never overridden.
+- **`aetherctl` builds in Release again (AE#610).** The stallclock drill called two DEBUG-only test
+  hooks unguarded, so `swift build -c release` failed from 7.6.0 through 7.15.0. The library
+  products were never affected. A Release binary now reports that the drill needs a DEBUG build,
+  and CI builds `aetherctl` in Release.
 
 ## [7.15.0] - 2026-09-23
 
