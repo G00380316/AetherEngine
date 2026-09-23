@@ -1418,9 +1418,10 @@ public final class AetherEngine: ObservableObject {
     /// where the per-title repetition it was built to prevent would have happened.
     ///
     /// Deliberately not keyed to a fingerprint of the display configuration, which would be more
-    /// precise: the latch can only be set while `eligibleForHDRPlayback` is true, so the capability
-    /// table at refusal time may be identical to the table afterwards, and a fingerprint built on that
-    /// assumption would hold the stale latch silently. The return needs no such assumption.
+    /// precise: the latch is only set while `eligibleForHDRPlayback` reads true (enforced since AE#535,
+    /// see `MasterFallbackDecision.shouldLatchPanelRefusal`), so the capability table at refusal time
+    /// may be identical to the table afterwards, and a fingerprint built on that would hold the stale
+    /// latch silently. The return needs no such assumption.
     nonisolated static func clearPanelRefusalOnForegroundReturn() {
         guard panelRefusedHDRMaster else { return }
         panelRefusedHDRMaster = false
@@ -2456,12 +2457,22 @@ public final class AetherEngine: ObservableObject {
         }
         masterFallbackUsed = true
         // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
+        // AE#535: and only while the display is eligible for HDR, or the answer is about the window.
         if MasterFallbackDecision.isDisplayRejectionCode(rejection.code), !Self.panelRefusedHDRMaster {
-            Self.panelRefusedHDRMaster = true
-            EngineLog.emit(
-                "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
-                + "routes HDR sources media-direct until it restarts",
-                category: .engine)
+            let eligibleNow = AVPlayer.eligibleForHDRPlayback
+            if MasterFallbackDecision.shouldLatchPanelRefusal(
+                code: rejection.code, displayEligibleForHDRNow: eligibleNow) {
+                Self.panelRefusedHDRMaster = true
+                EngineLog.emit(
+                    "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
+                    + "routes HDR sources media-direct until it returns from the background (#588)",
+                    category: .engine)
+            } else {
+                EngineLog.emit(
+                    "[DisplayCriteria] AE#535 HDR master refused (code=\(rejection.code)) while the display "
+                    + "reads hdrEligible=no; this item falls back, the process does not latch the refusal",
+                    category: .engine)
+            }
         }
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
