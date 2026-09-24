@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.16.1] - 2026-09-24
+
 ### Fixed
 
 - **The media fallback comes back where the rejected item was placed, not where the session
