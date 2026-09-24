@@ -13,6 +13,12 @@ import Foundation
 /// nothing in the URL names it. The list of names cannot be extended to reach that one, because the
 /// names live inside the payload, so the encoding itself has to be the signal (`encodedPayloadRange`).
 ///
+/// IPTV panels speaking the Xtream Codes API put the account's password in the path with no name and
+/// no encoding at all (`/live/{user}/{password}/{id}.ts`), so the layout is the only signal there
+/// (`xtreamPathSecretRange`). Its short form (`/{user}/{password}/{id}`) has no layout to go by, and
+/// neither does a provider shape nobody has reported yet; for those the host names the value itself
+/// through `EngineLog.registerSecret(_:)`, which is matched literally (`registeredSecretRange`).
+///
 /// That makes it the engine's problem rather than each host's: the engine composes the line, it reaches
 /// three sinks a host does not control, and a host-side scrub only ever covers the one sink it owns.
 ///
@@ -42,6 +48,7 @@ enum LogRedaction {
     /// segment producer, so anything per-line here is per-line everywhere.
     static func redact(_ line: String) -> String {
         let bytes = Array(line.utf8)
+        let secrets = registeredSecrets
         var out: [UInt8]?
         var copiedUpTo = 0
         var i = 0
@@ -50,11 +57,14 @@ enum LogRedaction {
             // Three shapes, because a credential does not always arrive next to a name. The key
             // matcher covers `api_key=…`, `X-Emby-Token: …` and the cookie; the payload matcher covers
             // an encoded blob that no name points at, which is how a path segment carries one; the
-            // userinfo matcher covers `smb://user:secret@host`, where it sits in the authority.
-            guard let value = matchedKeyLength(in: bytes, at: i)
+            // userinfo matcher covers `smb://user:secret@host`, where it sits in the authority; the
+            // path matcher covers the Xtream layout; a registered secret is found wherever it sits.
+            guard let value = registeredSecretRange(in: bytes, at: i, secrets: secrets)
+                    ?? matchedKeyLength(in: bytes, at: i)
                     .flatMap({ valueRange(in: bytes, after: i + $0) })
                     ?? encodedPayloadRange(in: bytes, at: i)
-                    ?? userInfoSecretRange(in: bytes, at: i) else {
+                    ?? userInfoSecretRange(in: bytes, at: i)
+                    ?? xtreamPathSecretRange(in: bytes, at: i) else {
                 i += 1
                 continue
             }
@@ -149,6 +159,124 @@ enum LogRedaction {
         // secret (a bare token in the authority), and then the user name cannot be spared.
         let secretStart = colon.map { $0 + 1 } ?? start
         return secretStart < i ? secretStart ..< i : nil
+    }
+
+    // MARK: Registered secrets
+
+    /// Shortest value `register` accepts. A literal match has no context to go by, so a one- or
+    /// two-byte value would black out every occurrence of that text in every line.
+    static let minimumSecretLength = 4
+
+    private static let secretsLock = NSLock()
+    nonisolated(unsafe) private static var _secrets: [String: [UInt8]] = [:]
+
+    /// Snapshot taken once per line, so a register racing a redact sees the old set or the new one,
+    /// never half of it. Sorted longest first, so a secret that contains another goes whole.
+    private static var registeredSecrets: [[UInt8]] {
+        secretsLock.lock(); defer { secretsLock.unlock() }
+        return _secrets.isEmpty ? [] : _secrets.values.sorted { $0.count > $1.count }
+    }
+
+    /// Registers the value and its percent-encoded form, which is how it appears inside a URL path or
+    /// query when it holds a character a URL cannot carry raw. Returns false for a value too short to
+    /// match literally.
+    @discardableResult
+    static func register(_ secret: String) -> Bool {
+        let forms = literalForms(of: secret)
+        guard !forms.isEmpty else { return false }
+        secretsLock.lock(); defer { secretsLock.unlock() }
+        for form in forms { _secrets[form] = Array(form.utf8) }
+        return true
+    }
+
+    static func unregister(_ secret: String) {
+        let forms = literalForms(of: secret)
+        secretsLock.lock(); defer { secretsLock.unlock() }
+        for form in forms { _secrets[form] = nil }
+    }
+
+    static func unregisterAll() {
+        secretsLock.lock(); defer { secretsLock.unlock() }
+        _secrets.removeAll()
+    }
+
+    private static func literalForms(of secret: String) -> Set<String> {
+        guard secret.utf8.count >= minimumSecretLength else { return [] }
+        var forms: Set<String> = [secret]
+        if let encoded = secret.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) { forms.insert(encoded) }
+        if let encoded = secret.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { forms.insert(encoded) }
+        return forms
+    }
+
+    /// The span of a registered secret starting here, or nil. Exact bytes, no boundary rule: the host
+    /// said this value must never be logged, so it goes even inside a longer word.
+    private static func registeredSecretRange(in bytes: [UInt8], at index: Int, secrets: [[UInt8]]) -> Range<Int>? {
+        for secret in secrets where index + secret.count <= bytes.count && bytes[index] == secret[0] {
+            var matched = true
+            for offset in 1 ..< secret.count where bytes[index + offset] != secret[offset] {
+                matched = false
+                break
+            }
+            if matched { return index ..< index + secret.count }
+        }
+        return nil
+    }
+
+    // MARK: Xtream Codes paths
+
+    /// Path prefixes of the Xtream Codes stream layout, each paired with the zero-based positions of
+    /// the segments after it that hold a credential. `/live/`, `/movie/`, `/series/` and `/timeshift/`
+    /// carry `{user}/{password}/...`; the HLS redirect targets carry a session token first, and
+    /// `/hlsr/` then repeats `{user}/{password}` behind it.
+    private static let xtreamLayouts: [(prefix: [UInt8], secretSegments: [Int])] = [
+        ("/live/", [1]), ("/movie/", [1]), ("/series/", [1]), ("/timeshift/", [1]),
+        ("/hls/", [0]), ("/hlsr/", [0, 2]),
+    ].map { (Array($0.0.utf8), $0.1) }
+
+    /// The span from the first credential segment through the last one, given an index that may
+    /// start one of `xtreamLayouts`' prefixes, or nil. The user name in front of the password is left
+    /// readable for the same reason as in `userInfoSecretRange`; on `/hlsr/` it sits between the token
+    /// and the password and goes with them, since one line yields one span.
+    ///
+    /// A credential segment only counts when a further path segment follows it, because that is what
+    /// the layout guarantees and what an ordinary HLS path lacks: `/live/master.m3u8` and
+    /// `/live/channel1/index.m3u8` stay whole. Over-redacting some other three-deep `/live/` path is
+    /// the accepted cost.
+    private static func xtreamPathSecretRange(in bytes: [UInt8], at index: Int) -> Range<Int>? {
+        guard bytes[index] == UInt8(ascii: "/") else { return nil }
+        for layout in xtreamLayouts where hasPrefix(layout.prefix, in: bytes, at: index) {
+            var segments: [Range<Int>] = []
+            var i = index + layout.prefix.count
+            let needed = layout.secretSegments.max()! + 2
+            while segments.count < needed {
+                let start = i
+                while i < bytes.count, bytes[i] != UInt8(ascii: "/"), !isPathTerminator(bytes[i]) { i += 1 }
+                guard i > start else { break }
+                segments.append(start ..< i)
+                guard i < bytes.count, bytes[i] == UInt8(ascii: "/") else { break }
+                i += 1
+            }
+            guard segments.count >= needed else { continue }
+            return segments[layout.secretSegments.min()!].lowerBound ..< segments[layout.secretSegments.max()!].upperBound
+        }
+        return nil
+    }
+
+    private static func hasPrefix(_ prefix: [UInt8], in bytes: [UInt8], at index: Int) -> Bool {
+        guard index + prefix.count <= bytes.count else { return false }
+        for offset in 0 ..< prefix.count where bytes[index + offset] != prefix[offset] { return false }
+        return true
+    }
+
+    /// Ends a URL path: the query, the fragment, or whatever the log line puts after the URL.
+    private static func isPathTerminator(_ b: UInt8) -> Bool {
+        switch b {
+        case UInt8(ascii: "?"), UInt8(ascii: "#"), UInt8(ascii: "\""), UInt8(ascii: "'"),
+             UInt8(ascii: ","), UInt8(ascii: ")"), UInt8(ascii: ">"), UInt8(ascii: " "), 0x09, 0x0A, 0x0D:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Ends an authority component. `@` is deliberately absent: it is what the scan is looking for.
