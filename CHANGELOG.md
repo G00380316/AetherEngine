@@ -10,8 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.16.0] - 2026-09-24
+
 ### Added
 - `clock.sourceTimeFollowsPicture` (and the `sourceTimeFollowsPicture` mirror): false on `nativeRemoteHLS` from a time jump until an injected rendition line has re-measured the lead, so a host can hold its overlay across that window instead of detecting seeks itself (AE#616 follow-up).
+- `EngineLog.registerSecret(_:)` / `unregisterSecret(_:)`: a host names a value that must never be logged, and every line has it replaced, raw or percent-encoded, before it reaches os_log or the handler.
+
+### Security
+- **Log redaction covers credentials carried as plain path segments.** IPTV panels speaking the Xtream Codes API put the account password in the path of every stream URL (`/live/{user}/{password}/{id}.ts`, likewise `/movie/`, `/series/`, `/timeshift/`, and the `/hls/` and `/hlsr/` redirect targets), where no named parameter, userinfo or encoded payload points at it, so `load url=` lines carried it in clear text. The layout is now matched, the user name stays readable, and ordinary paths such as `/live/master.m3u8` are untouched. The short form without a prefix has no layout to match, which is what `registerSecret(_:)` is for.
 
 ## [7.15.2] - 2026-09-24
 
