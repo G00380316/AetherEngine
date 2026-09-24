@@ -722,8 +722,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// edge-triggered condition variable for read waits and backpressure.
     private let winCond = NSCondition()
     /// Sliding window of bytes from the live connection, starting at `winStart`.
-    /// `position - winStart` is the read offset within `window`.
-    private var window = Data()
+    /// `position - winStart` is the read offset within `window`. Held as the delivered chunks
+    /// (AE#619), so trimming the consumed head copies nothing.
+    private var window = ChunkedByteWindow()
     private var winStart: Int64 = 0
     // Connection state.
     private var connEnded = false
@@ -1356,7 +1357,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         defer { winCond.unlock() }
         let n = Swift.min(max, window.count)
-        return n > 0 ? Array(window.prefix(n)) : []
+        return window.prefix(n)
     }
 
     /// True when a body's leading bytes are the HLS playlist tag `#EXTM3U`, tolerating a UTF-8 BOM and
@@ -1391,7 +1392,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connGeneration &+= 1
         let transfer = activeTransfer
         activeTransfer = nil
-        window = Data()
+        window.removeAll()
         connEnded = true
         winCond.broadcast()
         return (false, transfer, status)
@@ -1545,7 +1546,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connEnded = true
         let transfer = activeTransfer
         activeTransfer = nil
-        window = Data()
+        window.removeAll()
         // #281: both spans hold real bytes (up to headSpanMaxBytes + tailPrefetchBytes), so they
         // are released with the window rather than living until the reader is deallocated.
         headSpan = Data()
@@ -2047,11 +2048,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let available = window.count - posInWindow
             if available > 0 {
                 let copyNow = min(available, requestSize - totalRead)
-                window.withUnsafeBytes { raw in
-                    let src = raw.baseAddress!.advanced(by: posInWindow)
-                        .assumingMemoryBound(to: UInt8.self)
-                    buf.advanced(by: totalRead).update(from: src, count: copyNow)
-                }
+                window.copyBytes(to: buf.advanced(by: totalRead), from: posInWindow, count: copyNow)
                 position = curPosition + Int64(copyNow)
                 totalRead += copyNow
                 trimWindowLocked()
@@ -2242,7 +2239,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let dropThreshold = Self.winLookback + Self.winTrimBatch
         if behind > dropThreshold {
             let drop = behind - Self.winLookback
-            window = window.subdata(in: drop..<window.count)
+            window.dropFirst(drop)
             winStart += Int64(drop)
         }
     }
@@ -2859,10 +2856,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // new range, which is correct if slightly wasteful, and never leaves a hole.
         if offset >= winStart, offset <= winStart + Int64(window.count) {
             let keep = Int(offset - winStart)
-            if keep < window.count { window = window.subdata(in: 0..<keep) }
+            if keep < window.count { window.truncate(to: keep) }
         } else {
             winStart = offset
-            window = Data()
+            window.removeAll()
         }
         connRequestedOffset = offset
         let askAsJoin = isLive && liveOffsetsUnsatisfiable
@@ -3149,14 +3146,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
         }
         let base = window.count
-        window.count = base + count
-        window.withUnsafeMutableBytes { dst in
-            data.withUnsafeBytes { src in
-                if let d = dst.baseAddress, let s = src.baseAddress {
-                    (d + base).copyMemory(from: s, byteCount: count)
-                }
-            }
-        }
+        window.append(data)
         // #281 retest: retain the head of the file for the open phase, as it arrives. It cannot be
         // copied later out of the window, because `trimWindowLocked` drops it as the parse reads
         // forward, which is why the seek-time park misses on every layout whose parse reads more
