@@ -28,6 +28,23 @@ public enum EngineLog {
     private static let handlerLock = NSLock()
     nonisolated(unsafe) private static var _handler: ((String) -> Void)?
 
+    /// Names a value that must never appear in a log line, such as an IPTV account password the host
+    /// holds. Every line then has that exact value (and its percent-encoded form) replaced before it
+    /// reaches OSLog or `handler`, wherever it sits. The engine already strips the credential shapes it
+    /// can recognise (named parameters, userinfo, encoded payloads, the Xtream Codes path layout); this
+    /// is for the ones only the host knows, such as a provider URL that carries the password as a bare
+    /// path segment. Returns false, and registers nothing, for a value shorter than four bytes, which
+    /// would black out ordinary text. Thread-safe.
+    @discardableResult
+    public static func registerSecret(_ value: String) -> Bool {
+        LogRedaction.register(value)
+    }
+
+    /// Stops redacting a value passed to `registerSecret(_:)`, for example on logout.
+    public static func unregisterSecret(_ value: String) {
+        LogRedaction.unregister(value)
+    }
+
     public static let subsystem: String = "de.superuser404.AetherEngine"
 
     private static let loggers: [Category: Logger] = {
