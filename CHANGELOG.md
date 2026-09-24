@@ -12,6 +12,36 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.15.2] - 2026-09-24
+
+### Fixed
+
+- **`sourceTime` on the `nativeRemoteHLS` bypass follows the presented frame (AE#616).** It was
+  AVPlayer's item time. An origin whose playlist places a segment at its slot while the segment
+  starts at the keyframe before it (a Jellyfin transcode restarted with `-noaccurate_seek -copyts`)
+  makes item time lead the picture, by 1.1 to 8.3 s in the report. A legible output on the bypass
+  item now matches presented lines of the injected #316 WebVTT renditions back to the cues the
+  engine wrote, and `sourceTime` is item time less that measured lead. `currentTime` and
+  `seek(to:)` stay on item time. With no injected rendition selected nothing is measured and
+  `sourceTime` stays item time, which the API docs now say.
+
+### Performance
+
+- **The persistent HTTP reader no longer copies its read window on every trim (AE#619).**
+  `AVIOReader` dropped the consumed head of its window with `subdata(in:)`, copying up to ~18 MB
+  once per 4 MB read, and grew the fresh buffer again on every append. The window now keeps the
+  chunks as delivered and a trim only advances an offset. CPU is unchanged within noise. Peak
+  memory footprint on a 91.6 Mbit/s 4K HEVC session over HTTP fell from 828 to 911 MB to 551 to
+  553 MB on the native route and from 604 to 651 MB to 193 to 197 MB on the software route
+  (M1, `/usr/bin/time -l`, three runs per arm). Local files are read by `FileIOReader` and are
+  not affected.
+- **The software VOD packet spool no longer serializes through a property list (AE#592).** The
+  binary plist encoder uniqued every object through a `Set`, hashing the whole payload of every
+  packet written to the read-ahead spool. The envelope is now a fixed little-endian header and the
+  raw bytes. Encode fell from 375 to 43 us per 425 KB packet, and process CPU on the same session
+  from 0.220 to 0.223 to 0.205 to 0.208 cores. The spool is per session, so there is no format
+  compatibility to keep.
+
 ## [7.15.1] - 2026-09-23
 
 ### Fixed
