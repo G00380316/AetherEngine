@@ -1981,6 +1981,10 @@ public final class AetherEngine: ObservableObject {
     /// offset by the session zero on live / mid-stream-joined sources (#107). Forwarder; subscribe to `clock.$sourceTime`.
     public var sourceTime: Double { clock.sourceTime }
 
+    /// Whether `sourceTime` is known to follow the displayed frame (AE#616). Forwarder; subscribe to
+    /// `clock.$sourceTimeFollowsPicture`.
+    public var sourceTimeFollowsPicture: Bool { clock.sourceTimeFollowsPicture }
+
     /// Source-axis buffer frontier ahead of the playhead (AetherEngine#54). Forwarder; subscribe to `clock.$bufferedPosition`.
     public var bufferedPosition: Double { clock.bufferedPosition }
 
