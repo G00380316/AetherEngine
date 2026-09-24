@@ -22,6 +22,13 @@ the public-API contract.
   behind the pause. A title started from its beginning resumes at its first frame. `NativeAVPlayerHost`
   now records where every mount places its item, in-place swaps included, and the fallback reads
   that.
+- **A recovery reload leaves a paused viewer paused (#93, #98).** Item death parks AVPlayer at
+  `.paused` whatever the viewer wanted, so the #93/#65 stage-2 reload runs for a paused consumer
+  too, and it and the #98 media fallback then called `play()` on the fresh item unconditionally.
+  Field log, Apple TV 4K 3rd gen, tvOS 27.0, HDR10+ HEVC Matroska: paused, the tvOS screensaver
+  took the display two minutes later, the item died with -11868, and the recovery started the
+  title and dismissed the screensaver. Both now resume only when the host's durable intent (#122),
+  which the in-place swap keeps, says the viewer was playing; a playing viewer is resumed as before.
 
 ## [7.16.0] - 2026-09-24
 
