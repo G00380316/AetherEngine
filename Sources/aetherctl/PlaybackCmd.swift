@@ -666,7 +666,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // exists (the foreground retune's hold-paused policy). Resumed at tick 8.
             print("  HOSTCALL pause() right after load")
             engine.pause()
-        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still", "stallclock":
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still", "stallclock", "pausereload", "playreload", "extplayreload":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case "nativesubs":
             break  // Sodalite#156, read at load time into LoadOptions.prepareNativeSubtitles
@@ -674,7 +674,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             || call.hasPrefix("subson") || call.hasPrefix("nativerender"):
             break  // #433 / Sodalite#156, all in the telemetry loop; `@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,nativesubs,nativerender,subsoff,subson)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,pausereload,playreload,extplayreload,nativesubs,nativerender,subsoff,subson)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -686,6 +686,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     var stallClockAtStall: Double?
     var stallClockBeforeResume: Double?
     var stallClockAtEnd: Double?
+    // AE#626: the clock just after the forced stage-2 reload, and at the last tick.
+    var recoveryReloadClockAfter: Double?
+    var recoveryReloadClockAtEnd: Double?
     var monitor: AudioContinuityMonitor?
     var tapTask: Task<Void, Never>?
     if audioStats {
@@ -1122,6 +1125,29 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             }
             if tick >= 9 { stallClockAtEnd = engine.currentTime }
         }
+        // AE#626: force the #93/#65 stage-2 reload on a session the host paused (`pausereload`) or
+        // left playing (`playreload`), and watch whether the fresh item keeps that transport.
+        let pauseReload = hostCalls.contains("pausereload")
+        let externalPlayReload = hostCalls.contains("extplayreload")
+        if pauseReload || externalPlayReload || hostCalls.contains("playreload") {
+            if pauseReload || externalPlayReload, tick == 6 {
+                print("  HOSTCALL pause()")
+                engine.pause()
+            }
+            // The resume AVKit's transport bar or a remote command makes: straight on the player,
+            // past the engine, so the engine's intent still reads paused while the player runs.
+            if externalPlayReload, tick == 8 {
+                print("  HOSTCALL play() straight on the AVPlayer, as AVKit does")
+                engine.currentAVPlayer?.play()
+            }
+            if tick == 10 {
+                print(String(format: "  HOSTCALL AE#626 forcing the stage-2 reload at %.2f (state=%@)",
+                             engine.currentTime, String(describing: engine.state)))
+                engine.forceStalledConsumerReloadForTesting()
+            }
+            if tick == 13 { recoveryReloadClockAfter = engine.currentTime }
+            if tick >= 13 { recoveryReloadClockAtEnd = engine.currentTime }
+        }
         if hostCalls.contains("pausestart"), tick == 8 {
             print(String(format: "  HOSTCALL play() after the start pause (playhead %.2f)", engine.currentTime))
             engine.play()
@@ -1337,6 +1363,24 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         if let atEnd = rateHoldAtEnd, abs(atEnd - Issue436RateHold.rate) > 0.01 {
             print(String(format: "VERDICT: #436 held across the resume but lost later (%.2f at the last tick); "
                          + "a rebuild in between dropped it", atEnd))
+            return 4
+        }
+    }
+    if hostCalls.contains("pausereload") || hostCalls.contains("playreload")
+        || hostCalls.contains("extplayreload") {
+        guard let after = recoveryReloadClockAfter, let atEnd = recoveryReloadClockAtEnd else {
+            print("VERDICT: AE#626 drill inconclusive (run it for at least 20 s)")
+            return 5
+        }
+        let moved = atEnd - after
+        print(String(format: "AE#626 after the reload: %.2f, at the last tick %.2f (%+.2f s), state=%@",
+                     after, atEnd, moved, String(describing: endState)))
+        if hostCalls.contains("pausereload"), moved > 0.25 {
+            print("VERDICT: AE#626 reproduced (the reload of a paused session played it)")
+            return 4
+        }
+        if hostCalls.contains("playreload") || hostCalls.contains("extplayreload"), moved <= 0.25 {
+            print("VERDICT: AE#626 regression (the reload of a playing session came back stopped)")
             return 4
         }
     }

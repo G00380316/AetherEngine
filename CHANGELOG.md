@@ -29,6 +29,10 @@ the public-API contract.
   took the display two minutes later, the item died with -11868, and the recovery started the
   title and dismissed the screensaver. Both now resume only when the host's durable intent (#122),
   which the in-place swap keeps, says the viewer was playing; a playing viewer is resumed as before.
+  `aetherctl play --host-calls pausereload,playreload,extplayreload` drills it headless: before,
+  a paused session came back from a forced stage-2 reload at `+7.20 s, state=playing`; after, it
+  holds at `+0.00 s, state=paused`, and a session resumed past the engine through AVKit still
+  comes back playing.
 
 ## [7.16.0] - 2026-09-24
 
