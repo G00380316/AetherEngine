@@ -2165,6 +2165,14 @@ public final class AetherEngine: ObservableObject {
     /// every live source, every source without declared sidecars, and every refused rewrite.
     var remoteHLSSubtitleProxy: RemoteHLSSubtitleProxy.Prepared?
 
+    /// AE#616: measures how far AVPlayer's item time leads the presented frame on the bypass, off the
+    /// injected renditions. Nil whenever `remoteHLSSubtitleProxy` serves none.
+    var remoteHLSCueClock: RemoteHLSCueClockObserver?
+
+    /// AE#616: the last offset `remoteHLSCueClock` measured, subtracted from item time to publish
+    /// `sourceTime`. Zero on every other path and until the first injected line is presented.
+    var remoteHLSItemOffset: Double = 0
+
     /// #316: external track id -> the NAME its injected rendition carries in the served master. Selecting
     /// one of these must drive AVMediaSelection, not the sidecar overlay, or the two draw on top of
     /// each other. Empty when no proxy is standing.
@@ -3737,6 +3745,7 @@ public final class AetherEngine: ObservableObject {
         remoteHLSSubtitleProxy?.tearDown()   // #316
         remoteHLSSubtitleProxy = nil
         injectedSubtitleRenditionNames = [:]
+        detachRemoteHLSCueClock()   // AE#616
         stallRecoveryWindowUntil = .distantPast
         stallRecoveryReasserts = 0
         stallReengageTask?.cancel()
@@ -5789,6 +5798,7 @@ public final class AetherEngine: ObservableObject {
         remoteHLSSubtitleProxy?.tearDown()
         remoteHLSSubtitleProxy = nil
         injectedSubtitleRenditionNames = [:]
+        detachRemoteHLSCueClock()   // AE#616
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
         fontAttachments = []
@@ -7066,6 +7076,7 @@ public final class AetherEngine: ObservableObject {
         remoteHLSSubtitleProxy?.tearDown()
         remoteHLSSubtitleProxy = nil
         injectedSubtitleRenditionNames = [:]
+        detachRemoteHLSCueClock()   // AE#616
         EngineLog.emit(
             "[AetherEngine] #597 background teardown: remote-HLS subtitle proxy released",
             category: .engine)

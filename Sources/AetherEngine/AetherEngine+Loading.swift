@@ -90,7 +90,8 @@ extension AetherEngine {
     /// hold-vs-settle decision is unit-testable without driving a live AVPlayer.
     func applySeekFinalizeSourceTime(target: Double, bufferingTowardTarget: Bool) {
         if Self.seekLandingSettlesToTarget(bufferingTowardTarget: bufferingTowardTarget) {
-            clock.sourceTime = target
+            // AE#616: zero except on a remote-HLS bypass whose item time leads its frames.
+            clock.sourceTime = max(0, target - remoteHLSItemOffset)
         }
     }
 
@@ -362,6 +363,7 @@ extension AetherEngine {
         applyDesiredRate(to: host)
         // No loopback producer; playhead is the raw AVPlayer clock. Shift stays 0.
         self.playlistShiftSeconds = 0
+        detachRemoteHLSCueClock()
         self.setPresentationAxis(PresentationAxisMap())
         if currentAVPlayer !== host.avPlayer {
             self.currentAVPlayer = host.avPlayer
@@ -381,10 +383,12 @@ extension AetherEngine {
             .store(in: &nativeCancellables)
         host.$renderedTime
             .sink { [weak self] value in
-                self?.clock.sourceTime = value
+                guard let self else { return }
+                // AE#616: item time, less what the injected renditions measured it leads the picture by.
+                self.clock.sourceTime = max(0, value - self.remoteHLSItemOffset)
                 // Feed the playhead mirror the remote-HLS audio tap (#95) reads off its ingest task;
                 // shift 0 on this path, so the rendered position is the source-PTS playhead.
-                self?.renderedPositionMirror.set(value)
+                self.renderedPositionMirror.set(value)
             }
             .store(in: &nativeCancellables)
         // #168: mirror the item's parsed dynamic range into the published format AND program the panel.
@@ -539,6 +543,8 @@ extension AetherEngine {
                       // AVFoundation builds no track, where nothing terminal is ever published.
                       readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds))
 
+        attachRemoteHLSCueClock(host: host, expectedGeneration: bypassGeneration)
+
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with
         // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
         // Selection routes back through `selectSubtitleTrack(index:)` / `clearSubtitle()`.
@@ -552,6 +558,29 @@ extension AetherEngine {
         }
         startMemoryProbe()
         // No startLiveTelemetrySampler: all sampler counters read the loopback pipeline (demuxer / producer / cache / server), none of which exists on this bypass.
+    }
+
+    /// AE#616: on this bypass `sourceTime` would otherwise be item time, which an origin that restarts
+    /// its transcode at the keyframe before a slot puts ahead of the picture. The engine wrote the
+    /// injected renditions, so it can match what AVPlayer presents back to the cue and read the offset.
+    /// Without injected renditions nothing is measurable and `sourceTime` stays item time.
+    private func attachRemoteHLSCueClock(host: NativeAVPlayerHost, expectedGeneration: UInt64) {
+        detachRemoteHLSCueClock()
+        guard let provider = remoteHLSSubtitleProxy?.provider,
+              let item = host.currentPlayerItem else { return }
+        remoteHLSCueClock = RemoteHLSCueClockObserver(item: item, provider: provider) { [weak self] offset in
+            guard let self, self.loadGeneration == expectedGeneration else { return }
+            self.remoteHLSItemOffset = offset
+            if let rendered = self.nativeHost?.renderedTime {
+                self.clock.sourceTime = max(0, rendered - offset)
+            }
+        }
+    }
+
+    func detachRemoteHLSCueClock() {
+        remoteHLSCueClock?.detach()
+        remoteHLSCueClock = nil
+        remoteHLSItemOffset = 0
     }
 
     /// Stand a loopback origin in front of the remote master and return the URL AVPlayer should open.

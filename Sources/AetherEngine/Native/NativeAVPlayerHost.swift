@@ -222,6 +222,8 @@ final class NativeAVPlayerHost {
     // MARK: - Private state
 
     private var playerItem: AVPlayerItem?
+    /// AE#616: the item the latest `load` attached, for an output the engine hangs on it.
+    var currentPlayerItem: AVPlayerItem? { playerItem }
     /// Applied immediately and replayed onto fresh items across internal reloads so Now Playing title/artwork survives audio-switch/background-reopen seams.
     private var pendingExternalMetadata: [AVMetadataItem] = []
     private var timeObserver: Any?
