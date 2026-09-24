@@ -43,6 +43,16 @@ final class ThrottledOriginServer: @unchecked Sendable {
     /// its own chunk boundary does this. Default off keeps every existing test on the historical
     /// behaviour.
     private let ignoreRangeEnd: Bool
+    /// AE#619: serve `patternByte(at:)` instead of a constant, so a test can check that the bytes
+    /// the reader returns are the bytes at the offset it claims. Default off keeps every existing
+    /// test on the historical constant body.
+    private let patternedBody: Bool
+
+    /// The byte a `patternedBody` origin serves at `offset`. Varies within every 256-byte run and
+    /// between runs, so a shifted or reordered read cannot match by accident.
+    static func patternByte(at offset: Int64) -> UInt8 {
+        UInt8(truncatingIfNeeded: offset ^ (offset >> 8) ^ (offset >> 16) ^ (offset >> 24))
+    }
     private let chunkBytes: Int
     private let throttleUs: useconds_t
     private let firstByteDelayUs: @Sendable (_ isSuffix: Bool) -> useconds_t
@@ -133,10 +143,12 @@ final class ThrottledOriginServer: @unchecked Sendable {
     init?(totalSize: Int64, chunkBytes: Int = 256 * 1024, throttleUs: useconds_t = 5000,
           refuseAboveConcurrency: Int? = nil,
           ignoreRangeEnd: Bool = false,
+          patternedBody: Bool = false,
           firstByteDelayUs: @escaping @Sendable (_ isSuffix: Bool) -> useconds_t = { _ in 0 },
           respond: @escaping @Sendable (_ requestIndex: Int, _ offset: Int64, _ path: String) -> Directive = { _, _, _ in .serve206 }) {
         self.totalSize = totalSize
         self.ignoreRangeEnd = ignoreRangeEnd
+        self.patternedBody = patternedBody
         self.chunkBytes = chunkBytes
         self.throttleUs = throttleUs
         self.refuseAboveConcurrency = refuseAboveConcurrency
@@ -370,7 +382,10 @@ final class ThrottledOriginServer: @unchecked Sendable {
             var n = Int(min(Int64(chunkBytes), remaining - served))
             if let silentAfter { n = Int(min(Int64(n), silentAfter - served)) }
             if let dropAfter { n = Int(min(Int64(n), dropAfter - served)) }
-            guard writeBody(fd, Array(chunk[0..<n])) else { return false }
+            let body = patternedBody
+                ? (0..<n).map { Self.patternByte(at: offset + served + Int64($0)) }
+                : Array(chunk[0..<n])
+            guard writeBody(fd, body) else { return false }
             served += Int64(n)
             if throttleUs > 0 { usleep(throttleUs) }
         }
