@@ -533,13 +533,28 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | Symbol | Axis |
 | --- | --- |
 | `clock.$currentTime` | playback clock, the scrubber axis |
-| `clock.$sourceTime` | source PTS of the displayed frame; render subtitle overlays against this |
+| `clock.$sourceTime` | source PTS of the displayed frame; render subtitle overlays against this. On `nativeRemoteHLS` it is item time, corrected by the lead over the picture the engine measures on its injected #316 renditions while one is selected (AE#616); see below the table. |
 | `clock.$progress` | `currentTime / duration` |
 | `clock.$bufferedPosition` | source-axis position buffered ahead |
 | `clock.$liveEdgeTime`, `clock.$seekableLiveRange`, `clock.$behindLiveSeconds`, `clock.$isAtLiveEdge` | live-window surfaces. `seekableLiveRange` is the intersection of the DVR window (policy) and what the segment cache actually holds and can play forward from (fact), so it is honest to scale a rewind strip on and `seek(to:)` clamps to the same floor (AE#441). The two diverge for the whole first `dvrWindowSeconds` of a session and again whenever retention evicts faster than the window slides. Software live sessions have no such cache and keep the arithmetic bound. |
 | `$residentRanges` | where the loopback segment cache holds picture right now, as disjoint ascending spans on the `currentTime` axis. This is the cache's own truth, not AVPlayer's `loadedTimeRanges`: a measured session held 64 segments over four minutes across several islands while AVPlayer exposed roughly twelve seconds around the playhead and forgot a seeked-ahead island as soon as the playhead left it. Empty is the nil-equivalent, and a live session publishes empty always (its rewind depth is `seekableLiveRange`, which answers a different question). Residency is not a promise that a seek inside a span is instant: the player may still re-anchor and decode at the target, and a segment can start mid-GOP (AE#412). Coalesced to at most four updates a second, cleared on `load()` and teardown. |
 | `player.currentTime`, `sourceTime`, `progress`, `bufferedPosition`, `liveEdgeTime`, `seekableLiveRange`, `behindLiveSeconds`, `isAtLiveEdge` | non-published mirrors of the same values for one-shot reads |
 | `$duration` | seconds; a `LoadOptions.declaredDurationSeconds` outranks the container's |
+
+**`sourceTime` on `nativeRemoteHLS` (AE#616).** The engine sees no segment on that route, so the clock is
+AVPlayer's item time. An origin whose playlist places a segment at its slot while the segment starts at
+the keyframe before it (a Jellyfin transcode restarted by `-ss <slot> -noaccurate_seek -copyts`) makes
+item time lead the frame on screen, by a different amount after every seek: 1.1 s to 8.3 s measured, and
+AVPlayer keeps the anchor of the first segment it loaded after the seek. The WebVTT renditions the
+engine injects for `LoadOptions.externalSubtitles` are placed by media timestamp, so each line reaches
+AVPlayer's legible output at its cue start plus that lead. The engine watches its own renditions with a
+non-suppressing legible output, matches each presented line back to the cue it wrote, and publishes
+`sourceTime` as item time less the measured lead (log line `AE#616: item time leads the presented
+frame by ...`). It re-measures on every line; between a seek and the next line it keeps the previous
+value. Without an injected rendition selected nothing is measured and `sourceTime` is item time.
+`currentTime`, `seek(to:)` and the scrubber stay on item time throughout, so a seek round-trips. A host
+drawing its own overlay from `sourceTime` (libass) can keep the rendition selected behind its own
+suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 
 ## What the session is doing
 
@@ -899,7 +914,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself (edge snap on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it). `false` hands the whole decision to the host, which then also owns the eviction case. |
 | `liveJoinStartsImmediately` | true | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is non-empty and at least 1.5 s deep. The join tail no host can otherwise reach; default since 6.55.0 on a device A/B, see the live-join section. |
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto derives eligibility from observed upstream cadence, which is what keeps a bursty relay off a `-15410` loop. |
-| `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Pair with `isLive: true`. |
+| `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Built for `isLive: true`; a remote HLS VOD URL reaches this route regardless (AE#154). The clock here is item time, see `clock.$sourceTime` (AE#616). |
 | `nativeRemoteHLSIngestFallback` | true | The #168 / #293 carriage recovery and the #363 401/403 bypass refusal recovery. Setting it false turns both off. |
 | `audioOnly` | false | Lean audio pipeline, no video machinery. Also set automatically when the probe finds no video stream. |
 | `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot stream-copy into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels and FLAC for one with two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. |

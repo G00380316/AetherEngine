@@ -102,6 +102,14 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         await currentFillTask()?.value
     }
 
+    /// AE#616: every sidecar's decode has finished, so `allCueStarts()` is the whole program.
+    var isFillFinished: Bool { stores.allSatisfy(\.isFinished) }
+
+    /// AE#616: cue starts and texts across every injected rendition, on the axis the `.vtt` serves.
+    func allCueStarts() -> [(start: Double, text: String)] {
+        stores.flatMap { $0.allCues().map { (start: $0.start, text: $0.text) } }
+    }
+
     /// Reading the handle stays synchronous: `NSLock` is unavailable from an async context.
     private func currentFillTask() -> Task<Void, Never>? {
         fillLock.lock()
@@ -159,8 +167,9 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
 
     /// Whole-program WebVTT for one sidecar. Cue times are used verbatim: this bypass has no loopback
-    /// producer and therefore no playlist shift, and the origin's VOD timeline starts at zero, so the
-    /// sidecar's own absolute seconds already are the item axis.
+    /// producer and therefore no playlist shift, and AVPlayer places the cues by media timestamp, so
+    /// the sidecar's own absolute seconds line up with the frames. They do NOT line up with item time
+    /// where an origin's segments start before their playlist slot; AE#616 measures that gap off them.
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
         guard ordinal >= 0, ordinal < stores.count else { return nil }
         let store = stores[ordinal]

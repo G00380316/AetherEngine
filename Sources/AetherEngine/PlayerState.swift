@@ -605,7 +605,17 @@ public struct LoadOptions: Sendable, Equatable {
     /// from wherever the source can still serve, so a host that turns this off owns the eviction case too.
     public var clampsLiveResumeToWindow: Bool = true
 
-    /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
+    /// AVPlayer item from the remote URL directly: no demuxer probe, no loopback. AVPlayer manages live
+    /// edge / reconnect. Built for live (`isLive: true`, Jellyfin live `master.m3u8`); a remote HLS VOD
+    /// URL lands here too, whatever this says, because the loopback path reroutes it (AE#154). Default
+    /// `false`.
+    ///
+    /// On this route the clock is AVPlayer's item time, and that is not always the media time of the
+    /// frame on screen (AE#616). An origin whose playlist places a segment at its slot while the segment
+    /// starts at the keyframe before it (a Jellyfin transcode restarted by a seek) makes item time lead
+    /// the picture by that gap. `clock.sourceTime` subtracts the gap while one of the renditions the
+    /// engine injects for `LoadOptions.externalSubtitles` (#316) is selected and presenting; without one
+    /// it is item time. `clock.currentTime` and `seek(to:)` stay on item time either way.
     public var nativeRemoteHLS: Bool
 
     /// Reroute a live `nativeRemoteHLS` session onto the loopback live-ingest path when AVPlayer reaches
