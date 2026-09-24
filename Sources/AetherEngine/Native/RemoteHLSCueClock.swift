@@ -22,6 +22,10 @@ struct RemoteHLSCueClock {
     /// Item seconds minus media seconds of the presented frame. Nil until the first line is matched.
     private(set) var offset: Double?
 
+    /// Whether `offset` was measured since the last time jump. A jump keeps the previous offset as the
+    /// best guess, but the anchor may have moved, so until the next matched line it is only a guess.
+    private(set) var isMeasuredSinceJump = false
+
     private var startsByText: [String: [Double]] = [:]
     private var presented: Set<String> = []
     /// The first delivery after a time jump reports whatever is active at the landing, stamped with
@@ -44,6 +48,7 @@ struct RemoteHLSCueClock {
     mutating func noteTimeJump() {
         presented = []
         skipNextDelivery = true
+        isMeasuredSinceJump = false
     }
 
     /// Feed one legible-output delivery. Returns the new offset when this delivery measured one.
@@ -75,6 +80,7 @@ struct RemoteHLSCueClock {
         guard let measured = unique ?? ambiguous.min(by: { abs($0 - reference) < abs($1 - reference) })
         else { return nil }
         offset = measured
+        isMeasuredSinceJump = true
         return measured
     }
 

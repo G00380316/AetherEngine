@@ -10,7 +10,8 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- `clock.sourceTimeFollowsPicture` (and the `sourceTimeFollowsPicture` mirror): false on `nativeRemoteHLS` from a time jump until an injected rendition line has re-measured the lead, so a host can hold its overlay across that window instead of detecting seeks itself (AE#616 follow-up).
 
 ## [7.15.2] - 2026-09-24
 

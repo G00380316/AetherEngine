@@ -16,11 +16,15 @@ final class RemoteHLSCueClockObserver: NSObject, AVPlayerItemLegibleOutputPushDe
     private var clock = RemoteHLSCueClock()
     private var jumpObserver: NSObjectProtocol?
     private let onOffset: @MainActor (Double) -> Void
+    private let onTimeJump: @MainActor () -> Void
 
-    init(item: AVPlayerItem, provider: RemoteHLSSubtitleProvider, onOffset: @escaping @MainActor (Double) -> Void) {
+    init(item: AVPlayerItem, provider: RemoteHLSSubtitleProvider,
+         onOffset: @escaping @MainActor (Double) -> Void,
+         onTimeJump: @escaping @MainActor () -> Void) {
         self.item = item
         self.provider = provider
         self.onOffset = onOffset
+        self.onTimeJump = onTimeJump
         super.init()
         output.suppressesPlayerRendering = false
         output.advanceIntervalForDelegateInvocation = 0
@@ -29,7 +33,11 @@ final class RemoteHLSCueClockObserver: NSObject, AVPlayerItemLegibleOutputPushDe
         jumpObserver = NotificationCenter.default.addObserver(
             forName: AVPlayerItem.timeJumpedNotification, object: item, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.clock.noteTimeJump() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.clock.noteTimeJump()
+                self.onTimeJump()
+            }
         }
     }
 

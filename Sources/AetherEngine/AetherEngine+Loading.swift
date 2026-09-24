@@ -566,21 +566,31 @@ extension AetherEngine {
     /// Without injected renditions nothing is measurable and `sourceTime` stays item time.
     private func attachRemoteHLSCueClock(host: NativeAVPlayerHost, expectedGeneration: UInt64) {
         detachRemoteHLSCueClock()
+        // Item time until a line says otherwise, and for the whole session without injected renditions.
+        clock.sourceTimeFollowsPicture = false
         guard let provider = remoteHLSSubtitleProxy?.provider,
               let item = host.currentPlayerItem else { return }
-        remoteHLSCueClock = RemoteHLSCueClockObserver(item: item, provider: provider) { [weak self] offset in
-            guard let self, self.loadGeneration == expectedGeneration else { return }
-            self.remoteHLSItemOffset = offset
-            if let rendered = self.nativeHost?.renderedTime {
-                self.clock.sourceTime = max(0, rendered - offset)
-            }
-        }
+        remoteHLSCueClock = RemoteHLSCueClockObserver(
+            item: item, provider: provider,
+            onOffset: { [weak self] offset in
+                guard let self, self.loadGeneration == expectedGeneration else { return }
+                self.remoteHLSItemOffset = offset
+                if let rendered = self.nativeHost?.renderedTime {
+                    self.clock.sourceTime = max(0, rendered - offset)
+                }
+                self.clock.sourceTimeFollowsPicture = true
+            },
+            onTimeJump: { [weak self] in
+                guard let self, self.loadGeneration == expectedGeneration else { return }
+                self.clock.sourceTimeFollowsPicture = false
+            })
     }
 
     func detachRemoteHLSCueClock() {
         remoteHLSCueClock?.detach()
         remoteHLSCueClock = nil
         remoteHLSItemOffset = 0
+        clock.sourceTimeFollowsPicture = true
     }
 
     /// Stand a loopback origin in front of the remote master and return the URL AVPlayer should open.

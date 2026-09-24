@@ -98,4 +98,19 @@ struct RemoteHLSCueClockTests {
         let measured = c.observe(strings: ["Origin's own rendition"], itemTime: 31.0)
         #expect(measured == nil)
     }
+
+    @Test("A time jump marks the kept offset as unmeasured until the next matched line")
+    func timeJumpClearsMeasuredUntilNextLine() {
+        var c = clock([(1490.0, "Where were you?"), (1800.0, "Run.")])
+        #expect(!c.isMeasuredSinceJump)
+        _ = c.observe(strings: ["Where were you?"], itemTime: 1491.209)
+        #expect(c.isMeasuredSinceJump)
+        c.noteTimeJump()
+        #expect(!c.isMeasuredSinceJump)
+        #expect(c.offset.map { abs($0 - 1.209) < 1e-9 } == true)
+        _ = c.observe(strings: [], itemTime: 1790.0)
+        #expect(!c.isMeasuredSinceJump)
+        _ = c.observe(strings: ["Run."], itemTime: 1803.086)
+        #expect(c.isMeasuredSinceJump)
+    }
 }
