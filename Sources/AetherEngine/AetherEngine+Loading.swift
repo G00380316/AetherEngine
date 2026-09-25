@@ -338,10 +338,15 @@ extension AetherEngine {
         #endif
     }
 
-    func loadRemoteHLS(url: URL, options: LoadOptions, startPosition: Double? = nil) async throws {
+    func loadRemoteHLS(
+        url: URL, options: LoadOptions, startPosition: Double? = nil, generation: UInt64? = nil
+    ) async throws {
+        // Audit CORE-6: the generation of the load() that routed here, not a fresh read of it, so a
+        // stale caller cannot adopt its successor's generation.
+        if let generation { try checkLoadCurrent(generation) }
         playbackBackend = .native
         // #168 follow-up: detect a superseding load()/stop() between the carriage verdict and the reroute.
-        let bypassGeneration = loadGeneration
+        let bypassGeneration = generation ?? loadGeneration
 
         let host: NativeAVPlayerHost
         if let existing = nativeHost {

@@ -3802,6 +3802,9 @@ public final class AetherEngine: ObservableObject {
         // below can activate the session: AVKit on the native/remote-HLS paths, activateRendererAudioSession()
         // on the SW and audio paths. The task is short and typically already complete, so this rarely suspends.
         await awaitAudioSessionCategoryConfigured()
+        // Audit CORE-6: the first suspension point. Two loads issued back to back right after init
+        // both wait on the same category task, and the older one must not resume as the current one.
+        try checkLoadCurrent(gen)
 
         // nativeRemoteHLS: skip probe + loopback; play HLS URL directly with AVPlayer (Jellyfin already serves HLS).
         // Routed before the probe because we never demux the m3u8.
@@ -3829,7 +3832,8 @@ public final class AetherEngine: ObservableObject {
                 // Live keeps the no-initial-seek contract every live caller relies on, so its anchor
                 // stays nil even when the host passes one.
                 try await loadRemoteHLS(url: url, options: options,
-                                        startPosition: options.isLive ? nil : startPosition)
+                                        startPosition: options.isLive ? nil : startPosition,
+                                        generation: gen)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -4092,7 +4096,8 @@ public final class AetherEngine: ObservableObject {
             registerDeclaredExternalSubtitles(loadedOptions)
             recordStartupCheckpoint(.routed, generation: startupGen)   // #361
             do {
-                try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition)
+                try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition,
+                                        generation: gen)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
