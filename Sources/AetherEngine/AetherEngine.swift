@@ -975,7 +975,8 @@ public final class AetherEngine: ObservableObject {
         mediaServicesResetPending = true
         EngineLog.emit(
             "[AetherEngine] #597 media services were \(lost ? "lost" : "reset"): every audio and "
-            + "video object this process holds is invalid, so the next load builds a fresh host",
+            + "video object this process holds is invalid, so the next load builds fresh native and "
+            + "audio-only players",
             category: .engine)
     }
 
@@ -983,6 +984,21 @@ public final class AetherEngine: ObservableObject {
         let pending = mediaServicesResetPending
         mediaServicesResetPending = false
         return pending
+    }
+
+    /// Audit CORE-4: the audio-only AVPlayer host is kept across every `stopInternal` on purpose (its
+    /// MPNowPlayingSession must persist between tracks), so after a reset nothing ever replaced it and
+    /// the next track was handed to a dead AVPlayer. Any load consumes the reset, so it is dropped
+    /// here whatever that load plays; the next audio load builds a fresh one with a fresh session.
+    func dropAudioPlayerHostAfterMediaServicesReset() {
+        guard let host = audioAVPlayerHost else { return }
+        host.stop()
+        audioAVPlayerHost = nil
+        audioAVPlayerActive = false
+        EngineLog.emit(
+            "[AetherEngine] #597 audio-only AVPlayer dropped after the media services reset; the next "
+            + "audio load builds a fresh one",
+            category: .engine)
     }
 
     /// Consume the one-shot host request at the load boundary, folded with PiP's mandatory handover.
@@ -3660,9 +3676,10 @@ public final class AetherEngine: ObservableObject {
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
+        let mediaServicesWereReset = consumeMediaServicesReset()
         let preserveNativeHost = Self.shouldPreserveNativeHostAcrossLoad(
             backend: playbackBackend, nativeHostSurvives: nativeHost != nil,
-            mediaServicesWereReset: consumeMediaServicesReset())
+            mediaServicesWereReset: mediaServicesWereReset)
         // AE#158: while a PiP window is live, or when the host asked for it, the running item must
         // survive this load's teardown; the loopback host.load callsite finishes the handover
         // (inPlaceSwap). The host request is consumed here so it can affect only this load. The
@@ -3675,6 +3692,7 @@ public final class AetherEngine: ObservableObject {
         // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
         stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
+        if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
         // Scrub/seek/producer-restart never route through load(), so mid-stream #93 detection stays armed.
         hasRenderedFirstFrameMirror.set(false)
