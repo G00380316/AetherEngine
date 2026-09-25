@@ -484,6 +484,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Backpressure: suspend the streaming task above highWater, resume below lowWater.
     private static let streamHighWater = 64 * 1024 * 1024
     private static let streamLowWater = 32 * 1024 * 1024
+    /// Audit DMX-7: the suspend above is advisory (#220 measured 911 MB arriving after one), and
+    /// this path cannot re-request at an offset the way the persistent reader does, so a transport
+    /// that keeps delivering past twice the high water is ended and the read fails with EIO once
+    /// the buffered bytes are drained.
+    private static let streamHardCap = 2 * streamHighWater
 
     private let bufferLock = NSLock()
     private var currentBuffer = Data()
@@ -508,6 +513,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// consumer treats EOF as "played to the end" and deliberately never retries it. Guarded by
     /// `streamLock`.
     private var streamExpectedBytes: Int64 = -1
+    /// Audit DMX-6: the streaming GET ended in a transport error, or was ended at
+    /// `streamHardCap`. Either way the bytes that did not arrive are lost, not absent, so the read
+    /// that runs out reports EIO instead of end-of-media. Guarded by `streamLock`.
+    private var streamFailed = false
     /// The status the streaming GET was answered with when it was anything but 200/206, 0 while
     /// none. A status is not media: the delegate hangs up at the header, and `open()` fails typed
     /// on it rather than handing FFmpeg an empty stream to misreport as invalid data. Written on
@@ -1665,14 +1674,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
                 if fetchSize <= 0 { break }
 
-                guard let data = fetchChunk(from: position, size: fetchSize), !data.isEmpty else {
+                let fetched = fetchChunk(from: position, size: fetchSize)
+                guard let data = fetched, !data.isEmpty else {
                     // An aborted fetch (supersede/close/deadline) must report a read
                     // error, not EOF (which would truncate the stream cleanly). issue #27.
                     if isClosed || readDeadlinePassedOrAborted {
                         if readDeadlinePassedOrAborted { readDeadlineFired = true }
                         return totalRead > 0 ? Int32(totalRead) : -1
                     }
-                    // nil = transport failure; empty = 2xx with no body (would loop forever otherwise).
+                    // Audit DMX-10: nil is a transport failure short of a known size, which is the
+                    // same loss #25 stopped reporting as EOF on the persistent path; a probe that
+                    // read it as end-of-file reported a truncated duration instead of failing.
+                    if fetched == nil, fileSize > 0 {
+                        return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eio
+                    }
+                    // Empty = 2xx with no body (would loop forever otherwise).
                     break
                 }
 
@@ -1757,24 +1773,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 category: .demux)
             return FFmpegErr.eio
         }
-        if sequentialOnly {
-            streamLock.lock()
-            let ended = streamEnded
-            let received = streamBytesRead + Int64(streamBuffer.count)
-            let expected = streamExpectedBytes
-            streamLock.unlock()
-            // A sequential origin cannot be resumed at an offset, so a stalled-out wait or a
-            // body that ended short of its advisory length is a LOST source: report EIO so the
-            // pump exits on a read error the session can surface. EOF here would read as
-            // end-of-media, which the consumer deliberately never retries.
-            if !ended || (expected > 0 && received < expected) {
-                EngineLog.emit(
-                    "[AVIOReader] sequential stream \(ended ? "ended short" : "stalled out") at "
-                    + "\(received)\(expected > 0 ? "/\(expected)" : "") bytes; reporting EIO",
-                    category: .demux
-                )
-                return FFmpegErr.eio
-            }
+        streamLock.lock()
+        let ended = streamEnded
+        let failed = streamFailed
+        let received = streamBytesRead + Int64(streamBuffer.count)
+        let expected = streamExpectedBytes
+        streamLock.unlock()
+        // This path cannot be resumed at an offset, so a stalled-out wait, a transport error or a
+        // body that ended short of its advisory length is a LOST source: report EIO so the pump
+        // exits on a read error the session can surface. EOF here would read as end-of-media,
+        // which the consumer deliberately never retries. Audit DMX-6: this held for the
+        // sequential origin only, and a length-less source ended its film early on a Wi-Fi drop.
+        if !ended || failed || (expected > 0 && received < expected) {
+            EngineLog.emit(
+                "[AVIOReader] \(label) stream \(!ended ? "stalled out" : failed ? "failed" : "ended short") at "
+                + "\(received)\(expected > 0 ? "/\(expected)" : "") bytes; reporting EIO",
+                category: .demux
+            )
+            return FFmpegErr.eio
         }
         return FFmpegErr.eof
     }
@@ -3467,9 +3483,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let delegate = StreamingDelegate(
             extraHeaders: headers(for: request.url),
             onResponse: { [weak self] response in
-                // Advisory length for the sequential-origin EOF/EIO distinction; -1 (chunked /
-                // unknown) leaves the clean-end path as the only EOF source.
-                guard let self, self.sequentialOnly else { return }
+                // Advisory length for the EOF/EIO distinction; -1 (chunked / unknown) leaves the
+                // clean-end path as the only EOF source.
+                guard let self else { return }
                 let expected = response.expectedContentLength
                 guard expected > 0 else { return }
                 self.streamLock.lock()
@@ -3496,7 +3512,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         ) { [weak self] data in
             guard let self, !self.isClosed else { return }
             self.streamLock.lock()
+            if self.streamFailed {
+                self.streamLock.unlock()
+                return
+            }
             self.streamBuffer.append(data)
+            var toCancel: URLSessionDataTask?
+            if self.streamBuffer.count > Self.streamHardCap {
+                self.streamFailed = true
+                toCancel = self.streamingTask
+            }
             // Backpressure: park the transfer once the retained buffer
             // exceeds the high water mark; readStreaming resumes it when
             // the consumer drains below the low water mark (and before
@@ -3508,14 +3533,26 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 toSuspend = self.streamingTask
             }
             self.streamLock.unlock()
-            toSuspend?.suspend()
+            if let toCancel {
+                EngineLog.emit(
+                    "[AVIOReader] \(self.label) streaming buffer passed \(Self.streamHardCap / 1024 / 1024)MB "
+                    + "with the transfer suspended; ending it (audit DMX-7)", category: .demux)
+                toCancel.cancel()
+            } else {
+                toSuspend?.suspend()
+            }
             self.addBytesFetched(data.count)
             self.streamDataReady.signal()
-        } onComplete: { [weak self] in
-            self?.streamLock.lock()
-            self?.streamEnded = true
-            self?.streamLock.unlock()
-            self?.streamDataReady.signal()
+        } onComplete: { [weak self] error in
+            guard let self else {
+                semaphore.signal()
+                return
+            }
+            self.streamLock.lock()
+            if error != nil, !self.isClosed { self.streamFailed = true }
+            self.streamEnded = true
+            self.streamLock.unlock()
+            self.streamDataReady.signal()
             semaphore.signal()
         }
 
@@ -4640,7 +4677,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
 
 private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     let onData: @Sendable (Data) -> Void
-    let onComplete: @Sendable () -> Void
+    let onComplete: @Sendable (Error?) -> Void
     /// Response hook (advisory Content-Length capture on the sequential-origin path).
     let onResponse: (@Sendable (URLResponse) -> Void)?
     /// The origin answered with a status instead of media (anything but 200/206). Called at the
@@ -4658,7 +4695,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         onResponse: (@Sendable (URLResponse) -> Void)? = nil,
         onRefused: (@Sendable (Int, URL?) -> Void)? = nil,
         onData: @escaping @Sendable (Data) -> Void,
-        onComplete: @escaping @Sendable () -> Void
+        onComplete: @escaping @Sendable (Error?) -> Void
     ) {
         self.extraHeaders = extraHeaders
         self.onResponse = onResponse
@@ -4717,7 +4754,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
             EngineLog.emit("[AVIOReader] Stream error: \(error.localizedDescription)", category: .demux)
         }
         #endif
-        onComplete()
+        onComplete(error)
     }
 }
 
