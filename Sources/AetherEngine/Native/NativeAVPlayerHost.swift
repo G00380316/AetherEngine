@@ -1278,10 +1278,16 @@ final class NativeAVPlayerHost {
         else { return }
         liveJoinImmediateStartProbeInFlight = true
         let probeStart = DispatchTime.now()
+        let sid = sessionID
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.liveJoinImmediateStartProbeInFlight = false }
             let reading = await Self.liveJoinBufferReading(item)
+            // Audit NAT-4: a load during the read reset the one-shot and the in-flight flag for its own
+            // item, and a swap replaced the item this reading describes. Neither is this probe's to
+            // spend or clear.
+            guard self.sessionID == sid else { return }
+            self.liveJoinImmediateStartProbeInFlight = false
+            guard self.playerItem === item else { return }
             // AE#422: the reading is async, so the hold it described may be over. Decide on the state
             // that exists now, not on the edge that asked.
             guard !self.liveJoinImmediateStartSpent,
