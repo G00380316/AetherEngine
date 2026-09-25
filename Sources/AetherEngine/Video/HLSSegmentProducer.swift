@@ -550,6 +550,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var pregateAudioBuffer: [(UnsafeMutablePointer<AVPacket>, PacketOrigin)] = []
     private var pregateAudioBufferBytes: Int = 0
     private var pregateAudioReplaySorted = false
+    /// Audit SEG-6: replay cursor into `pregateAudioBuffer`. Entries before it were handed to the pump
+    /// (which owns and frees them); draining with removeFirst() was quadratic at TrueHD packet rates.
+    private var pregateAudioReplayIndex = 0
+
+    private var hasPregateAudioToReplay: Bool { pregateAudioReplayIndex < pregateAudioBuffer.count }
+
+    private func freeUnreplayedPregateAudio() {
+        for entry in pregateAudioBuffer[pregateAudioReplayIndex...] {
+            var pkt: UnsafeMutablePointer<AVPacket>? = entry.0
+            trackedPacketFree(&pkt)
+        }
+        pregateAudioBuffer.removeAll()
+        pregateAudioReplayIndex = 0
+        pregateAudioBufferBytes = 0
+    }
     private var pregateAudioOverflowLogged = false
     private static let maxPregateAudioBufferBytes = 8 * 1024 * 1024
 
@@ -1091,12 +1106,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// audio belongs to the abandoned position, and the source-dts anchors would read the backward
     /// seek as a timeline discontinuity.
     private func discardPregateScanState() {
-        for entry in pregateAudioBuffer {
-            var pkt: UnsafeMutablePointer<AVPacket>? = entry.0
-            trackedPacketFree(&pkt)
-        }
-        pregateAudioBuffer.removeAll()
-        pregateAudioBufferBytes = 0
+        freeUnreplayedPregateAudio()
         pregateAudioReplaySorted = false
         pregateAudioOverflowLogged = false
         pregateVideoDropCount = 0
@@ -2917,7 +2927,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
                 let packet: UnsafeMutablePointer<AVPacket>
                 let origin: PacketOrigin
-                if !audioWaitForVideo, !pregateAudioBuffer.isEmpty {
+                if !audioWaitForVideo, hasPregateAudioToReplay {
                     // #74: once the video gate opens, drain the buffered head-of-stream audio in DTS
                     // order before reading further source packets. These were already counted in
                     // packetsRead when first read, so do not re-count them here.
@@ -2925,7 +2935,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         pregateAudioBuffer.sort { Self.mergeOrderingTicks($0.0) < Self.mergeOrderingTicks($1.0) }
                         pregateAudioReplaySorted = true
                     }
-                    let entry = pregateAudioBuffer.removeFirst()
+                    let entry = pregateAudioBuffer[pregateAudioReplayIndex]
+                    pregateAudioReplayIndex += 1
+                    if pregateAudioReplayIndex == pregateAudioBuffer.count {
+                        pregateAudioBuffer.removeAll()
+                        pregateAudioReplayIndex = 0
+                    }
                     packet = entry.0
                     origin = entry.1
                     pregateAudioBufferBytes -= Int(packet.pointee.size)
@@ -4113,12 +4128,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         // #74: free any head-of-stream audio still buffered (e.g. the video gate never opened on a
         // corrupt or aborted source); replayed entries were already drained at the loop top.
-        for entry in pregateAudioBuffer {
-            var pkt: UnsafeMutablePointer<AVPacket>? = entry.0
-            trackedPacketFree(&pkt)
-        }
-        pregateAudioBuffer.removeAll()
-        pregateAudioBufferBytes = 0
+        freeUnreplayedPregateAudio()
 
         // Flush look-behind; fallback duration produces tail-correct trun for the final fragment.
         if let prev = pendingVideoPkt {
