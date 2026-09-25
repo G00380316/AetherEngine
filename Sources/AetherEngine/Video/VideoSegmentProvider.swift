@@ -286,9 +286,19 @@ enum LiveEdgePolicy {
     }
 
     /// Whole seconds of promise covering a measured duration, taken at the served resolution.
+    ///
+    /// Total: a duration from a hostile or broken source (infinite, NaN, beyond `Int`) must not trap the
+    /// playlist writer. An unbounded one saturates at `maxCoveredWholeSeconds`, which keeps `3 x TD`
+    /// arithmetic far from overflow; NaN and anything at or below zero cover nothing.
     static func wholeSecondsCovering(_ seconds: Double) -> Int {
-        Int(servedSeconds(seconds).rounded(.up))
+        guard !seconds.isNaN else { return 0 }
+        let covered = servedSeconds(seconds).rounded(.up)
+        guard covered < Double(maxCoveredWholeSeconds) else { return maxCoveredWholeSeconds }
+        return covered > 0 ? Int(covered) : 0
     }
+
+    /// One day. Far above any real segment or cadence, far below where `Int` arithmetic on it overflows.
+    static let maxCoveredWholeSeconds = 86_400
 
     /// AE#454: the served `EXT-X-START:TIME-OFFSET` for a rejoin, or nil when this playlist cannot
     /// carry the placement.
