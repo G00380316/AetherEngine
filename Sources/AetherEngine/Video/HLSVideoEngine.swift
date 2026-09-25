@@ -3462,7 +3462,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         anchorShiftLock.lock()
         recutIndices.insert(index)
         anchorShiftLock.unlock()
-        requestRestart(at: index, authoritative: true)
+        // Audit HLS-4: off this task, so the gate wait below bounds the whole re-cut. Inline, an idle
+        // coalescer ran the restart here (a 5 s stop wait, a #79 reopen, the demuxer seek) before the
+        // wait began, all outside the seek's 8 s landing bound.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.requestRestart(at: index, authoritative: true)
+        }
         guard let opened = awaitGateOpen(forIndex: index, timeout: Self.recutGateWaitSeconds) else {
             anchorShiftLock.lock()
             recutIndices.remove(index)
