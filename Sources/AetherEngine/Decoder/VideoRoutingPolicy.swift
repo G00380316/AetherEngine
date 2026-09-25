@@ -101,8 +101,8 @@ enum VideoRoutingPolicy {
     /// AVPlayer path reaches readyToPlay and then renders nothing (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext
     /// on Intel Macs / older Apple TV). Pure so it is unit-testable; the impure VT probe
     /// (`VTCapabilityProbe.canHardwareDecode`) is injected as the `canHardwareDecode` closure and only runs
-    /// when the gate actually consults it. Only H.264 / HEVC consult this gate; AV1 / VP9 / etc. already
-    /// have their own routing above and must not be reclassified here.
+    /// when the gate actually consults it. H.264 / HEVC and HW-routed AV1 consult this gate (AV1 by
+    /// profile, see `av1FitsHardwareDecoder`); VP9 / etc. have their own routing above.
     ///
     /// #176: HEVC DV Profile 5 bypasses the gate entirely. The probe builds a plain-HEVC format description
     /// from the raw hvcC, which is not what the native path plays (dvh1 + dvcC, decoded by Apple's DV
@@ -118,11 +118,24 @@ enum VideoRoutingPolicy {
         switch codecID {
         case AV_CODEC_ID_HEVC where dvProfile == 5:
             return false
-        case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC:
+        case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC, AV_CODEC_ID_AV1:
             return !canHardwareDecode()
         default:
             return false
         }
+    }
+
+    /// Audit HLS-5: Apple's hardware AV1 decoders (A17 Pro, M3 and later) decode Main profile only,
+    /// 8/10-bit 4:2:0. `av1Available` is a codec-level answer, so High (4:4:4) and Professional
+    /// (4:2:2, 12-bit) reached AVPlayer and rendered nothing while dav1d would have played them.
+    /// The av1C states `seq_profile` in the top 3 bits of its second byte; the codecpar profile is the
+    /// fallback. Unknown on both counts keeps the native route, like the H.264 / HEVC probe gap.
+    static func av1FitsHardwareDecoder(av1C: [UInt8]?, codecparProfile: Int32) -> Bool {
+        if let av1C, av1C.count >= 4, av1C[0] & 0x80 != 0 {
+            return av1C[1] >> 5 == 0
+        }
+        guard codecparProfile >= 0 else { return true }
+        return codecparProfile == 0
     }
 
     /// AE#461: the decode path a session ends up on, given what the routing concluded and what the
