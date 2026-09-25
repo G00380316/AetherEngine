@@ -200,17 +200,35 @@ public enum DolbyVisionRecordAudit {
             size: Int(codecpar?.pointee.extradata_size ?? 0))
 
         var walked = 0
+        var packetsRead = 0
+        var bytesRead = 0
         while walked < packetBudget {
+            guard !walkExhausted(packetsRead: packetsRead, bytesRead: bytesRead, packetBudget: packetBudget)
+            else { return nil }
             guard let packet = (try? demuxer.readPacket()) ?? nil else { return nil }
             defer {
                 av_packet_unref(packet)
                 av_packet_free_safe(packet)
             }
+            packetsRead += 1
+            bytesRead += Int(max(packet.pointee.size, 0))
             guard packet.pointee.stream_index == videoIdx else { continue }
             walked += 1
             if let profile = rpuProfile(packet, framing: framing) { return profile }
         }
         return nil
+    }
+
+    /// Audit BIT-2: the walk counted only video packets, so a source that stops delivering video after
+    /// its head made every open read the rest of the file. Every packet counts against these instead.
+    /// No AVDISCARD_ALL on the other streams: the demuxer would then skip them inside one read, where
+    /// neither ceiling can see the bytes go by.
+    static let foreignPacketFuseMultiplier = 16
+    static let walkByteBudget = 64 * 1024 * 1024
+
+    static func walkExhausted(packetsRead: Int, bytesRead: Int, packetBudget: Int) -> Bool {
+        let (fuse, overflow) = packetBudget.multipliedReportingOverflow(by: foreignPacketFuseMultiplier)
+        return packetsRead >= (overflow ? Int.max : fuse) || bytesRead >= walkByteBudget
     }
 
     /// The verdict for a source in one call, gate included: opens it, reads the record and the VUI, and
