@@ -451,7 +451,9 @@ final class AudioPlaybackHost {
                 // tail. flush() alone dropped the final ~21ms+ of every audio-only title.
                 if let aDec = audioDecoder, let aOut = audioOutput,
                    seekGeneration() == seenSeekGeneration {
-                    let tail = aDec.drain()
+                    // Audit DEC-2: a seek's flush can land inside the drain, as in `decode` below.
+                    let drained = aDec.drain()
+                    let tail = seekGeneration() == seenSeekGeneration ? drained : []
                     for buf in tail { aOut.enqueue(sampleBuffer: buf) }
                     if let last = tail.last {
                         let end = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(last))
@@ -493,6 +495,13 @@ final class AudioPlaybackHost {
             if packet.pointee.stream_index == audioStreamIndex,
                let aDec = audioDecoder, let aOut = audioOutput {
                 let buffers = aDec.decode(packet: packet)
+                // Audit DEC-2 (the AE#491 rule on the audio-only host): the seek's flush can land
+                // inside `decode`, so the buffers are checked out again.
+                if seekGeneration() != seenSeekGeneration {
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    return true
+                }
                 for buf in buffers {
                     aOut.enqueue(sampleBuffer: buf)
                 }
