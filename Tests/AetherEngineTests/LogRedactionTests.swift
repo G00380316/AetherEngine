@@ -195,6 +195,52 @@ struct LogRedactionTests {
         #expect(LogRedaction.redact("[x] url=\(url) ok") == "[x] url=\(url) ok")
     }
 
+    @Test("a URL logged percent-encoded inside another URL's query loses its token (audit NET-1)")
+    func percentEncodedNestedURL() {
+        // The exact shape the pre-NET-1 origin relay logged on every request.
+        let origin = "https://jf.example.com/Videos/abc/master.m3u8?MediaSourceId=x&api_key=\(token)&Tag=7"
+        let encoded = origin.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        let lines = [
+            "[HLSLocalServer] GET /deadbeef/aether-origin-relay?origin=\(encoded) HTTP/1.1 fd=12",
+            "[NativeAVPlayerHost] #3 load url=http://127.0.0.1:50123/deadbeef/aether-origin-relay?origin=\(encoded)",
+        ]
+        for line in lines {
+            let out = LogRedaction.redact(line)
+            #expect(!out.contains(token), "leaked: \(out)")
+            #expect(out.contains("api%5Fkey%3D<redacted>%26Tag%3D7"), "\(out)")
+            #expect(out.contains("MediaSourceId%3Dx"), "diagnostic context went with it: \(out)")
+        }
+        let tail = LogRedaction.redact("GET /x?origin=\(encoded) HTTP/1.1 fd=12")
+        #expect(tail.hasSuffix(" HTTP/1.1 fd=12"))
+    }
+
+    @Test("a doubly encoded token is stripped too")
+    func doublyEncodedNestedURL() {
+        let once = "https://s/a?b=1&X-Emby-Token=\(token)&keep=1"
+            .addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        let twice = once.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        let out = LogRedaction.redact("[x] outer?u=\(twice)&z=2")
+        #expect(!out.contains(token), "leaked: \(out)")
+        #expect(out.contains("<redacted>%2526keep%253D1&z=2"), "\(out)")
+    }
+
+    @Test("an encoded separator inside a plain query value stays part of the value")
+    func encodedAmpersandInPlainValue() {
+        // At depth 0 a `%26` is data in the value, not the `&` that ends it, so the whole value goes.
+        let out = LogRedaction.redact("[x] https://s/a?api_key=abc%26def&keep=1")
+        #expect(out == "[x] https://s/a?api_key=<redacted>&keep=1")
+    }
+
+    @Test("an escape that decodes to a letter is no boundary, and prose with percent signs is left alone")
+    func encodedBoundaryRules() {
+        // `%73` is `s`, so this reads `hasToken=` and must stay, like its plain form.
+        let letter = "[x] ha%73Token=visible"
+        #expect(LogRedaction.redact(letter) == letter)
+        let prose = "[x] buffer 100% full, 5%token budget, 12%3 left"
+        #expect(LogRedaction.redact(prose) == prose)
+        #expect(LogRedaction.redact("[x] a%2Ftoken%3Asecretvalue done") == "[x] a%2Ftoken%3A<redacted> done")
+    }
+
     @Test("a registered secret goes wherever it sits, raw or percent-encoded, until unregistered")
     func registeredSecret() {
         defer { LogRedaction.unregisterAll() }

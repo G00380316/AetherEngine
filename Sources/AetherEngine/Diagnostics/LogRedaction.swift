@@ -83,56 +83,139 @@ enum LogRedaction {
         return String(decoding: out, as: UTF8.self)
     }
 
-    /// Length of the key starting here, or nil. The key must start on a boundary, else `token` would
-    /// fire inside `hasToken`. A separator such as the `-` in `X-Emby-Token` or the `_` in `api_key` is
-    /// a boundary; an ASCII letter or digit is not.
+    /// Raw length of the key starting here, or nil. The key must start on a boundary, else `token`
+    /// would fire inside `hasToken`. A separator such as the `-` in `X-Emby-Token` or the `_` in
+    /// `api_key` is a boundary; an ASCII letter or digit is not, unless it closes a percent escape
+    /// whose decoded character is a separator.
+    ///
+    /// Audit NET-1: the key is read through `logicalByte`, so a URL logged inside another URL's query
+    /// (`%26api%5Fkey%3D…`, or `%2526api%255Fkey%253D…` encoded twice) is matched like the plain form.
     private static func matchedKeyLength(in bytes: [UInt8], at index: Int) -> Int? {
-        if index > 0, isLetterOrDigit(bytes[index - 1]) { return nil }
-        for key in keys where index + key.count <= bytes.count {
+        let first = logicalByte(in: bytes, at: index)
+        guard keyInitials.contains(lowercased(first.byte)) else { return nil }
+        if precededByWordCharacter(bytes, at: index) { return nil }
+        for key in keys {
+            var j = index
             var matched = true
-            for offset in 0 ..< key.count where lowercased(bytes[index + offset]) != key[offset] {
-                matched = false
-                break
+            for keyByte in key {
+                guard j < bytes.count else { matched = false; break }
+                let char = logicalByte(in: bytes, at: j)
+                guard lowercased(char.byte) == keyByte else { matched = false; break }
+                j += char.width
             }
-            if matched { return key.count }
+            if matched { return j - index }
         }
         return nil
     }
+
+    private static let keyInitials = Set(keys.map { $0[0] })
 
     /// The span holding the secret, given the index just past the key. Covers the query form
     /// (`api_key=abc&next=1`), both header forms (`Token="abc"`, `X-Emby-Token: abc`) and the cookie
     /// form (`connect.sid=abc; Path=/`). Nil when there is no assignment or the value is empty, so
     /// `api_key=` and a bare mention in prose are left alone.
+    ///
+    /// Characters are read through `logicalByte`. A terminator ends the value only when it sits under
+    /// no more encoding layers than the `=` did: inside a plain query `%26` is part of the value, inside
+    /// an encoded one it is the `&` that ends it. With no escape in sight this is the byte scan it was.
     private static func valueRange(in bytes: [UInt8], after keyEnd: Int) -> Range<Int>? {
         var i = keyEnd
-        while i < bytes.count, bytes[i] == UInt8(ascii: " ") { i += 1 }
-        guard i < bytes.count, bytes[i] == UInt8(ascii: "=") || bytes[i] == UInt8(ascii: ":") else {
+        while i < bytes.count, case let char = logicalByte(in: bytes, at: i), char.byte == space {
+            i += char.width
+        }
+        guard i < bytes.count else { return nil }
+        let separator = logicalByte(in: bytes, at: i)
+        guard separator.byte == UInt8(ascii: "=") || separator.byte == UInt8(ascii: ":") else {
             return nil
         }
-        let isHeaderSeparator = bytes[i] == UInt8(ascii: ":")
-        i += 1
+        let isHeaderSeparator = separator.byte == UInt8(ascii: ":")
+        let depth = separator.depth
+        i += separator.width
 
         // Only a header separator may be followed by spaces. After `=` the value starts immediately:
         // a URL query and a cookie never space it out, and skipping here would let prose such as
         // "api_key= (missing)" read as a credential and swallow the rest of the line.
         var afterSpaces = i
-        while afterSpaces < bytes.count, bytes[afterSpaces] == UInt8(ascii: " ") { afterSpaces += 1 }
+        while afterSpaces < bytes.count, case let char = logicalByte(in: bytes, at: afterSpaces),
+              char.byte == space {
+            afterSpaces += char.width
+        }
         var quote: UInt8?
-        if afterSpaces < bytes.count,
-           bytes[afterSpaces] == UInt8(ascii: "\"") || bytes[afterSpaces] == UInt8(ascii: "'") {
-            quote = bytes[afterSpaces]
-            i = afterSpaces + 1
+        if afterSpaces < bytes.count, case let char = logicalByte(in: bytes, at: afterSpaces),
+           char.depth <= depth, char.byte == UInt8(ascii: "\"") || char.byte == UInt8(ascii: "'") {
+            quote = char.byte
+            i = afterSpaces + char.width
         } else if isHeaderSeparator {
             i = afterSpaces
         }
         let start = i
 
-        if let quote {
-            while i < bytes.count, bytes[i] != quote { i += 1 }
-        } else {
-            while i < bytes.count, !isValueTerminator(bytes[i]) { i += 1 }
+        while i < bytes.count {
+            let char = logicalByte(in: bytes, at: i)
+            if char.depth <= depth {
+                if let quote, char.byte == quote { break }
+                if quote == nil, isValueTerminator(char.byte) { break }
+            }
+            i += char.width
         }
         return start < i ? start ..< i : nil
+    }
+
+    // MARK: Percent escapes
+
+    private static let percent = UInt8(ascii: "%")
+    private static let space = UInt8(ascii: " ")
+
+    /// A value encoded more often than this is not one a URL builder produces by accident.
+    private static let maximumEncodingDepth = 4
+
+    /// One character as a URL decoder would see it: a raw byte, or a `%XX` escape, followed through
+    /// `%25` when the value was encoded more than once. `depth` is the number of layers (0 = raw).
+    private static func logicalByte(in bytes: [UInt8], at index: Int)
+        -> (byte: UInt8, width: Int, depth: Int)
+    {
+        let raw = bytes[index]
+        guard raw == percent, index + 2 < bytes.count,
+              let hi = hexValue(bytes[index + 1]), let lo = hexValue(bytes[index + 2]) else {
+            return (raw, 1, 0)
+        }
+        var value = hi << 4 | lo
+        var width = 3
+        var depth = 1
+        while value == percent, depth < maximumEncodingDepth, index + width + 1 < bytes.count,
+              let nextHi = hexValue(bytes[index + width]), let nextLo = hexValue(bytes[index + width + 1]) {
+            value = nextHi << 4 | nextLo
+            width += 2
+            depth += 1
+        }
+        return (value, width, depth)
+    }
+
+    /// Whether the character in front of `index` is a letter or digit, reading a percent escape that
+    /// ends there (`%26`, `%2526`) as the character it decodes to.
+    private static func precededByWordCharacter(_ bytes: [UInt8], at index: Int) -> Bool {
+        guard index > 0, isLetterOrDigit(bytes[index - 1]) else { return false }
+        guard index >= 3, let hi = hexValue(bytes[index - 2]), let lo = hexValue(bytes[index - 1]) else {
+            return true
+        }
+        var k = index - 3
+        var layers = 1
+        while bytes[k] != percent {
+            guard layers < maximumEncodingDepth, k >= 2,
+                  bytes[k - 1] == UInt8(ascii: "2"), bytes[k] == UInt8(ascii: "5") else { return true }
+            k -= 2
+            layers += 1
+        }
+        return isLetterOrDigit(hi << 4 | lo)
+    }
+
+    private static func hexValue(_ b: UInt8) -> UInt8? {
+        switch b {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"): return b - UInt8(ascii: "0")
+        case UInt8(ascii: "a")...UInt8(ascii: "f"): return b - UInt8(ascii: "a") + 10
+        case UInt8(ascii: "A")...UInt8(ascii: "F"): return b - UInt8(ascii: "A") + 10
+        default: return nil
+        }
     }
 
     /// The secret inside a URL's userinfo, given an index that may start `://`. `smb://user:pw@host`
