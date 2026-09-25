@@ -1666,6 +1666,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     private func rotateMuxerForProgramSwitch(to newIdx: Int) -> MP4SegmentMuxer? {
+        if checkShouldStop() { return nil }
         let finishedIdx = currentMuxerSegmentIndex
         finalizeSessionMuxerAndAdopt() // adopts finishedIdx, nils currentMuxer
         pendingVideoProgramSwitch = false
@@ -2286,6 +2287,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func advanceMuxer(to newIdx: Int) -> MP4SegmentMuxer? {
         guard let muxer = currentMuxer else { return nil }
+        // Audit SEG-5: an abandoned pump whose blocked read returns after stop() gets a packet from
+        // the NEW producer's position. Cutting on it would adopt this pump's partial segment under
+        // its full index; the teardown rule decides what happens to the in-flight segment instead.
+        if checkShouldStop() { return nil }
 
         switch muxer.cutFragmentForNextSegment(newIdx) {
         case .completed(let path, let bytesWritten):
