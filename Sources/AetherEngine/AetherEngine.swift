@@ -61,6 +61,9 @@ public final class AetherEngine: ObservableObject {
             if case .error = state {} else { errorInfo = nil }
             recomputePlaybackPhase()
             resolveLoadingStashedSeek(from: oldValue)
+            #if os(iOS) || os(tvOS)
+            settleOwedBackgroundAction()
+            #endif
         }
     }
 
@@ -873,6 +876,8 @@ public final class AetherEngine: ObservableObject {
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
     private var isBackgrounded = false
+    /// Audit CORE-2: didEnterBackground ran while a load or seek was in flight.
+    private var backgroundActionOwed = false
     #endif
     #if os(iOS)
     /// #127: pending grace-window teardown (sleep task + the background-task assertion holding it).
@@ -1032,6 +1037,13 @@ public final class AetherEngine: ObservableObject {
         }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
+    }
+
+    /// Audit CORE-2: a state in which `backgroundAction` cannot judge the pipeline yet, although one
+    /// exists (a load has its loopback server and AVIO connection, a seek its whole session). The
+    /// decision is owed until the state settles.
+    nonisolated static func backgroundActionIsOwed(state: PlaybackState) -> Bool {
+        state == .loading || state == .seeking
     }
 
     /// #127: how to execute a BackgroundAction. A PAUSED teardown on platforms with quick app switches
@@ -6934,48 +6946,12 @@ public final class AetherEngine: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self else { return }
-                #if os(iOS)
                 self.isBackgrounded = true
-                // Keep the video pipeline alive for PiP / background audio while the app stays running.
-                // Wedge-safe: a pause while backgrounded tears down via pause() below, so nothing crosses
-                // an idle suspension.
-                let keepAlive = Self.shouldKeepVideoAlive(enabled: self.backgroundPlaybackEnabled,
-                                                          pipActive: self.pictureInPictureActive,
-                                                          state: self.state)
-                let supportsGrace = true
-                #else
-                self.isBackgrounded = true
-                // tvOS: only an active PiP window defers the wedge-safe teardown (the system keeps the app
-                // running while its PiP window lives); no grace window, no background-audio case. The
-                // pictureInPictureActive didSet tears down the moment PiP ends while still backgrounded.
-                let keepAlive = Self.shouldKeepVideoAliveTV(enabled: self.backgroundPlaybackEnabled,
-                                                            pipActive: self.pictureInPictureActive)
-                let supportsGrace = false
-                #endif
-                let action = Self.backgroundAction(
-                    isAudioBackend: self.audioAVPlayerActive || self.audioHost != nil,
-                    hasSoftwareHost: self.softwareHost != nil,
-                    keepVideoAlive: keepAlive,
-                    pipActive: self.pictureInPictureActive,
-                    state: self.state
-                )
-                switch Self.backgroundStep(
-                    action: action,
-                    state: self.state,
-                    supportsGraceWindow: supportsGrace,
-                    graceSeconds: self.backgroundTeardownGraceSeconds
-                ) {
-                case .perform(.doNothing):
-                    return
-                case .perform(.enterSoftwareAudioOnly):
-                    self.softwareHost?.enterBackgroundAudioOnly()
-                case .perform(.teardownVideo):
-                    await self.teardownVideoForBackground()
-                case .deferTeardown(let seconds):
-                    #if os(iOS)
-                    self.scheduleBackgroundGraceTeardown(afterSeconds: seconds)
-                    #endif
-                }
+                // Audit CORE-2: a load or seek in flight has a pipeline (loopback server, AVIO
+                // connection, the item) but no settled state to judge it by, and it settles into
+                // `.playing` in the background with nothing left to look again. Owe it the decision.
+                self.backgroundActionOwed = Self.backgroundActionIsOwed(state: self.state)
+                await self.applyBackgroundPolicy()
             }
         }
         lifecycleObservers.append(bgObserver)
@@ -6995,6 +6971,7 @@ public final class AetherEngine: ObservableObject {
                 let returnedFromBackground = self.isBackgrounded
                 self.isBackgrounded = false
                 if returnedFromBackground { Self.clearPanelRefusalOnForegroundReturn() }
+                self.backgroundActionOwed = false
             }
         }
         lifecycleObservers.append(fgObserver)
@@ -7107,6 +7084,65 @@ public final class AetherEngine: ObservableObject {
         EngineLog.emit(
             "[AetherEngine] #597 background teardown: remote-HLS subtitle proxy released",
             category: .engine)
+    }
+
+    /// What didEnterBackground does with the running session. Runs again when a load or seek that
+    /// was in flight at that moment settles while the app is still in the background (audit CORE-2).
+    private func applyBackgroundPolicy() async {
+        guard isBackgrounded else { return }
+        #if os(iOS)
+        // Keep the video pipeline alive for PiP / background audio while the app stays running.
+        // Wedge-safe: a pause while backgrounded tears down via pause(), so nothing crosses
+        // an idle suspension.
+        let keepAlive = Self.shouldKeepVideoAlive(enabled: backgroundPlaybackEnabled,
+                                                  pipActive: pictureInPictureActive,
+                                                  state: state)
+        let supportsGrace = true
+        #else
+        // tvOS: only an active PiP window defers the wedge-safe teardown (the system keeps the app
+        // running while its PiP window lives); no grace window, no background-audio case. The
+        // pictureInPictureActive didSet tears down the moment PiP ends while still backgrounded.
+        let keepAlive = Self.shouldKeepVideoAliveTV(enabled: backgroundPlaybackEnabled,
+                                                    pipActive: pictureInPictureActive)
+        let supportsGrace = false
+        #endif
+        let action = Self.backgroundAction(
+            isAudioBackend: audioAVPlayerActive || audioHost != nil,
+            hasSoftwareHost: softwareHost != nil,
+            keepVideoAlive: keepAlive,
+            pipActive: pictureInPictureActive,
+            state: state
+        )
+        switch Self.backgroundStep(
+            action: action,
+            state: state,
+            supportsGraceWindow: supportsGrace,
+            graceSeconds: backgroundTeardownGraceSeconds
+        ) {
+        case .perform(.doNothing):
+            return
+        case .perform(.enterSoftwareAudioOnly):
+            softwareHost?.enterBackgroundAudioOnly()
+        case .perform(.teardownVideo):
+            await teardownVideoForBackground()
+        case .deferTeardown(let seconds):
+            #if os(iOS)
+            scheduleBackgroundGraceTeardown(afterSeconds: seconds)
+            #endif
+        }
+    }
+
+    /// Audit CORE-2: called from the `state` didSet. A load or seek that was in flight when the app
+    /// went to the background gets the background decision once it settles into a transport state.
+    private func settleOwedBackgroundAction() {
+        guard backgroundActionOwed, !Self.backgroundActionIsOwed(state: state) else { return }
+        backgroundActionOwed = false
+        guard isBackgrounded, state == .playing || state == .paused else { return }
+        EngineLog.emit(
+            "[AetherEngine] background: the load or seek in flight at didEnterBackground settled "
+            + "(state=\(state)); applying the background policy now (audit CORE-2)",
+            category: .engine)
+        Task { @MainActor [weak self] in await self?.applyBackgroundPolicy() }
     }
 
     private func teardownVideoForBackground() async {
