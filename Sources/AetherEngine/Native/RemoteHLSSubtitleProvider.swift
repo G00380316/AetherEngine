@@ -44,7 +44,13 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
          vttFillWaitSeconds: TimeInterval = defaultVTTFillWaitSeconds) {
         self.tracks = tracks
         self.staticMasterPlaylistBody = masterBody
-        self.programDuration = max(1, programDuration)
+        // `RemoteHLSSubtitleProxy.sumSegmentDurations` already refuses a non-finite, negative or
+        // absurd EXTINF sum before it reaches here; this is the last stop before the value leaves
+        // the provider (`segmentDuration(at:)`) for `wholeSecondsCovering`'s `Int(Double)`, which
+        // traps on `+inf` (audit NAT-1). Bounded again here so a caller that builds this provider
+        // directly, bypassing the proxy, cannot reintroduce the trap.
+        let finiteDuration = programDuration.isFinite ? programDuration : 1
+        self.programDuration = min(max(1, finiteDuration), RemoteHLSSubtitleProxy.maxProgramDurationSeconds)
         self.defaultHeaders = defaultHeaders
         self.vttFillWaitSeconds = vttFillWaitSeconds
         self.stores = tracks.map { _ in NativeSubtitleCueStore() }

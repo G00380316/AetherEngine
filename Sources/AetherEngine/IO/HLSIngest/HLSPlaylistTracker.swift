@@ -41,10 +41,13 @@ struct HLSPlaylistTracker {
 
     mutating func newSegments(in playlist: HLSMediaPlaylist) -> [HLSMediaSegment] {
         let windowStart = playlist.mediaSequence
-        let windowEnd = playlist.mediaSequence + playlist.segments.count // exclusive
+        // The parser rejects a MEDIA-SEQUENCE outside `0...Int.max/2` (audit NET-3), but the struct
+        // itself can be built directly (tests, or a future caller), so this combines with `&+`/`&-`
+        // rather than trapping on a value that slipped past that guard.
+        let windowEnd = playlist.mediaSequence &+ playlist.segments.count // exclusive
 
         func segments(from sequence: Int, markFirstDiscontinuity: Bool) -> [HLSMediaSegment] {
-            let startIndex = sequence - windowStart
+            let startIndex = sequence &- windowStart
             guard startIndex < playlist.segments.count else { return [] }
             var result = Array(playlist.segments[max(0, startIndex)...])
             if markFirstDiscontinuity, !result.isEmpty {
@@ -70,7 +73,7 @@ struct HLSPlaylistTracker {
                 taken += 1
                 seconds += segment.duration
             }
-            return windowEnd - taken
+            return windowEnd &- taken
         }
 
         guard let cursor = nextSequence else {
