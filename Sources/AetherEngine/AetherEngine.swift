@@ -1162,6 +1162,18 @@ public final class AetherEngine: ObservableObject {
     /// the embedded side-demuxer reader for every host, VOD and live, text and bitmap.
     var subtitleDrainTargets: [SubtitleChannel: Int32] = [:]
     var subtitleDrainerTask: Task<Void, Never>?
+    /// AE#628: the drain tick whose decode is running off the MainActor, nil while none is. At most
+    /// one at a time, because a channel's decoder is one AVCodecContext and the tick in flight owns
+    /// it; a tick asked for meanwhile sets `subtitleDrainTickRequested` and runs when it lands.
+    var subtitleDrainTickInFlight: Task<Void, Never>?
+    var subtitleDrainTickRequested = false
+    /// AE#628: bumped by `stopSubtitleDrainer`, so a batch still decoding for a stopped drainer
+    /// lands on a newer serial and is dropped instead of clearing a later tick's in-flight slot.
+    var subtitleDrainTickSerial: UInt64 = 0
+    #if DEBUG
+    /// AE#628: lets a test drive the drain tick with a real decoder but no playback session.
+    var subtitleDrainDecoderFactoryForTesting: ((Int32) -> EmbeddedSubtitleDecoder?)?
+    #endif
     /// SW-host sessions have no HLSVideoEngine; their tap fills this store instead.
     var softwareSubtitlePacketStore: SubtitlePacketStore?
     var subtitleDrainDecoders: [SubtitleChannel: EmbeddedSubtitleDecoder] = [:]
