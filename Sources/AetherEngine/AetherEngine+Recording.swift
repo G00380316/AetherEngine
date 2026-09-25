@@ -22,6 +22,8 @@ public extension AetherEngine {
     /// or a path that cannot be created. Anything that can only be discovered while writing arrives
     /// through `$recordingState` as `.failed`, never through both.
     func startRecording(to url: URL) async throws {
+        // The previous file is still being finalized off the main actor; it may be this path.
+        await recordingFinish?.value
         if case .recording(let progress) = recordingState {
             throw RecordingFailure.alreadyRecording(progress.url)
         }
@@ -62,6 +64,7 @@ public extension AetherEngine {
     /// Ends the recording and closes the file. Idempotent, and a no-op when nothing is recording.
     func stopRecording() async {
         endRecordingIfRunning(reason: .stoppedByHost)
+        await recordingFinish?.value
     }
 }
 
@@ -95,14 +98,25 @@ extension AetherEngine {
     }
 
     /// Ends a running recording, if any, for a reason that is not a failure. Idempotent.
+    ///
+    /// Audit REC-1: the writer drains up to the queue ceiling to disk and writes the trailer, which
+    /// used to run right here on the main actor. It runs detached now, and `.ended` is published
+    /// once it is done, because `.ended` promises a closed, playable file. A recording started in
+    /// the meantime owns the state, so the late `.ended` of this one is dropped.
     func endRecordingIfRunning(reason: RecordingEndReason) {
         guard let writer = activeRecording else { return }
         (activeRecordingHost as? LiveRecordingHost)?.setRecordingSink(nil)
         activeRecordingHost = nil
         activeRecording = nil
         stopRecordingProgressTimer()
-        writer.finish(reason: reason)
-        recordingState = .ended(reason)
+        let generation = recordingGeneration
+        let previous = recordingFinish
+        recordingFinish = Task { [weak self] in
+            await previous?.value
+            await Task.detached(priority: .utility) { writer.finish(reason: reason) }.value
+            guard let self, self.recordingGeneration == generation else { return }
+            self.recordingState = .ended(reason)
+        }
     }
 
     /// The writer's failure callback, bound to the recording it is built for. The writer reports
