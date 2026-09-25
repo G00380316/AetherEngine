@@ -622,6 +622,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// In-flight live reopen demuxer, registered before its blocking open so `stop()` can abort it
     /// (prevents orphan reconnect loops across channel zaps).
     var reopenDemuxer: Demuxer?
+    /// The #79 / #169 restart's replacement demuxer, from before its open until the restart installs
+    /// or drops it, so `stop()` can abort that open and the seek after it (audit SEG-3 follow-up).
+    private var restartReopenDemuxer: Demuxer?
     /// Fires on live program-boundary rebase: `(newShiftSeconds, seamOutputSeconds)`. AetherEngine
     /// defers applying the shift until playback crosses `seamOutputSeconds` so the clock doesn't jump.
     var onPlaylistShiftRebased: (@Sendable (Double, Double) -> Void)?
@@ -2450,12 +2453,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         ownedCodecParams = []
         let reopening = reopenDemuxer
         reopenDemuxer = nil
+        let restartReopening = restartReopenDemuxer
+        restartReopenDemuxer = nil
         // #199: factory-vended ingest reader feeding the current demuxer; session-owned, closed here.
         let reopenReader = reopenCustomReader
         reopenCustomReader = nil
         segmentPlan = []
         restartLock.unlock()
         reopening?.markClosed()
+        // The restart that opened it closes it once it sees the epoch moved.
+        restartReopening?.markClosed()
         // Close before waitForFinish: cancels the reader's FIFO so a pump parked in a blocking
         // custom-IO read unblocks (mirrors markClosed for URL demuxers).
         reopenReader?.close()
@@ -3817,6 +3824,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return parts.joined(separator: " ")
     }
 
+    /// A new demuxer for the #79 / #169 reopen, registered for `stop()` before its blocking open, or
+    /// nil when a stop already superseded the restart at `epoch`.
+    func registerRestartReopenDemuxer(epoch: UInt64) -> Demuxer? {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        guard sessionEpoch == epoch else { return nil }
+        let fresh = Demuxer()
+        restartReopenDemuxer = fresh
+        return fresh
+    }
+
+    private func unregisterRestartReopenDemuxer(_ dem: Demuxer) {
+        restartLock.lock()
+        if restartReopenDemuxer === dem { restartReopenDemuxer = nil }
+        restartLock.unlock()
+    }
+
     // Driven exclusively through requestRestart(at:) so bursts coalesce (#35).
     private func performRestart(at idx: Int) {
         restartGate.lock()
@@ -3875,9 +3899,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // AE#169 round 2 takes the same path when the pump exited BECAUSE the demuxer's read
             // threw: the connection is known-bad, so the revive gets one fresh connection instead
             // of seeking the demuxer that just failed.
-            if !isLiveSession, sideAudioDemuxer == nil {
+            if !isLiveSession, sideAudioDemuxer == nil, let fresh = registerRestartReopenDemuxer(epoch: epoch) {
                 let reopenStart = DispatchTime.now()
-                let fresh = Demuxer()
                 do {
                     // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
                     // the bulk of a 44 s wedge-reopen over WAN (#93 residual). The pass itself must
@@ -3900,6 +3923,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         category: .session
                     )
                 } catch {
+                    unregisterRestartReopenDemuxer(fresh)
                     fresh.close()
                     EngineLog.emit(
                         "[HLSVideoEngine] restart at idx=\(idx): "
@@ -3935,6 +3959,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // Re-validate: a stop() landing during waits bumped sessionEpoch; don't resurrect into a torn-down session.
         restartLock.lock()
+        if let freshDemuxer, restartReopenDemuxer === freshDemuxer { restartReopenDemuxer = nil }
         guard sessionEpoch == epoch else {
             restartLock.unlock()
             // #79: a reopened demuxer (replacing a wedged one) must not leak when stop() superseded us.
