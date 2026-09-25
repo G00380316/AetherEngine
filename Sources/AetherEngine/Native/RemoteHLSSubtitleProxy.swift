@@ -25,6 +25,8 @@ enum RemoteHLSSubtitleProxy {
         let server: HLSLocalServer
         let provider: RemoteHLSSubtitleProvider?
         let masterURL: URL
+        /// The NAME the served master declares for each injected track, in track order (audit NAT-2).
+        var renditionNames: [String] = []
 
         /// False when the relay stands alone and nothing was injected.
         var servesSubtitleRenditions: Bool { provider != nil }
@@ -127,10 +129,11 @@ enum RemoteHLSSubtitleProxy {
         let duration = try await programDuration(of: parsed, at: finalURL,
                                                  session: session, headers: httpHeaders)
 
-        let master = try RemoteHLSMasterRewrite.rewrite(
+        let rewritten = try RemoteHLSMasterRewrite.rewriteDeclaringNames(
             originPlaylist: body,
             originURL: finalURL,
             renditions: RemoteHLSSubtitleProvider.renditions(for: tracks))
+        let master = rewritten.master
 
         let provider = RemoteHLSSubtitleProvider(tracks: tracks, masterBody: master,
                                                  programDuration: duration,
@@ -161,7 +164,8 @@ enum RemoteHLSSubtitleProxy {
         // Decode up front: the rendition is fetched the moment the host selects it, and a whole-program
         // .vtt is fetched once and never again.
         provider.startFill()
-        return Prepared(server: server, provider: provider, masterURL: masterURL)
+        return Prepared(server: server, provider: provider, masterURL: masterURL,
+                        renditionNames: rewritten.renditionNames)
     }
 
     // MARK: - Playlist reads

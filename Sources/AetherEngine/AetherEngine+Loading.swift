@@ -644,10 +644,12 @@ extension AetherEngine {
             return nil
         }
         remoteHLSSubtitleProxy = prepared
+        // Audit NAT-2: the NAMEs the served master carries, which the selection and the legible-list
+        // filter match against, not the names the tracks asked for (the rewriter disambiguates and
+        // escapes them).
         injectedSubtitleRenditionNames = prepared.servesSubtitleRenditions
             ? Dictionary(
-                uniqueKeysWithValues: zip(tracks.map(\.externalID),
-                                          RemoteHLSSubtitleProvider.renditions(for: tracks).map(\.name)))
+                uniqueKeysWithValues: zip(tracks.map(\.externalID), prepared.renditionNames))
             : [:]
         #if os(iOS)
         // #86 / #227: a receiver cannot reach 127.0.0.1. Mounting while already AirPlaying has to hand out
