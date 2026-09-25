@@ -181,6 +181,22 @@ extension HLSVideoEngine {
         return s
     }
 
+    /// Same string read off the first SPS of Annex-B extradata (MPEG-TS, Annex-B Matroska), which
+    /// carries no hvcC. The SPS's profile_tier_level general part is byte for byte the hvcC header
+    /// bytes 1..12, and it is what the mp4 muxer builds the init's hvcC from, so the two agree.
+    /// Audit HLS-3: without this an 8-bit Main TS source fell back to the Main10 declaration.
+    static func hevcCodecsString(
+        fromAnnexBExtradata extradata: [UInt8],
+        sampleEntry: String = "hvc1"
+    ) -> String? {
+        guard let sps = VideoConfigRecord.splitAnnexBNALs(extradata)
+            .first(where: { $0.count > 2 && (($0[0] >> 1) & 0x3F) == 33 }) else { return nil }
+        // Past the 2-byte NAL header: one byte of vps_id / max_sub_layers / nesting, then the PTL.
+        let rbsp = H264SPS.unescape(Array(sps.dropFirst(2)))
+        guard rbsp.count >= 13 else { return nil }
+        return hevcCodecsString(fromConfigRecord: [1] + Array(rbsp[1...12]), sampleEntry: sampleEntry)
+    }
+
     /// RFC 6381 `avc1.PPCCLL` read straight off the avcC configuration record, which states all three
     /// bytes outright: AVCProfileIndication, profile_compatibility (the constraint_set flags) and
     /// AVCLevelIndication are bytes 1..3. Same reasoning as `hevcCodecsString`: the record is what the
@@ -239,8 +255,8 @@ extension HLSVideoEngine {
             profile: codecpar.pointee.profile, level: codecpar.pointee.level)
     }
 
-    /// Derive the plain-HEVC CODECS string from the source hvcC when parseable, else fall back to the
-    /// legacy Main10 form. Used only by the non-DV `.none` / `.profile82` branch; DV variants keep their
+    /// Derive the plain-HEVC CODECS string from the source hvcC (or the SPS of Annex-B extradata) when
+    /// parseable, else fall back to the legacy Main10 form. Used only by the non-DV `.none` / `.profile82` branch; DV variants keep their
     /// deliberate `hvc1.2.4` (Main10 PQ base) declaration.
     private func plainHEVCCodecs(
         codecpar: UnsafePointer<AVCodecParameters>,
@@ -249,7 +265,8 @@ extension HLSVideoEngine {
         if let ed = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
             let bytes = Array(UnsafeBufferPointer(
                 start: ed, count: Int(codecpar.pointee.extradata_size)))
-            if let derived = Self.hevcCodecsString(fromConfigRecord: bytes) {
+            if let derived = Self.hevcCodecsString(fromConfigRecord: bytes)
+                ?? Self.hevcCodecsString(fromAnnexBExtradata: bytes) {
                 return derived
             }
         }
