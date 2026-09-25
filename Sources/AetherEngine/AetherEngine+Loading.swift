@@ -338,10 +338,15 @@ extension AetherEngine {
         #endif
     }
 
-    func loadRemoteHLS(url: URL, options: LoadOptions, startPosition: Double? = nil) async throws {
+    func loadRemoteHLS(
+        url: URL, options: LoadOptions, startPosition: Double? = nil, generation: UInt64? = nil
+    ) async throws {
+        // Audit CORE-6: the generation of the load() that routed here, not a fresh read of it, so a
+        // stale caller cannot adopt its successor's generation.
+        if let generation { try checkLoadCurrent(generation) }
         playbackBackend = .native
         // #168 follow-up: detect a superseding load()/stop() between the carriage verdict and the reroute.
-        let bypassGeneration = loadGeneration
+        let bypassGeneration = generation ?? loadGeneration
 
         let host: NativeAVPlayerHost
         if let existing = nativeHost {
@@ -639,10 +644,12 @@ extension AetherEngine {
             return nil
         }
         remoteHLSSubtitleProxy = prepared
+        // Audit NAT-2: the NAMEs the served master carries, which the selection and the legible-list
+        // filter match against, not the names the tracks asked for (the rewriter disambiguates and
+        // escapes them).
         injectedSubtitleRenditionNames = prepared.servesSubtitleRenditions
             ? Dictionary(
-                uniqueKeysWithValues: zip(tracks.map(\.externalID),
-                                          RemoteHLSSubtitleProvider.renditions(for: tracks).map(\.name)))
+                uniqueKeysWithValues: zip(tracks.map(\.externalID), prepared.renditionNames))
             : [:]
         #if os(iOS)
         // #86 / #227: a receiver cannot reach 127.0.0.1. Mounting while already AirPlaying has to hand out
@@ -1595,14 +1602,18 @@ extension AetherEngine {
                         // AE#561: a frozen position across three reloads is the reload answering the
                         // same bytes three times. Offer the source to the engine's own decoder before
                         // the session is left dead.
-                        await self.escalateToSoftwarePath(
-                            SoftwarePathEscalation.Request(
-                                domain: SoftwarePathEscalation.mediaErrorDomain,
-                                code: 0,
-                                message: "item death at a frozen position, revive budget exhausted",
-                                positionSeconds: position.isFinite ? max(0, position) : 0
-                            )
+                        //
+                        // Its own task (audit CORE-1): the rebuild's load() cancels THIS task in its
+                        // prologue, and a rebuild left running in a cancelled task turns every
+                        // `try? await Task.sleep` poll on its way (the panel-switch wait) into a hot
+                        // spin on the main actor. Supersession is answered by the load generation.
+                        let request = SoftwarePathEscalation.Request(
+                            domain: SoftwarePathEscalation.mediaErrorDomain,
+                            code: 0,
+                            message: "item death at a frozen position, revive budget exhausted",
+                            positionSeconds: position.isFinite ? max(0, position) : 0
                         )
+                        Task { @MainActor [weak self] in await self?.escalateToSoftwarePath(request) }
                         return
                     }
                     EngineLog.emit(

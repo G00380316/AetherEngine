@@ -61,6 +61,9 @@ public final class AetherEngine: ObservableObject {
             if case .error = state {} else { errorInfo = nil }
             recomputePlaybackPhase()
             resolveLoadingStashedSeek(from: oldValue)
+            #if os(iOS) || os(tvOS)
+            settleOwedBackgroundAction()
+            #endif
         }
     }
 
@@ -873,6 +876,8 @@ public final class AetherEngine: ObservableObject {
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
     private var isBackgrounded = false
+    /// Audit CORE-2: didEnterBackground ran while a load or seek was in flight.
+    private var backgroundActionOwed = false
     #endif
     #if os(iOS)
     /// #127: pending grace-window teardown (sleep task + the background-task assertion holding it).
@@ -970,7 +975,8 @@ public final class AetherEngine: ObservableObject {
         mediaServicesResetPending = true
         EngineLog.emit(
             "[AetherEngine] #597 media services were \(lost ? "lost" : "reset"): every audio and "
-            + "video object this process holds is invalid, so the next load builds a fresh host",
+            + "video object this process holds is invalid, so the next load builds fresh native and "
+            + "audio-only players",
             category: .engine)
     }
 
@@ -978,6 +984,21 @@ public final class AetherEngine: ObservableObject {
         let pending = mediaServicesResetPending
         mediaServicesResetPending = false
         return pending
+    }
+
+    /// Audit CORE-4: the audio-only AVPlayer host is kept across every `stopInternal` on purpose (its
+    /// MPNowPlayingSession must persist between tracks), so after a reset nothing ever replaced it and
+    /// the next track was handed to a dead AVPlayer. Any load consumes the reset, so it is dropped
+    /// here whatever that load plays; the next audio load builds a fresh one with a fresh session.
+    func dropAudioPlayerHostAfterMediaServicesReset() {
+        guard let host = audioAVPlayerHost else { return }
+        host.stop()
+        audioAVPlayerHost = nil
+        audioAVPlayerActive = false
+        EngineLog.emit(
+            "[AetherEngine] #597 audio-only AVPlayer dropped after the media services reset; the next "
+            + "audio load builds a fresh one",
+            category: .engine)
     }
 
     /// Consume the one-shot host request at the load boundary, folded with PiP's mandatory handover.
@@ -1032,6 +1053,13 @@ public final class AetherEngine: ObservableObject {
         }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
+    }
+
+    /// Audit CORE-2: a state in which `backgroundAction` cannot judge the pipeline yet, although one
+    /// exists (a load has its loopback server and AVIO connection, a seek its whole session). The
+    /// decision is owed until the state settles.
+    nonisolated static func backgroundActionIsOwed(state: PlaybackState) -> Bool {
+        state == .loading || state == .seeking
     }
 
     /// #127: how to execute a BackgroundAction. A PAUSED teardown on platforms with quick app switches
@@ -1291,6 +1319,9 @@ public final class AetherEngine: ObservableObject {
     /// The route component feeding `activeRecording`, so the sink can be removed on stop. Weak: the
     /// producer or software host is owned by its session and may be torn down under us.
     weak var activeRecordingHost: AnyObject?
+
+    /// Which recording a writer failure belongs to (audit CORE-5). Bumped once per writer.
+    var recordingGeneration: UInt64 = 0
 
     /// Republishes `recordingState` progress at 1 Hz while a recording runs.
     var recordingProgressTimer: Timer?
@@ -3648,9 +3679,10 @@ public final class AetherEngine: ObservableObject {
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
+        let mediaServicesWereReset = consumeMediaServicesReset()
         let preserveNativeHost = Self.shouldPreserveNativeHostAcrossLoad(
             backend: playbackBackend, nativeHostSurvives: nativeHost != nil,
-            mediaServicesWereReset: consumeMediaServicesReset())
+            mediaServicesWereReset: mediaServicesWereReset)
         // AE#158: while a PiP window is live, or when the host asked for it, the running item must
         // survive this load's teardown; the loopback host.load callsite finishes the handover
         // (inPlaceSwap). The host request is consumed here so it can affect only this load. The
@@ -3663,6 +3695,7 @@ public final class AetherEngine: ObservableObject {
         // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
         stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
+        if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
         // Scrub/seek/producer-restart never route through load(), so mid-stream #93 detection stays armed.
         hasRenderedFirstFrameMirror.set(false)
@@ -3802,6 +3835,9 @@ public final class AetherEngine: ObservableObject {
         // below can activate the session: AVKit on the native/remote-HLS paths, activateRendererAudioSession()
         // on the SW and audio paths. The task is short and typically already complete, so this rarely suspends.
         await awaitAudioSessionCategoryConfigured()
+        // Audit CORE-6: the first suspension point. Two loads issued back to back right after init
+        // both wait on the same category task, and the older one must not resume as the current one.
+        try checkLoadCurrent(gen)
 
         // nativeRemoteHLS: skip probe + loopback; play HLS URL directly with AVPlayer (Jellyfin already serves HLS).
         // Routed before the probe because we never demux the m3u8.
@@ -3829,10 +3865,13 @@ public final class AetherEngine: ObservableObject {
                 // Live keeps the no-initial-seek contract every live caller relies on, so its anchor
                 // stays nil even when the host passes one.
                 try await loadRemoteHLS(url: url, options: options,
-                                        startPosition: options.isLive ? nil : startPosition)
+                                        startPosition: options.isLive ? nil : startPosition,
+                                        generation: gen)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                // A failure that lands after a successor took over is not this session's to publish.
+                if loadGeneration != gen { throw CancellationError() }
                 // Without this catch, a throwing loadRemoteHLS would strand state at .loading forever.
                 publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
@@ -4090,10 +4129,12 @@ public final class AetherEngine: ObservableObject {
             registerDeclaredExternalSubtitles(loadedOptions)
             recordStartupCheckpoint(.routed, generation: startupGen)   // #361
             do {
-                try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition)
+                try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition,
+                                        generation: gen)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if loadGeneration != gen { throw CancellationError() }
                 publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
             }
@@ -4240,6 +4281,7 @@ public final class AetherEngine: ObservableObject {
                 // Superseded: successor owns state.
                 throw CancellationError()
             } catch {
+                if loadGeneration != gen { throw CancellationError() }
                 publishLoadFailure(error)
                 throw error
             }
@@ -4773,6 +4815,9 @@ public final class AetherEngine: ObservableObject {
             // Superseded.
             throw CancellationError()
         } catch {
+            // A host or open that failed because stop()/load() tore it down mid-flight throws its own
+            // error before the post-load generation check; the successor owns the state (audit CORE-1).
+            if loadGeneration != gen { throw CancellationError() }
             // AE#246: the load-time probe failed for a reason that was not the HLS classification, so the
             // AE#154 check above saw an inconclusive failure and this load fell through to the loopback
             // path with no preopened demuxer. The session's own open is then the first one to read the
@@ -6677,6 +6722,13 @@ public final class AetherEngine: ObservableObject {
         liveOutageSourceGivenUp = false
         liveReloadWatchdogTask?.cancel()
         liveReloadWatchdogTask = nil
+        // Audit CORE-1: the #65/#93 recovery rungs belong to the session being torn down. Left
+        // running across a background teardown, the item-death confirm could start a software
+        // rebuild seconds later with the app suspended.
+        stallReengageTask?.cancel()
+        stallReengageTask = nil
+        itemDeathConfirmTask?.cancel()
+        itemDeathConfirmTask = nil
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
         // #356: counterpart to the install line, because a session-preserving reload lands here
         // too. The host sees its stream finish and has to re-install; without this the device log
@@ -6915,48 +6967,12 @@ public final class AetherEngine: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self else { return }
-                #if os(iOS)
                 self.isBackgrounded = true
-                // Keep the video pipeline alive for PiP / background audio while the app stays running.
-                // Wedge-safe: a pause while backgrounded tears down via pause() below, so nothing crosses
-                // an idle suspension.
-                let keepAlive = Self.shouldKeepVideoAlive(enabled: self.backgroundPlaybackEnabled,
-                                                          pipActive: self.pictureInPictureActive,
-                                                          state: self.state)
-                let supportsGrace = true
-                #else
-                self.isBackgrounded = true
-                // tvOS: only an active PiP window defers the wedge-safe teardown (the system keeps the app
-                // running while its PiP window lives); no grace window, no background-audio case. The
-                // pictureInPictureActive didSet tears down the moment PiP ends while still backgrounded.
-                let keepAlive = Self.shouldKeepVideoAliveTV(enabled: self.backgroundPlaybackEnabled,
-                                                            pipActive: self.pictureInPictureActive)
-                let supportsGrace = false
-                #endif
-                let action = Self.backgroundAction(
-                    isAudioBackend: self.audioAVPlayerActive || self.audioHost != nil,
-                    hasSoftwareHost: self.softwareHost != nil,
-                    keepVideoAlive: keepAlive,
-                    pipActive: self.pictureInPictureActive,
-                    state: self.state
-                )
-                switch Self.backgroundStep(
-                    action: action,
-                    state: self.state,
-                    supportsGraceWindow: supportsGrace,
-                    graceSeconds: self.backgroundTeardownGraceSeconds
-                ) {
-                case .perform(.doNothing):
-                    return
-                case .perform(.enterSoftwareAudioOnly):
-                    self.softwareHost?.enterBackgroundAudioOnly()
-                case .perform(.teardownVideo):
-                    await self.teardownVideoForBackground()
-                case .deferTeardown(let seconds):
-                    #if os(iOS)
-                    self.scheduleBackgroundGraceTeardown(afterSeconds: seconds)
-                    #endif
-                }
+                // Audit CORE-2: a load or seek in flight has a pipeline (loopback server, AVIO
+                // connection, the item) but no settled state to judge it by, and it settles into
+                // `.playing` in the background with nothing left to look again. Owe it the decision.
+                self.backgroundActionOwed = Self.backgroundActionIsOwed(state: self.state)
+                await self.applyBackgroundPolicy()
             }
         }
         lifecycleObservers.append(bgObserver)
@@ -6976,6 +6992,7 @@ public final class AetherEngine: ObservableObject {
                 let returnedFromBackground = self.isBackgrounded
                 self.isBackgrounded = false
                 if returnedFromBackground { Self.clearPanelRefusalOnForegroundReturn() }
+                self.backgroundActionOwed = false
             }
         }
         lifecycleObservers.append(fgObserver)
@@ -7088,6 +7105,65 @@ public final class AetherEngine: ObservableObject {
         EngineLog.emit(
             "[AetherEngine] #597 background teardown: remote-HLS subtitle proxy released",
             category: .engine)
+    }
+
+    /// What didEnterBackground does with the running session. Runs again when a load or seek that
+    /// was in flight at that moment settles while the app is still in the background (audit CORE-2).
+    private func applyBackgroundPolicy() async {
+        guard isBackgrounded else { return }
+        #if os(iOS)
+        // Keep the video pipeline alive for PiP / background audio while the app stays running.
+        // Wedge-safe: a pause while backgrounded tears down via pause(), so nothing crosses
+        // an idle suspension.
+        let keepAlive = Self.shouldKeepVideoAlive(enabled: backgroundPlaybackEnabled,
+                                                  pipActive: pictureInPictureActive,
+                                                  state: state)
+        let supportsGrace = true
+        #else
+        // tvOS: only an active PiP window defers the wedge-safe teardown (the system keeps the app
+        // running while its PiP window lives); no grace window, no background-audio case. The
+        // pictureInPictureActive didSet tears down the moment PiP ends while still backgrounded.
+        let keepAlive = Self.shouldKeepVideoAliveTV(enabled: backgroundPlaybackEnabled,
+                                                    pipActive: pictureInPictureActive)
+        let supportsGrace = false
+        #endif
+        let action = Self.backgroundAction(
+            isAudioBackend: audioAVPlayerActive || audioHost != nil,
+            hasSoftwareHost: softwareHost != nil,
+            keepVideoAlive: keepAlive,
+            pipActive: pictureInPictureActive,
+            state: state
+        )
+        switch Self.backgroundStep(
+            action: action,
+            state: state,
+            supportsGraceWindow: supportsGrace,
+            graceSeconds: backgroundTeardownGraceSeconds
+        ) {
+        case .perform(.doNothing):
+            return
+        case .perform(.enterSoftwareAudioOnly):
+            softwareHost?.enterBackgroundAudioOnly()
+        case .perform(.teardownVideo):
+            await teardownVideoForBackground()
+        case .deferTeardown(let seconds):
+            #if os(iOS)
+            scheduleBackgroundGraceTeardown(afterSeconds: seconds)
+            #endif
+        }
+    }
+
+    /// Audit CORE-2: called from the `state` didSet. A load or seek that was in flight when the app
+    /// went to the background gets the background decision once it settles into a transport state.
+    private func settleOwedBackgroundAction() {
+        guard backgroundActionOwed, !Self.backgroundActionIsOwed(state: state) else { return }
+        backgroundActionOwed = false
+        guard isBackgrounded, state == .playing || state == .paused else { return }
+        EngineLog.emit(
+            "[AetherEngine] background: the load or seek in flight at didEnterBackground settled "
+            + "(state=\(state)); applying the background policy now (audit CORE-2)",
+            category: .engine)
+        Task { @MainActor [weak self] in await self?.applyBackgroundPolicy() }
     }
 
     private func teardownVideoForBackground() async {

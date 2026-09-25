@@ -2544,8 +2544,9 @@ extension AetherEngine {
     /// the host registered it under, but the selection is an `AVMediaSelection` one, so AVPlayer renders
     /// it and it survives leaving the view hierarchy.
     ///
-    /// Matched by NAME: the rewriter guarantees uniqueness within the group (it disambiguates against the
-    /// origin's own names), and `AVMediaSelectionOption.displayName` is the rendition's NAME attribute.
+    /// Matched by NAME: `name` is the one the served master declares (`RemoteHLSMasterRewrite`
+    /// disambiguates it against the origin's names and every other sidecar, and escapes it), and
+    /// `AVMediaSelectionOption.displayName` is the rendition's NAME attribute.
     /// A miss leaves the previous selection alone and says so rather than silently reporting success.
     func selectInjectedSubtitleRendition(id: Int, name: String) {
         guard let item = currentAVPlayer?.currentItem else { return }

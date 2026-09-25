@@ -731,7 +731,16 @@ extension AetherEngine {
                 "[AetherEngine] live-only edge snap: clockTarget=\(String(format: "%.1f", clockTarget))",
                 category: .engine
             )
+            let loadGen = loadGeneration
+            let seekGen = currentSeekGeneration
             await host.seek(to: clockTarget)
+            // Audit CORE-7: the native host survives a native-to-native zap, so this seek can finish
+            // against the next channel's item, and a scrub started meanwhile owns the clock too.
+            guard loadGeneration == loadGen, currentSeekGeneration == seekGen else {
+                EngineLog.emit("[AetherEngine] live-only edge snap superseded; clock left to the successor",
+                               category: .engine)
+                return
+            }
             nativeClockSeconds = clockTarget
             clock.currentTime = clockTarget + playlistShiftSeconds
             clock.sourceTime = currentTime

@@ -86,6 +86,27 @@ struct Issue357BackgroundTeardownSelectionTests {
         #expect(selection.subtitles.reapplyOrdinalMatchesActiveTrack)
     }
 
+    /// Audit CORE-3: on iOS a `pause()` while backgrounded re-arms the grace window after the first
+    /// teardown, and its expiry tears down again. That second capture reads what `stopInternal`
+    /// already wiped and used to replace the good snapshot with it.
+    @Test("a second teardown before the reload keeps the selection the first one parked")
+    func secondTeardownKeepsParkedSelection() throws {
+        let engine = try AetherEngine()
+        let track = engine.addExternalSubtitleTrack(makeTrack("picked"))
+        engine.selectSubtitleTrack(index: track.id)
+        engine.activeAudioTrackIndex = 2
+        engine.activeDiscTitleID = 7
+
+        backgroundTeardown(engine)
+        backgroundTeardown(engine)
+
+        let selection = engine.consumeReloadSelection()
+        #expect(selection.subtitles.activeSubtitleTrackIndex == track.id)
+        #expect(selection.subtitles.hostExplicitSubtitleAction)
+        #expect(selection.audioTrackIndex == 2)
+        #expect(selection.discTitleID == 7)
+    }
+
     @Test("a pick made after the teardown is newer intent and wins over the snapshot")
     func newerIntentWins() throws {
         let engine = try AetherEngine()

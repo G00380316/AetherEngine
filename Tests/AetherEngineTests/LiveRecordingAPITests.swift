@@ -105,4 +105,36 @@ struct LiveRecordingAPITests {
         await engine.stopRecording()
         #expect(engine.recordingState == .ended(.stoppedByHost))
     }
+
+    /// Audit CORE-5: the writer reports a failure from its teardown queue, after the host may have
+    /// ended that recording and started the next.
+    @Test("a late failure of the previous recording does not end the next one")
+    func staleFailureDoesNotEndTheNextRecording() async throws {
+        let engine = try AetherEngine()
+        let host = AetherEngine.TestRecordingHost()
+        let first = tempURL()
+        let second = tempURL()
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        try engine._testStartRecordingWithStubHost(to: first, host: host)
+        let firstGeneration = engine.recordingGeneration
+        engine.endRecordingIfRunning(reason: .sessionEnded)
+        try engine._testStartRecordingWithStubHost(to: second, host: host)
+        let running = engine.activeRecording
+
+        engine.recordingDidFail(.writeTooSlow(bytesWritten: 1, queuedBytesDropped: 1),
+                                generation: firstGeneration)
+        #expect(engine.activeRecording === running)
+        #expect(host.installedSink != nil)
+        #expect({ if case .recording = engine.recordingState { return true }; return false }())
+
+        engine.recordingDidFail(.writeTooSlow(bytesWritten: 1, queuedBytesDropped: 1),
+                                generation: engine.recordingGeneration)
+        #expect(engine.activeRecording == nil)
+        #expect(engine.recordingState == .failed(.writeTooSlow(bytesWritten: 1, queuedBytesDropped: 1)))
+        running?.finish(reason: .sessionEnded)
+    }
 }
