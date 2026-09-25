@@ -114,7 +114,7 @@ extension AetherEngine {
         // #112 rework: every embedded track (text and bitmap, VOD and live) is served by the
         // playhead-paced drainer from the session's packet store. The producer keeps all subtitle
         // streams from init, so selection needs no side demuxer, no positioning, and no recovery:
-        // the immediate drainer tick backfills the window around the playhead synchronously.
+        // the immediate drainer tick backfills the window around the playhead (off the MainActor, AE#628).
         cancelSidecarTask()
         isSubtitleActive = true
         subtitleCues = []
@@ -135,7 +135,7 @@ extension AetherEngine {
         isLoadingSubtitles = false
         EngineLog.emit(
             "[AetherEngine] overlay fed by packet-store drainer for stream=\(index) "
-            + "(backfilled \(subtitleCues.count) cues)",
+            + "(backfill requested)",
             category: .engine
         )
     }
@@ -193,7 +193,7 @@ extension AetherEngine {
         cancelSidecarTask(channel: .secondary)
 
         // #112 rework: secondary embedded tracks ride the same packet-store drainer on their
-        // own channel; the immediate tick backfills synchronously.
+        // own channel; the immediate tick backfills it.
         isSecondarySubtitleActive = true
         secondarySubtitleCues = []
         pgsStaleArrivalGates[.secondary]?.reset()   // #100
@@ -240,20 +240,53 @@ extension AetherEngine {
 
     /// Build a fresh overlay decoder for the stream on whichever host owns the session demuxer.
     func makeSubtitleDrainDecoder(streamIndex: Int32) -> EmbeddedSubtitleDecoder? {
-        nativeVideoSession?.makeOverlayDecoder(streamIndex: streamIndex)
+        #if DEBUG
+        if let factory = subtitleDrainDecoderFactoryForTesting { return factory(streamIndex) }
+        #endif
+        return nativeVideoSession?.makeOverlayDecoder(streamIndex: streamIndex)
             ?? softwareHost?.makeOverlayDecoder(streamIndex: streamIndex)
     }
 
-    /// Start (or keep) the 500ms drain loop. Performs an immediate tick so a fresh selection
-    /// backfills from the packet store synchronously, matching the #32 tap-overlay UX.
+    /// Start (or keep) the 500ms drain loop. Requests an immediate tick so a fresh selection
+    /// backfills from the packet store without waiting out the first interval (#32 tap-overlay UX).
     func startSubtitleDrainer() {
-        subtitleDrainTick()
+        requestSubtitleDrainTick()
         guard subtitleDrainerTask == nil else { return }
         subtitleDrainerTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: AetherEngine.subtitleDrainTickNanoseconds)
                 guard let self, !Task.isCancelled else { return }
-                self.subtitleDrainTick()
+                self.requestSubtitleDrainTick()
+            }
+        }
+    }
+
+    /// AE#628: the drain loop's tick. Plans on the MainActor, decodes the batch off it, and applies
+    /// the result back on it. A bitmap decode expands a full-canvas indexed plane per display set,
+    /// and a selection or seek backfills a whole window of them at once; on the MainActor that was
+    /// the top frame of the report's profile. A tick asked for while one is in flight is queued,
+    /// not run beside it: the decoders are not reentrant.
+    func requestSubtitleDrainTick() {
+        guard subtitleDrainTickInFlight == nil else {
+            subtitleDrainTickRequested = true
+            return
+        }
+        guard let work = prepareSubtitleDrainTick() else { return }
+        let handoff = work.decodeHandoff
+        guard !handoff.isEmpty else {
+            finishSubtitleDrainTick(work, events: handoff.decode())
+            return
+        }
+        subtitleDrainTickSerial &+= 1
+        let serial = subtitleDrainTickSerial
+        subtitleDrainTickInFlight = Task { [weak self] in
+            let events = await Task.detached(priority: .userInitiated) { handoff.decode() }.value
+            guard let self, self.subtitleDrainTickSerial == serial else { return }
+            self.subtitleDrainTickInFlight = nil
+            self.finishSubtitleDrainTick(work, events: events)
+            if self.subtitleDrainTickRequested {
+                self.subtitleDrainTickRequested = false
+                self.requestSubtitleDrainTick()
             }
         }
     }
@@ -261,6 +294,9 @@ extension AetherEngine {
     func stopSubtitleDrainer(reason: SubtitleDrainStopReason) {
         subtitleDrainerTask?.cancel()
         subtitleDrainerTask = nil
+        subtitleDrainTickInFlight = nil   // AE#628: its batch lands on a stale serial and is dropped
+        subtitleDrainTickRequested = false
+        subtitleDrainTickSerial &+= 1
         subtitleDrainDecoders.removeAll()
         subtitleDrainCursors.removeAll()
         subtitleDrainLastTickUptime = nil   // #271
@@ -289,8 +325,22 @@ extension AetherEngine {
         activeSubtitlePacketStore?.setProtectedStreams(Set(subtitleDrainTargets.values))
     }
 
+    /// The synchronous tick: plan, decode and apply in one go on the MainActor. Kept for the
+    /// teletext page change and for tests; the drain loop goes through `requestSubtitleDrainTick`,
+    /// which decodes off the MainActor (AE#628). Queued rather than run while that one is in flight.
     func subtitleDrainTick() {
-        guard !subtitleDrainTargets.isEmpty, let store = activeSubtitlePacketStore else { return }
+        guard subtitleDrainTickInFlight == nil else {
+            subtitleDrainTickRequested = true
+            return
+        }
+        guard let work = prepareSubtitleDrainTick() else { return }
+        finishSubtitleDrainTick(work, events: work.decodeHandoff.decode())
+    }
+
+    /// AE#628: the MainActor half before the decode. Plans every channel, states the ticks that
+    /// decode nothing (idle, no decoder), and hands back what the decode needs.
+    func prepareSubtitleDrainTick() -> SubtitleDrainTickWork? {
+        guard !subtitleDrainTargets.isEmpty, let store = activeSubtitlePacketStore else { return nil }
         store.setProtectedStreams(Set(subtitleDrainTargets.values))   // #166: re-assert protection
         let playhead = sourceTime
         // #416: the pump is rendering the frame at the playhead, so it has necessarily read from
@@ -304,7 +354,7 @@ extension AetherEngine {
         let tickUptime = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
         let elapsed = subtitleDrainLastTickUptime.map { tickUptime - $0 } ?? 0
         subtitleDrainLastTickUptime = tickUptime
-        var prefetchNeedsReanchor = false
+        var work = SubtitleDrainTickWork(store: store, playhead: playhead)
         for (channel, streamIndex) in subtitleDrainTargets {
             let hadCursor = subtitleDrainCursors[channel] != nil
             let plan = SubtitleOverlayDrainer.drainPlan(
@@ -315,7 +365,7 @@ extension AetherEngine {
                 jumpThreshold: Self.subtitleDrainJumpThresholdSeconds,
                 elapsedSinceLastPlan: elapsed)
             if Self.subtitleForwardPrefetchNeedsReanchor(plan: plan, hadCursor: hadCursor) {
-                prefetchNeedsReanchor = true
+                work.prefetchNeedsReanchor = true
             }
             let window: (from: Double, through: Double)
             // #250: a reset starts a fresh contiguous decoded run; a steady tick extends the one
@@ -419,6 +469,40 @@ extension AetherEngine {
                 gapHoldTicksLeft = held?.harvestGapAt == cut.at
                     ? (held?.harvestGapTicksLeft ?? 0) - 1 : Self.subtitleDrainHarvestGapTicks
             }
+            work.channels.append(SubtitleDrainChannelWork(
+                channel: channel, streamIndex: streamIndex, plan: plan, isReset: isReset,
+                window: window, coverageStart: coverageStart, retained: retained,
+                decoder: decoder, entries: entries, batchEnd: batchEnd, decodeEnd: decodeEnd,
+                gapHoldAt: gapHoldAt, gapHoldSequence: gapHoldSequence,
+                gapHoldTicksLeft: gapHoldTicksLeft))
+        }
+        return work
+    }
+
+    /// AE#628: the MainActor half after the decode. `events` holds one decoded result per packet
+    /// the prepare half handed out, channel by channel. A channel re-selected, cleared or rebuilt
+    /// while its batch decoded is skipped: its cursor did not move, so the next tick redoes it.
+    func finishSubtitleDrainTick(_ work: SubtitleDrainTickWork,
+                                 events decodedByChannel: [[EmbeddedSubtitleDecoder.SubtitleEvent?]]) {
+        let store = work.store
+        let playhead = work.playhead
+        guard activeSubtitlePacketStore === store else { return }
+        for (job, events) in zip(work.channels, decodedByChannel) {
+            let channel = job.channel
+            let streamIndex = job.streamIndex
+            guard subtitleDrainTargets[channel] == streamIndex,
+                  subtitleDrainDecoders[channel] === job.decoder else { continue }
+            let plan = job.plan
+            let isReset = job.isReset
+            let window = job.window
+            let coverageStart = job.coverageStart
+            let retained = job.retained
+            let entries = job.entries
+            let batchEnd = job.batchEnd
+            let decodeEnd = job.decodeEnd
+            let gapHoldAt = job.gapHoldAt
+            let gapHoldSequence = job.gapHoldSequence
+            let gapHoldTicksLeft = job.gapHoldTicksLeft
             // #271: bind the channel's cue array ONCE for the whole batch. `subtitleCues` is
             // `@Published`, whose wrapper exposes get/set and no `_modify`, so passing it inout per
             // event both copy-on-writes the array and publishes it: every consumer then walks a
@@ -444,8 +528,8 @@ extension AetherEngine {
             // #362: the cursor's own harvest sequence rides with it, so the next tick can tell
             // whether its first entry was read by the same run or is the far side of a hole.
             var lastDecodedSequence = subtitleDrainCursors[channel]?.lastDecodedSequence ?? 0
-            for entry in entries[..<decodeEnd] {
-                if let event = Self.decodeStoredSubtitlePacket(entry, with: decoder) {
+            for (entry, decoded) in zip(entries[..<decodeEnd], events) {
+                if let event = decoded {
                     tally.events += 1
                     tally.cues += event.cues.count
                     // A cue-less event still matters: a PGS clear composition carries only
@@ -583,7 +667,7 @@ extension AetherEngine {
         // #151: a jump (seek / producer re-anchor) moves the drain window out from under the
         // prefetcher's read position; restart it at the new playhead. Once per tick, not per
         // channel: both channels ride the same playhead and the same side demuxer.
-        if prefetchNeedsReanchor { startSubtitleForwardPrefetcher() }
+        if work.prefetchNeedsReanchor { startSubtitleForwardPrefetcher() }
         // #125: the packet store is NOT time-pruned here. A trailing playhead-relative prune
         // (was: playhead - retentionSeconds) evicted packets a backward seek could still land on:
         // a backward jump into segment-cache-resident content is served without a producer restart,
@@ -2601,6 +2685,52 @@ extension AetherEngine {
             EngineLog.emit(
                 "[AetherEngine] AE#154: remote-HLS legible select ordinal=\(ordinal) (\(group.options[ordinal].displayName))",
                 category: .engine)
+        }
+    }
+}
+
+/// AE#628: one channel's share of a drain tick, everything the decode needs and everything the
+/// apply half reads back. Built and consumed on the MainActor; only `decodeHandoff` leaves it.
+struct SubtitleDrainChannelWork {
+    let channel: SubtitleChannel
+    let streamIndex: Int32
+    let plan: SubtitleDrainPlan
+    let isReset: Bool
+    let window: (from: Double, through: Double)
+    let coverageStart: Double?
+    let retained: SubtitleResolutionStatement.Retention?
+    let decoder: EmbeddedSubtitleDecoder
+    let entries: [StoredSubtitlePacket]
+    let batchEnd: Int
+    let decodeEnd: Int
+    let gapHoldAt: Double?
+    let gapHoldSequence: UInt64
+    let gapHoldTicksLeft: Int
+}
+
+struct SubtitleDrainTickWork {
+    let store: SubtitlePacketStore
+    let playhead: Double
+    var channels: [SubtitleDrainChannelWork] = []
+    var prefetchNeedsReanchor = false
+
+    var decodeHandoff: SubtitleDrainDecodeHandoff {
+        SubtitleDrainDecodeHandoff(jobs: channels.map { ($0.decoder, $0.entries[..<$0.decodeEnd]) })
+    }
+}
+
+/// AE#628: the decode half of a drain tick, the only part that runs off the MainActor. Unchecked
+/// because a decoder wraps an AVCodecContext; sound because a decoder is only ever driven by the
+/// one tick in flight (`subtitleDrainTickInFlight`), and a decoder the channel dropped meanwhile is
+/// never read again once its batch lands.
+struct SubtitleDrainDecodeHandoff: @unchecked Sendable {
+    let jobs: [(decoder: EmbeddedSubtitleDecoder, packets: ArraySlice<StoredSubtitlePacket>)]
+
+    var isEmpty: Bool { jobs.allSatisfy { $0.packets.isEmpty } }
+
+    func decode() -> [[EmbeddedSubtitleDecoder.SubtitleEvent?]] {
+        jobs.map { job in
+            job.packets.map { AetherEngine.decodeStoredSubtitlePacket($0, with: job.decoder) }
         }
     }
 }

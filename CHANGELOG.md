@@ -153,6 +153,10 @@ the public-API contract.
 - **The live ingest FIFO no longer re-copies its whole buffer on every read** (audit NET-8).
 - **Stripping ASS override tags from a cue is linear.** A cue of 200k tags took 525 s and now takes
   0.15 s on the PiP and AirPlay subtitle track (audit SUB-1).
+- **PGS and other bitmap subtitles decode off the main thread.** The overlay drain and the PiP/AirPlay
+  OCR worker used to expand every display set on the MainActor, including the whole window a
+  selection or seek backfills at once. Each bitmap is also about 4x cheaper to convert (a full
+  1080p set measured 5 ms before, 1.3 ms after, in a release build on an M1) (AE#628).
 
 ## [7.16.1] - 2026-09-24
 
