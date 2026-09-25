@@ -29,9 +29,22 @@ the public-API contract.
   no longer inject header lines and IPv6 hosts get a valid Host header (audit DMX-3, DMX-4).
 - **A sidecar subtitle name can no longer add lines to the served HLS master.** Line breaks and other
   control characters in a name or language are neutralised (audit NAT-6).
+- **A crafted or broken source timestamp no longer crashes the app.** Demuxed pts/dts beyond
+  plus or minus 2^60 are treated as unset, and the segment pump's timestamp arithmetic saturates
+  instead of trapping (audit SEG-1).
+- **The Dolby Vision profile check can no longer read a whole file while playback is starting.** It
+  stops after a fixed number of packets from any stream, or 64 MiB (audit BIT-2).
 
 ### Fixed
 
+- **Closing the player during a scrub restart no longer spins segment requests at full CPU**
+  (audit SEG-3).
+- **A re-cut segment can no longer be dropped by a request that is reading it at the same moment**,
+  and a replaced pump no longer stores a cut-off segment (audit SEG-4, SEG-5).
+- **Segments with a 256 to 511 byte first NAL are covered by the AE#561 repair**, instead of being
+  mistaken for Annex B and failing with -19602 (audit BIT-1).
+- **Matroska H.264 timing repair no longer gives two frames the same time at a GOP boundary**
+  (audit BIT-3).
 - **A slow source no longer ends a healthy session with "Source read failed" after a few scrubs.**
   When the engine replaced a producer stuck in a read, the old producer's aborted read was treated as
   the session failing: it spent the read-error revive budget, forced an extra reconnect and re-seeked
@@ -84,6 +97,11 @@ the public-API contract.
 - **The accept loop backs off when the process runs out of file descriptors**, instead of spinning a
   core and flooding the log (audit NET-13).
 - **The server's stop line names the port it released** (audit NET-12).
+
+### Performance
+
+- **Faster first segment after a seek on TrueHD sources, and less CPU for HDR10+ detection on sources
+  without HDR10+** (audit SEG-6, BIT-4).
 
 ## [7.16.1] - 2026-09-24
 
