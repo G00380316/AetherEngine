@@ -226,6 +226,10 @@ public final class Demuxer: @unchecked Sendable {
     private let accessLock = NSLock()
 
     private var avioProvider: AVIOProvider?
+    /// Audit HLS-2: `markClosed()` before the provider exists used to be a no-op, so a teardown
+    /// that raced an in-flight open let it finish its connect and probe.
+    private let closeRequestLock = NSLock()
+    private var closeRequested = false
     private var openProfile: DemuxerOpenProfile = .playback
 
     /// The URL and headers this demuxer was opened from, kept for the recordless Dolby Vision audit's
@@ -545,8 +549,16 @@ public final class Demuxer: @unchecked Sendable {
         inputFormat: UnsafePointer<AVInputFormat>? = nil,
         isLive: Bool = false
     ) throws {
+        closeRequestLock.lock()
+        let closedBeforeConnect = closeRequested
+        closeRequestLock.unlock()
+        if closedBeforeConnect { throw DemuxerError.openFailed(code: -1) }
         try provider.open()
+        closeRequestLock.lock()
         avioProvider = provider
+        let closedDuringConnect = closeRequested
+        closeRequestLock.unlock()
+        if closedDuringConnect { provider.markClosed() }
         onOpenProgress?(.sourceOpened)   // #361
 
         // AE#460 follow-up: a live source rebuilt on a RETAINED reader resumes where that reader
@@ -2016,7 +2028,11 @@ public final class Demuxer: @unchecked Sendable {
     /// Fast lock-free unblock: AVIO read callback returns -1, av_read_frame returns
     /// at once. No resource freeing. Call before close() when cancelling a pump.
     func markClosed() {
-        avioProvider?.markClosed()
+        closeRequestLock.lock()
+        closeRequested = true
+        let provider = avioProvider
+        closeRequestLock.unlock()
+        provider?.markClosed()
     }
 
     /// Static metadata probes only. Strong ownership outlives the native interrupt callback.
