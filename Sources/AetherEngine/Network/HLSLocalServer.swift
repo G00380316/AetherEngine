@@ -404,8 +404,31 @@ final class HLSLocalServer: @unchecked Sendable {
     /// that lasts: the client then reads a dead server. Measured with 192 pool workers blocked, a
     /// `DispatchQueue.global().async` block had not started after 35 s while a detached thread ran
     /// in 3 ms. Same reason the pump owns its thread since AE#286.
-    private static let maxConcurrentConnections = 32
+    static let maxConcurrentConnections = 32
     private var liveConnectionThreads = 0
+
+    /// Audit NET-6: the listener has to answer the LAN while an AirPlay receiver fetches from it
+    /// (#86), and the session token is only read once a whole request head has arrived. So a peer
+    /// that is not loopback may hold at most this many of the slots, and the rest stay free for
+    /// the local player however many connections a LAN host opens.
+    static let maxNonLoopbackConnections = 24
+    private var liveNonLoopbackConnections = 0
+
+    /// Audit NET-6: a connection that has not yet presented this session's token has this long,
+    /// from accept, to deliver a whole request head. Without it a trickling or idle LAN peer holds
+    /// its slot for as long as it keeps sending a byte inside the per-recv timeout.
+    static let unauthenticatedHeadSeconds: TimeInterval = 10
+    /// Once a request's first byte has arrived, the rest of its head must follow within this long,
+    /// on a connection that already authenticated too. The idle wait before that byte stays at
+    /// `keepAliveIdleSeconds`, which AVPlayer's keep-alive gaps need.
+    static let requestHeadSeconds: TimeInterval = 10
+    static let keepAliveIdleSeconds: TimeInterval = 60
+
+    /// Audit NET-13: one line per failed accept, when the process is out of descriptors, is a busy
+    /// loop that floods the host's log ring. Failures back off and their line is rate limited.
+    private static let acceptFailureBackoffMicroseconds: useconds_t = 100_000
+    private var acceptFailureLog = LogThrottle(interval: 5)
+    private var refusalLog = LogThrottle(interval: 5)
 
     // MARK: - Init
 
@@ -420,11 +443,15 @@ final class HLSLocalServer: @unchecked Sendable {
     /// A relay-only server has no provider: nothing here produces segments, every byte comes
     /// from the origin, and the master is whatever the origin served.
     init(provider: HLSSegmentProvider? = nil, subResourceBaseURL: URL? = nil,
-         relay: HLSOriginRelay? = nil) {
+         relay: HLSOriginRelay? = nil,
+         unauthenticatedHeadSeconds: TimeInterval = HLSLocalServer.unauthenticatedHeadSeconds) {
         self.provider = provider
         self.subResourceBaseURL = subResourceBaseURL
         self.relay = relay
+        self.unauthenticatedHeadDeadline = unauthenticatedHeadSeconds
     }
+
+    private let unauthenticatedHeadDeadline: TimeInterval
 
     /// Admits `origin` to the relay and returns the address standing in for it, for a player
     /// pointed at the relay rather than at a provider's playlists. Nil before `start()` or with
@@ -465,6 +492,10 @@ final class HLSLocalServer: @unchecked Sendable {
         // Bind all interfaces (not just loopback) so an AirPlay receiver can reach the stream over the LAN
         // via the device's WiFi IP (#86, DrHurt). Local playback still uses 127.0.0.1; the URL host is only
         // swapped to the LAN IP while external playback is active. Ephemeral port, serves the current stream only.
+        // Audit NET-6 kept this rather than binding loopback until AirPlay engages: the wireless edge reloads
+        // onto a new server, but a readiness-gate swap (`airPlayHostSwapped`) and a held edge re-read after a
+        // reload hand the LAN URL to the server already listening. LAN exposure is bounded instead by the
+        // head deadlines and the loopback reserve in the accept loop.
         addr.sin_addr.s_addr = inet_addr("0.0.0.0")
 
         let bindResult = withUnsafePointer(to: &addr) { ptr -> Int32 in
@@ -576,38 +607,53 @@ final class HLSLocalServer: @unchecked Sendable {
                 if err == EINTR || err == EAGAIN || err == ECONNABORTED {
                     continue
                 }
-                EngineLog.emit("[HLSLocalServer] accept failed errno=\(err)",
-                               category: .hlsServer)
+                // EMFILE / ENFILE leave the connection in the backlog, so the next accept fails at
+                // once; without the pause this thread spins.
+                stateLock.lock()
+                let logLine = acceptFailureLog.admit(now: Self.uptimeSeconds())
+                stateLock.unlock()
+                if let suppressed = logLine {
+                    EngineLog.emit("[HLSLocalServer] accept failed errno=\(err)"
+                                   + (suppressed > 0 ? " (\(suppressed) more since the last line)" : "")
+                                   + ", backing off", category: .hlsServer)
+                }
+                usleep(Self.acceptFailureBackoffMicroseconds)
                 continue
             }
+            let isLoopbackPeer = clientAddr.sin_family == sa_family_t(AF_INET)
+                && (UInt32(bigEndian: clientAddr.sin_addr.s_addr) >> 24) == 127
 
             // SO_NOSIGPIPE on the accepted socket too, otherwise a
             // closed-peer send still raises SIGPIPE on iOS.
             var on: Int32 = 1
             _ = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on,
                            socklen_t(MemoryLayout<Int32>.size))
-            // 60s idle timeout. AVPlayer's typical inter-request gap
-            // is single-digit seconds; 60s is comfortable headroom.
-            var timeout = timeval(tv_sec: 60, tv_usec: 0)
-            _ = setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                           socklen_t(MemoryLayout<timeval>.size))
+            let acceptedAt = Self.uptimeSeconds()
 
             stateLock.lock()
             // A thread per connection has no ceiling of its own, where the pool's 64 workers were
             // one. AVPlayer keeps a handful open, so anything near this number is a client that
             // has stopped making sense and gets the socket closed rather than a thread.
             let atCapacity = liveConnectionThreads >= Self.maxConcurrentConnections
+                || (!isLoopbackPeer && liveNonLoopbackConnections >= Self.maxNonLoopbackConnections)
+            var refusalLine: Int?
             if !atCapacity {
                 liveConnectionThreads += 1
+                if !isLoopbackPeer { liveNonLoopbackConnections += 1 }
                 clientFds.insert(clientFd)
+            } else {
+                refusalLine = refusalLog.admit(now: acceptedAt)
             }
             stateLock.unlock()
 
             if atCapacity {
-                EngineLog.emit(
-                    "[HLSLocalServer] refusing fd=\(clientFd): "
-                    + "\(Self.maxConcurrentConnections) connections already open",
-                    category: .hlsServer)
+                if let suppressed = refusalLine {
+                    EngineLog.emit(
+                        "[HLSLocalServer] refusing fd=\(clientFd) (\(isLoopbackPeer ? "loopback" : "LAN") peer): "
+                        + "connection slots full"
+                        + (suppressed > 0 ? " (\(suppressed) more refused since the last line)" : ""),
+                        category: .hlsServer)
+                }
                 close(clientFd)
                 continue
             }
@@ -619,9 +665,10 @@ final class HLSLocalServer: @unchecked Sendable {
                 defer {
                     self?.stateLock.lock()
                     self?.liveConnectionThreads -= 1
+                    if !isLoopbackPeer { self?.liveNonLoopbackConnections -= 1 }
                     self?.stateLock.unlock()
                 }
-                self?.handleConnection(clientFd)
+                self?.handleConnection(clientFd, acceptedAt: acceptedAt)
             }
             worker.name = "com.aetherengine.hls.conn.\(clientFd)"
             worker.qualityOfService = .userInitiated
@@ -631,7 +678,7 @@ final class HLSLocalServer: @unchecked Sendable {
 
     // MARK: - Per-connection handler
 
-    private func handleConnection(_ fd: Int32) {
+    private func handleConnection(_ fd: Int32, acceptedAt: TimeInterval) {
         defer {
             stateLock.lock()
             clientFds.remove(fd)
@@ -642,23 +689,47 @@ final class HLSLocalServer: @unchecked Sendable {
         }
 
         // HTTP/1.1 keep-alive loop: AVPlayer reuses connections across segment fetches. Connection:close per-request tried 2026-05-20; Instruments showed it shifted the leak from libnetwork into a 570 MiB Malloc heap bucket instead (strictly worse; reverted).
+        // Every request that comes back true passed the session token check in `processRequest`,
+        // so after the first one the connection has shown it was handed a URL by this engine.
+        var authenticated = false
         while true {
             stateLock.lock()
             let stopping = shouldStop
             stateLock.unlock()
             if stopping { return }
-            guard let request = readHTTPRequest(fd) else { return }
+            let firstByteDeadline = authenticated
+                ? Self.uptimeSeconds() + Self.keepAliveIdleSeconds
+                : acceptedAt + unauthenticatedHeadDeadline
+            guard let request = readHTTPRequest(
+                fd, firstByteDeadline: firstByteDeadline, authenticated: authenticated) else { return }
             guard processRequest(request, on: fd) else { return }
+            authenticated = true
         }
     }
 
     /// Read until end of HTTP headers (`\r\n\r\n`). Returns the raw
     /// request bytes (headers only, no body, since we only accept
-    /// GET). Returns nil on EOF, error, or oversize.
-    private func readHTTPRequest(_ fd: Int32) -> Data? {
+    /// GET). Returns nil on EOF, error, oversize, or a missed deadline.
+    ///
+    /// The deadlines are totals rather than per-recv timeouts (audit NET-6): the first byte must
+    /// arrive by `firstByteDeadline`, and the whole head within `requestHeadSeconds` of it, and an
+    /// unauthenticated connection also by `firstByteDeadline`. A peer sending one byte a minute
+    /// used to keep a slot for as long as the head had room.
+    private func readHTTPRequest(_ fd: Int32, firstByteDeadline: TimeInterval,
+                                 authenticated: Bool) -> Data? {
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
+        var deadline = firstByteDeadline
         while true {
+            let remaining = deadline - Self.uptimeSeconds()
+            guard remaining > 0, Self.setReceiveTimeout(fd, seconds: remaining) else {
+                // A stranger that never finished a head is expected noise on a LAN listener, and
+                // one line each would let it scroll the host's log ring.
+                EngineLog.emit("[HLSLocalServer] request head deadline passed fd=\(fd) bytes=\(buffer.count)"
+                               + (authenticated ? "" : " (connection never authenticated)"),
+                               category: .hlsServer, level: authenticated ? .info : .verbose)
+                return nil
+            }
             let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
                 recv(fd, ptr.baseAddress, ptr.count, 0)
             }
@@ -673,12 +744,15 @@ final class HLSLocalServer: @unchecked Sendable {
                 if err == EINTR { continue }
                 if err == EAGAIN || err == EWOULDBLOCK {
                     EngineLog.emit("[HLSLocalServer] recv timeout fd=\(fd)",
-                                   category: .hlsServer)
+                                   category: .hlsServer, level: authenticated ? .info : .verbose)
                     return nil
                 }
                 EngineLog.emit("[HLSLocalServer] recv error fd=\(fd) errno=\(err)",
                                category: .hlsServer)
                 return nil
+            }
+            if buffer.isEmpty {
+                deadline = min(deadline, Self.uptimeSeconds() + Self.requestHeadSeconds)
             }
             buffer.append(chunk, count: n)
             if let end = findHeadersTerminator(buffer) {
@@ -690,6 +764,18 @@ final class HLSLocalServer: @unchecked Sendable {
                 return nil
             }
         }
+    }
+
+    private static func setReceiveTimeout(_ fd: Int32, seconds: TimeInterval) -> Bool {
+        let whole = Int(seconds)
+        var timeout = timeval(
+            tv_sec: whole, tv_usec: Int32(max(1, (seconds - Double(whole)) * 1_000_000)))
+        return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                          socklen_t(MemoryLayout<timeval>.size)) == 0
+    }
+
+    private static func uptimeSeconds() -> TimeInterval {
+        Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1_000_000_000
     }
 
     private func findHeadersTerminator(_ buf: Data) -> Int? {
@@ -1735,4 +1821,29 @@ enum HLSLocalServerError: Error, CustomStringConvertible, LocalizedError {
     }
 
     var errorDescription: String? { description }
+}
+
+/// Lets one line through per `interval` and counts the ones it held back, so a condition that
+/// repeats per connection or per accept costs the log one line with a tally instead of one each.
+/// Not thread safe; the owner serializes it.
+struct LogThrottle {
+    let interval: TimeInterval
+    private var lastEmitted: TimeInterval?
+    private var suppressed = 0
+
+    init(interval: TimeInterval) {
+        self.interval = interval
+    }
+
+    /// The number of lines suppressed since the last one that went out, when this one may go
+    /// out; nil when it is to be dropped.
+    mutating func admit(now: TimeInterval) -> Int? {
+        if let lastEmitted, now - lastEmitted < interval {
+            suppressed += 1
+            return nil
+        }
+        lastEmitted = now
+        defer { suppressed = 0 }
+        return suppressed
+    }
 }
