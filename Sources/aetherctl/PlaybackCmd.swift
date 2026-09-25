@@ -1030,7 +1030,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             stillAttempts += 1
             if let image {
                 stillHits += 1
-                let path = "/tmp/aetherctl-still-\(tick).png"
+                let path = debugOutputPath("aetherctl-still-\(tick).png")
                 let written = writeStillPNG(image, to: path)
                 print(String(format: "  HOSTCALL still(at: %.2f, %@) -> %dx%d in %d ms  %@",
                              target, label, image.width, image.height, ms,

@@ -1323,6 +1323,9 @@ public final class AetherEngine: ObservableObject {
     /// Which recording a writer failure belongs to (audit CORE-5). Bumped once per writer.
     var recordingGeneration: UInt64 = 0
 
+    /// The ended recording's drain and trailer, run off the main actor (audit REC-1).
+    var recordingFinish: Task<Void, Never>?
+
     /// Republishes `recordingState` progress at 1 Hz while a recording runs.
     var recordingProgressTimer: Timer?
 

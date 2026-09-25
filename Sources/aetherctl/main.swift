@@ -234,7 +234,8 @@ func printUsage() {
                 packet's Dolby Vision RPU from Profile 7 to Profile
                 8.1 (and drop the enhancement layer) via
                 DoviRpuConverter, and write the result to
-                /tmp/aetherctl-dovitest.hevc in Annex-B form. Feed
+                aetherctl-dovitest.hevc (Annex-B) in a private
+                per-run temporary directory, printed. Feed
                 that to `dovi_tool extract-rpu` + `info` to validate
                 the rewritten RPU against ground truth.
 
@@ -257,7 +258,8 @@ func printUsage() {
                 to --width. Snapshot mode (--snapshot) decodes
                 frame-accurately at full resolution. Use --loops N
                 with `leaks --atExit` to detect memory leaks.
-                Writes the first frame to /tmp/aetherctl-extract-<mode>.png.
+                Writes the first frame to aetherctl-extract-<mode>.png
+                in a private per-run temporary directory, printed.
 
       audio     Load a source through the engine's audio-only path
                 (LoadOptions.audioOnly=true), play for ~10 seconds,
@@ -471,7 +473,7 @@ if first == "pktdump" {
 if first == "audiotap" {
     var rest = Array(args.dropFirst(2))
     let duration = takeDoubleFlag("--duration", from: &rest) ?? 30
-    let outPath = takeStringFlag("--out", from: &rest) ?? "/tmp/audiotap.wav"
+    let outPath = takeStringFlag("--out", from: &rest) ?? debugOutputPath("audiotap.wav")
     let remote = rest.contains("--remote")
     rest.removeAll { $0 == "--remote" }
     let software = rest.contains("--software")

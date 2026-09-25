@@ -222,7 +222,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.lock()
         // AE#492: see `SoftwareVideoDecoder.decode`. Same rule, same lock as `flush()`.
         if let epoch, epoch != _feedEpoch { lock.unlock(); return }
-        guard let session = session, let formatDesc = formatDescription else {
+        guard session != nil, let formatDesc = formatDescription else {
             lock.unlock()
             return
         }
@@ -304,6 +304,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             }
         }
 
+        // Audit DEC-4: the epoch check and the send sit under one hold of `lock`, or a flush landing
+        // while the sample buffer is built lets a pre-seek packet into VT after it. Safe to hold:
+        // the output callback never takes `lock`, and `close()` already holds it across the VT wait.
+        lock.lock()
+        if let epoch, epoch != _feedEpoch { lock.unlock(); return }
+        guard let session = self.session else { lock.unlock(); return }
         // Async decode with temporal queueing; callback fires on VT's internal queue.
         var infoFlags = VTDecodeInfoFlags()
         let decodeStatus = VTDecompressionSessionDecodeFrame(
@@ -313,6 +319,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             frameRefcon: nil,
             infoFlagsOut: &infoFlags
         )
+        lock.unlock()
         if decodeStatus != noErr {
             EngineLog.emit(
                 "[HardwareVideoDecoder] decode error \(decodeStatus) at pts=\(ptsRaw)",

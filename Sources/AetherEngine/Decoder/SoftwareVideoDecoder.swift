@@ -236,6 +236,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if Self.disposition(forSendResult: sendRet) == .drainAndRetry {
             drainDecodedFrames()
             lock.lock()
+            // Audit DEC-1: the drain drops the lock between frames, so a flush can land in it.
+            if let epoch, epoch != _feedEpoch { lock.unlock(); return }
             sendRet = codecContext == nil ? FFmpegErr.einval : avcodec_send_packet(ctx, packet)
             lock.unlock()
         }

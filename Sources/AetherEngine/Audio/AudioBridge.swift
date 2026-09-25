@@ -169,6 +169,7 @@ final class AudioBridge: @unchecked Sendable {
     /// before overwrite and in cleanup.
     private var swrInFmt: AVSampleFormat = AV_SAMPLE_FMT_NONE
     private var swrInRate: Int32 = 0
+    private var swrReconfigureFailures = 0
     private var swrInLayout = AVChannelLayout()
     /// FIFO buffering resampled PCM until >= encoderCtx.frame_size samples. FLAC's wrapper has
     /// AV_CODEC_CAP_SMALL_LAST_FRAME but not VARIABLE_FRAME_SIZE, so non-final frames must hit frame_size exactly
@@ -974,24 +975,30 @@ final class AudioBridge: @unchecked Sendable {
     /// probe), and reading S32 integers as FLTP floats is noise. Re-derive the input from the frame, keeping
     /// the output side pinned to the encoder, exactly as AudioDecoder configures its resampler from the frame.
     /// No-op in the common case where find_stream_info already resolved the format (frame == seed), so working
-    /// paths are untouched; only a wrong seed or a genuine mid-stream format change rebuilds. swr_alloc_set_opts2
-    /// reuses the context pointer on success and frees it on failure (the caller re-binds swrCtx); swr_init drops
+    /// paths are untouched; only a wrong seed or a genuine mid-stream format change rebuilds. A rebuild drops
     /// the sub-frame resampler delay, as startSegment already does. Runs under feed()'s opLock (never re-lock).
+    ///
+    /// Audit DEC-6: built on a scratch context and swapped in only once it initialised. Rebuilding the
+    /// live one lost it for good on a rejected format (set-opts frees it), after which every feed
+    /// returned early, the bridge stayed mute, and not even the AE#396 detector could see it. A frame
+    /// the resampler cannot take is now dropped and counted, and the old context keeps serving the
+    /// format it was built for. Returns false when this frame must not reach `swr_convert`.
     private func reconfigureSwrInputIfNeeded(
         forFrame sf: UnsafeMutablePointer<AVFrame>,
         enc: UnsafeMutablePointer<AVCodecContext>
-    ) {
+    ) -> Bool {
         let frameFmtRaw = sf.pointee.format
         let frameRate = sf.pointee.sample_rate
-        guard frameFmtRaw >= 0, frameRate > 0, sf.pointee.ch_layout.nb_channels > 0 else { return }
+        guard frameFmtRaw >= 0, frameRate > 0, sf.pointee.ch_layout.nb_channels > 0 else { return true }
         let matchesCurrent = frameFmtRaw == swrInFmt.rawValue
             && frameRate == swrInRate
             && av_channel_layout_compare(&swrInLayout, &sf.pointee.ch_layout) == 0
-        guard !matchesCurrent else { return }
+        guard !matchesCurrent else { return true }
 
         let frameFmt = AVSampleFormat(rawValue: frameFmtRaw)
+        var scratch: OpaquePointer?
         let setRet = swr_alloc_set_opts2(
-            &swrCtx,
+            &scratch,
             &enc.pointee.ch_layout,
             pcmSampleFmt,
             enc.pointee.sample_rate,
@@ -1001,7 +1008,22 @@ final class AudioBridge: @unchecked Sendable {
             0,
             nil
         )
-        guard setRet >= 0, swrCtx != nil, swr_init(swrCtx) >= 0 else { return }
+        let initRet = setRet >= 0 && scratch != nil ? swr_init(scratch) : setRet
+        guard initRet >= 0 else {
+            swr_free(&scratch)
+            swrReconfigureFailures += 1
+            if swrReconfigureFailures == 1 || swrReconfigureFailures % 500 == 0 {
+                EngineLog.emit(
+                    "[AudioBridge] ERROR: resampler rejected decoded \(frameRate)Hz/"
+                    + "\(sf.pointee.ch_layout.nb_channels)ch fmt=\(frameFmtRaw) (ret=\(initRet)); "
+                    + "\(swrReconfigureFailures) frame(s) dropped",
+                    category: .session
+                )
+            }
+            return false
+        }
+        swr_free(&swrCtx)
+        swrCtx = scratch
 
         av_channel_layout_uninit(&swrInLayout)
         av_channel_layout_copy(&swrInLayout, &sf.pointee.ch_layout)
@@ -1023,6 +1045,7 @@ final class AudioBridge: @unchecked Sendable {
                 category: .session
             )
         }
+        return true
     }
 
     /// Resample sf (decoded source frame) to encoder format and push into the FIFO (swr_convert may produce
@@ -1047,10 +1070,8 @@ final class AudioBridge: @unchecked Sendable {
 
         // Align swr's INPUT to the frame the decoder actually produced before converting. No-op once the seed
         // matched (the usual case); only a wrong init seed or a genuine mid-stream format change rebuilds swr.
-        reconfigureSwrInputIfNeeded(forFrame: sf, enc: enc)
-        // The rebuild reuses the context pointer on success, but swr_alloc_set_opts2 frees it on a set-opts
-        // failure (swr_free(ps) -> swrCtx == nil), which would dangle the caller's `swr`. Re-bind to the live one.
-        guard let swr = swrCtx else {
+        // A successful rebuild replaces the context, which would dangle the caller's `swr`. Re-bind to the live one.
+        guard reconfigureSwrInputIfNeeded(forFrame: sf, enc: enc), let swr = swrCtx else {
             stats.framesDroppedBeforeFIFO += 1
             return
         }

@@ -814,6 +814,10 @@ declared from the old source produces a file that is unplayable or silently wron
 host has the event and starts part two if it wants one. `stop()` and a new `load()` end it the same
 way with `.ended(.sessionEnded)`; a recording never outlives its session.
 
+`.ended` is published once the file is closed. The queued tail and the trailer are written off the
+main actor, so it can arrive a moment after the call that ended the recording; `stopRecording()`
+returns only after it, and a `startRecording(to:)` issued in that moment waits for it first.
+
 **Not implemented: recording from the start of what is already buffered.** A recording begins at the
 call, not at the back of the DVR window. On `.loopback` what is retained is remuxed fMP4 with
 **bridged** audio, not source packets, so prepending it would produce one file whose audio codec
