@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`LoadOptions.escalatesToSoftwarePath` (default `true`) lets a host decline the AE#561 rebuild**
+  onto the software path and get the native failure as `.error`, for hosts that re-plan a failing
+  title with a ladder of their own (AE#629).
+- **`softwarePathEscalations` publishes that rebuild when it is taken**, with the failure it
+  absorbed, where a host used to see only `videoRoute` change (AE#629).
+
 ### Security
 
 - **The origin relay no longer writes the media server's access token into its local URLs.** They
@@ -49,6 +57,10 @@ the public-API contract.
 
 ### Fixed
 
+- **A `load()` still waiting when the engine rebuilds its session on the software path now returns
+  with the rebuilt session** instead of throwing the `CancellationError` a host's own supersession
+  throws, which a host read as a failed load and answered by stopping the session that had just come
+  back (AE#629).
 - **Stopping playback during a restart after a stalled read aborts the replacement connection**,
   instead of letting it finish its connect and stream probe after the session was gone.
 - **A non-finite segment or cadence duration can no longer crash the live playlist writer.**

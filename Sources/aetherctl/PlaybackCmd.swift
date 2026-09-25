@@ -98,7 +98,7 @@ enum LoadOptionChange {
 /// and optionally activate an embedded subtitle track (`--subs <codec-or-lang>`)
 /// and log every overlay cue that arrives. Repro harness for "loads but never
 /// plays" reports and for live teletext end-to-end validation (#107).
-func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
+func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false, softwareEscalation: Bool = true,
                     censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, pictureOrigin: Double = 0,
                     sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil,
                     teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil,
@@ -122,6 +122,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // rather than the process-global test hook it used before. The hook forces every session on the
     // engine, so it could never exercise the thing a host actually calls.
     if forceSoftware { print("[aetherctl] decode path: preferredDecodePath=.software (#461)") }
+    if !softwareEscalation { print("[aetherctl] escalatesToSoftwarePath=false (AE#629)") }
     if let audioSwitch {
         print("[aetherctl] audio switch: selectAudioTrack(index: \(audioSwitch.index)) "
               + "\(audioSwitch.delayMilliseconds) ms after the load returns")
@@ -131,7 +132,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision, preserveASSMarkup: preserveASSMarkup, dolbyVisionHandling: dolbyVisionHandling, record: record)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, softwareEscalation: softwareEscalation, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision, preserveASSMarkup: preserveASSMarkup, dolbyVisionHandling: dolbyVisionHandling, record: record)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -450,7 +451,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, pictureOrigin: Double = 0, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false, preserveASSMarkup: Bool = false, dolbyVisionHandling: DolbyVisionHandling = .automatic, record: URL? = nil) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, softwareEscalation: Bool = true, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, pictureOrigin: Double = 0, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false, preserveASSMarkup: Bool = false, dolbyVisionHandling: DolbyVisionHandling = .automatic, record: URL? = nil) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -567,8 +568,18 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // separates "the deinterlaced path loses frames" from "it emits 2.5x as many of them" could
         // only be asked of a reporter. send_frame halves the output rate and changes nothing else.
         deinterlaceFieldRate: deinterlaceFieldRate,
-        preferredDecodePath: forceSoftware ? .software : .automatic
+        preferredDecodePath: forceSoftware ? .software : .automatic,
+        escalatesToSoftwarePath: softwareEscalation
     )
+    // AE#629: the rescue a host used to see only as a route change.
+    let escalationSub = engine.softwarePathEscalations.sink { event in
+        let failure = event.absorbedFailure
+        print(String(format: "ESCALATION at %.2fs duringStartup=%@ absorbed=%@/%@ %@",
+                     event.positionSeconds, String(event.duringStartup),
+                     failure.underlyingDomain ?? "-", failure.underlyingCode.map(String.init) ?? "-",
+                     failure.kind.rawValue))
+    }
+    defer { escalationSub.cancel() }
     // #311: installed BEFORE the load on purpose. The engine holds it and arms the host it builds,
     // which is the documented usage and the part a host would otherwise have to re-do per load.
     let frameProbe = frameTimes ? FrameTimeProbe() : nil

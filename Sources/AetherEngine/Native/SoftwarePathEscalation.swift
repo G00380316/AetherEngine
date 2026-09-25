@@ -1,5 +1,31 @@
 import Foundation
 
+/// A native session the engine rebuilt on the software path because AVPlayer refused its media
+/// (AE#561), published through `AetherEngine.softwarePathEscalations` the moment the rebuild is
+/// taken (AE#629).
+///
+/// The failure it carries is the one the engine absorbed instead of surfacing, so a host with a
+/// fallback ladder of its own can count it, log it, or decline the next one through
+/// `LoadOptions.escalatesToSoftwarePath`. If the rebuild then fails, that failure arrives as `.error`
+/// the usual way; if it succeeds, `videoRoute` moves to `.software`.
+public struct SoftwarePathEscalationEvent: Sendable, Equatable {
+    /// The failure the rebuild absorbed. `kind` is `.nativeItemFailed`; a failure the engine
+    /// inferred from a frozen position across its own revives carries no underlying code.
+    public let absorbedFailure: PlaybackErrorInfo
+    /// Where the session was when the native path gave up, in seconds.
+    public let positionSeconds: Double
+    /// True when a `load()` was still waiting on this session's startup. That `load()` keeps waiting
+    /// across the rebuild and returns when the rebuilt session is up, instead of throwing the
+    /// `CancellationError` a load superseded by the host would throw.
+    public let duringStartup: Bool
+
+    public init(absorbedFailure: PlaybackErrorInfo, positionSeconds: Double, duringStartup: Bool) {
+        self.absorbedFailure = absorbedFailure
+        self.positionSeconds = positionSeconds
+        self.duringStartup = duringStartup
+    }
+}
+
 /// The last rung under a native session AVPlayer will not play: hand the source to the engine's own
 /// decoder instead of ending the session (AE#561).
 ///
@@ -56,6 +82,15 @@ enum SoftwarePathEscalation {
         let preferredDecodePath: DecodePath
         /// The remote-HLS bypass, where the engine decodes nothing at all.
         let nativeRemoteHLS: Bool
+        /// `LoadOptions.escalatesToSoftwarePath`: false when the host re-plans a failing title itself.
+        var hostAllowsEscalation: Bool = true
+    }
+
+    /// The rebuild a still-waiting `load()` hands its wait to (AE#629). `supersededGeneration` is the
+    /// load generation the rebuild's teardown ended, so only the load that owned it can follow.
+    struct Takeover {
+        let supersededGeneration: UInt64
+        let rebuild: Task<Void, Error>
     }
 
     /// The domain of a media failure, i.e. AVFoundation could not make sense of what it was served.
@@ -70,6 +105,8 @@ enum SoftwarePathEscalation {
     /// which is never a reason to swallow a failure.
     static func shouldEscalate(errorDomain: String?, availability: Availability?) -> Bool {
         guard let availability, !availability.alreadyEscalated else { return false }
+        // AE#629: a host with its own fallback ladder needs the failure, not a rescue it cannot see.
+        guard availability.hostAllowsEscalation else { return false }
         // Already there, or the host asked for a path this cannot improve on.
         guard availability.preferredDecodePath == .automatic else { return false }
         // The bypass has no local muxer and decodes nothing here, so #461 ignores the option anyway.
