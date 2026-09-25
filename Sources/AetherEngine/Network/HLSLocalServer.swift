@@ -435,7 +435,7 @@ final class HLSLocalServer: @unchecked Sendable {
         let listeningPort = port
         stateLock.unlock()
         guard listeningPort > 0 else { return nil }
-        return HLSOriginRelay.localURL(for: origin, port: listeningPort, token: pathToken)
+        return relay.localURL(for: origin, port: listeningPort, token: pathToken)
     }
 
     // MARK: - Lifecycle

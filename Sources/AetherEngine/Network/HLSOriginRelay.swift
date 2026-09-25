@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// AE#495: fetches a remote origin on the engine's behalf and sends every URI a playlist
@@ -17,9 +18,19 @@ import Foundation
 final class HLSOriginRelay: @unchecked Sendable {
 
     /// The single route the player is ever pointed at, under the server's session token.
-    /// The origin rides in the query, so one route covers playlists, keys and segments.
+    /// A sealed reference to the origin rides in the query, so one route covers playlists, keys
+    /// and segments.
     static let route = "/aether-origin-relay"
-    private static let originQueryKey = "origin"
+    private static let referenceQueryKey = "ref"
+
+    /// Audit NET-1: the origin URL carries the media server's access token, and the local URL is
+    /// logged on every request, handed to AirPlay receivers and written into rewritten playlists.
+    /// So the local URL names the origin only through a reference sealed with keys that live and
+    /// die with this relay. Sealing rather than an id table keeps the state constant: a VOD
+    /// playlist registers every segment URI at once, and an evicted table entry would be a 404
+    /// in the middle of a film.
+    private let sealingKey = SymmetricKey(size: .bits256)
+    private let nonceKey = SymmetricKey(size: .bits256)
 
     /// What a relayed request produced, for the server to write.
     struct Response {
@@ -146,52 +157,76 @@ final class HLSOriginRelay: @unchecked Sendable {
 
     // MARK: - Addressing
 
-    /// The local address standing in for `origin`.
-    static func localURL(
+    /// The local address standing in for `origin`. Does not admit it.
+    func localURL(
         for origin: URL, host: String = "127.0.0.1", port: UInt16, token: String
     ) -> URL? {
-        // Encoding everything outside the alphanumerics keeps the origin's own query, which
-        // on a Jellyfin stream carries the api key and the play session, from being read as
-        // part of this URL's query.
-        guard
-            let encoded = origin.absoluteString.addingPercentEncoding(
-                withAllowedCharacters: .alphanumerics)
-        else { return nil }
-        return URL(string: "http://\(host):\(port)/\(token)\(route)?\(originQueryKey)=\(encoded)")
+        guard let reference = seal(origin) else { return nil }
+        return URL(
+            string: "http://\(host):\(port)/\(token)\(Self.route)?\(Self.referenceQueryKey)=\(reference)")
     }
 
-    /// The origin a relay request names, or nil when the query does not carry one.
+    /// The origin a relay request names, or nil when the query carries no reference this relay
+    /// sealed.
     ///
     /// Every other field the client put on the URL is carried onto the origin's own query rather
     /// than dropped. AVPlayer appends `_HLS_msn` / `_HLS_part` / `_HLS_skip` to a playlist URL when
     /// the playlist advertises `CAN-BLOCK-RELOAD` (#441), and a reload that should have blocked
     /// until the next segment exists answers immediately without them, so the player asks again at
     /// once and the origin is polled as fast as the loopback can answer.
-    static func originURL(fromQuery query: String) -> URL? {
+    func originURL(fromQuery query: String) -> URL? {
         var origin: URL?
         var carried: [String] = []
         for field in query.split(separator: "&") {
             let pair = field.split(separator: "=", maxSplits: 1)
-            guard pair.count == 2, pair[0] == originQueryKey else {
+            guard pair.count == 2, pair[0] == Self.referenceQueryKey else {
                 carried.append(String(field))
                 continue
             }
-            guard let decoded = String(pair[1]).removingPercentEncoding, !decoded.isEmpty else {
-                return nil
-            }
-            origin = URL(string: decoded)
+            guard let opened = open(String(pair[1])) else { return nil }
+            origin = opened
         }
         guard let origin else { return nil }
         guard !carried.isEmpty,
             var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
         else { return origin }
-        // percentEncoded, because both halves are already encoded: the origin's query came out of
-        // the round trip through `localURL`, and the client's fields arrived off the wire.
+        // percentEncoded, because both halves are already encoded: the origin's query is the one
+        // it was sealed with, and the client's fields arrived off the wire.
         var fields: [String] = []
         if let existing = components.percentEncodedQuery, !existing.isEmpty { fields.append(existing) }
         fields.append(contentsOf: carried)
         components.percentEncodedQuery = fields.joined(separator: "&")
         return components.url ?? origin
+    }
+
+    /// AES-GCM under a nonce derived from the plaintext, so one origin always seals to the same
+    /// reference: a live playlist refreshed every few seconds names the same segment by the same
+    /// local URL each time. Equal plaintexts are the only nonce reuse, and they reveal nothing
+    /// beyond their equality. base64url without padding, which a query carries as it stands.
+    private func seal(_ origin: URL) -> String? {
+        let plaintext = Data(origin.absoluteString.utf8)
+        let derived = HMAC<SHA256>.authenticationCode(for: plaintext, using: nonceKey)
+        guard let nonce = try? AES.GCM.Nonce(data: Data(derived).prefix(12)),
+            let sealed = try? AES.GCM.seal(plaintext, using: sealingKey, nonce: nonce),
+            let combined = sealed.combined
+        else { return nil }
+        return combined.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func open(_ reference: String) -> URL? {
+        var base64 = reference
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let combined = Data(base64Encoded: base64),
+            let box = try? AES.GCM.SealedBox(combined: combined),
+            let plaintext = try? AES.GCM.open(box, using: sealingKey),
+            let string = String(data: plaintext, encoding: .utf8), !string.isEmpty
+        else { return nil }
+        return URL(string: string)
     }
 
     /// The authority a rewritten playlist should point its sub-resources at: whatever the
@@ -238,7 +273,7 @@ final class HLSOriginRelay: @unchecked Sendable {
     func respond(query: String, host: String?, range: String?, port: UInt16, token: String,
                  sink: Sink) -> Outcome?
     {
-        guard let origin = Self.originURL(fromQuery: query) else { return nil }
+        guard let origin = originURL(fromQuery: query) else { return nil }
         guard let key = Self.originKey(for: origin) else { return nil }
 
         stateLock.lock()
@@ -438,7 +473,7 @@ final class HLSOriginRelay: @unchecked Sendable {
         let rewriteOne: (String) -> String = { raw in
             if absoluteOnly, URL(string: raw)?.host == nil { return raw }
             guard let resolved = URL(string: raw, relativeTo: origin)?.absoluteURL,
-                let local = Self.localURL(
+                let local = self.localURL(
                     for: resolved, host: authority, port: port, token: token)
             else { return raw }
             if let key = Self.originKey(for: resolved) { discovered.insert(key) }
