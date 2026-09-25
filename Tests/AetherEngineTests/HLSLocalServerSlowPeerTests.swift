@@ -16,11 +16,14 @@ struct HLSLocalServerSlowPeerTests {
 
         let fd = try #require(Self.connect(port: server.port, host: "127.0.0.1"))
         defer { close(fd) }
-        try await waitFor { server.activeConnectionCount == 1 }
 
+        // Observed from the client side: the server may drop the connection before a poll of its
+        // count ever sees it, which on a loaded run left a wait for "count == 1" parked forever.
         // The old per-recv timeout was 60 s, so closing well inside that is the fix.
-        let dropped = try await waitFor(upTo: .seconds(20)) { server.activeConnectionCount == 0 }
-        #expect(dropped, "an idle unauthenticated connection kept its slot")
+        #expect(await Self.onOwnThread { Self.peerCloses(fd: fd, within: 20) },
+                "an idle unauthenticated connection kept its slot")
+        let released = try await waitFor(upTo: .seconds(20)) { server.activeConnectionCount == 0 }
+        #expect(released)
     }
 
     @Test("A peer trickling its head one byte at a time is dropped at the head deadline")
@@ -32,10 +35,11 @@ struct HLSLocalServerSlowPeerTests {
         let fd = try #require(Self.connect(port: server.port, host: "127.0.0.1"))
         let trickle = Trickle(fd: fd)
         defer { trickle.stop(); close(fd) }
-        try await waitFor { server.activeConnectionCount == 1 }
 
-        let dropped = try await waitFor(upTo: .seconds(20)) { server.activeConnectionCount == 0 }
-        #expect(dropped, "a byte every 200 ms kept an unauthenticated connection open")
+        #expect(await Self.onOwnThread { Self.peerCloses(fd: fd, within: 20) },
+                "a byte every 200 ms kept an unauthenticated connection open")
+        let released = try await waitFor(upTo: .seconds(20)) { server.activeConnectionCount == 0 }
+        #expect(released)
     }
 
     @Test("A connection that presented the token keeps its keep-alive idle past the stranger deadline")
@@ -147,6 +151,18 @@ struct HLSLocalServerSlowPeerTests {
             guard bodySoFar >= length else { continue }
             let parts = (head.components(separatedBy: "\r\n").first ?? "").split(separator: " ")
             return parts.count >= 2 ? (Int(parts[1]) ?? 0) : 0
+        }
+    }
+
+    /// True once the server has closed or reset `fd`, false if it is still open after `seconds`.
+    private static func peerCloses(fd: Int32, within seconds: Int) -> Bool {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var chunk = [UInt8](repeating: 0, count: 512)
+        while true {
+            let n = recv(fd, &chunk, chunk.count, 0)
+            if n == 0 { return true }
+            if n < 0 { return errno == ECONNRESET }
         }
     }
 
