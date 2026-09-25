@@ -22,9 +22,29 @@ the public-API contract.
 - **A LAN peer can no longer hold the loopback server's connection slots.** Connections without the
   session token must send a request head within 10 s, and LAN peers are held to 24 of the 32 slots
   (audit NET-6).
+- **A crafted Matroska SeekHead no longer crashes the app during prewarm.** A SeekPosition near the
+  top of the 64-bit range is skipped instead of overflowing (audit DMX-2).
+- **The held source connection no longer sends media-server credentials to a redirect target on
+  another origin**, and writes the request path as the URL spells it, so an encoded line break can
+  no longer inject header lines and IPv6 hosts get a valid Host header (audit DMX-3, DMX-4).
 
 ### Fixed
 
+- **An origin that ignores Range no longer streams the whole file into memory.** Bytes past the
+  requested range are dropped and the connection is ended. Such an origin could never seek, and a
+  file larger than memory got the app killed; it now ends in a read error instead, and
+  `LoadOptions.sequentialOrigin` stays the way to play one (audit DMX-1).
+- **A 206 that starts somewhere other than the requested offset is refused** instead of shifting every
+  later read (audit DMX-5).
+- **A length-less stream that drops or stalls reports an error** instead of ending playback as if the
+  title had finished, and its buffer has a hard 128 MB bound for a transport that ignores the suspend
+  (audit DMX-6, DMX-7).
+- **A failed chunk fetch during a probe or still extraction reports an error** instead of a truncated
+  file (audit DMX-10).
+- **Tail prefetch checks its span against the file size and tolerates over-delivered bytes**, instead
+  of giving up suffix ranges for that origin until restart (audit DMX-8, DMX-9).
+- **Two demuxer races closed:** the provider reference during a cross-thread abort, and stream lookups
+  while an MPEG-TS read adds streams (audit DMX-11, NAT-7).
 - **Playlist and held relay bodies are capped while they download, not after.** A runaway origin can
   no longer grow one until the app is killed (audit NET-10).
 - **The accept loop backs off when the process runs out of file descriptors**, instead of spinning a
