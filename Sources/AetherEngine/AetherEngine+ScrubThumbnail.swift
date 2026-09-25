@@ -5,7 +5,8 @@ extension AetherEngine {
 
     /// The 2026-09-02 Whole Title trace opened 30 software decoders in 20 seconds while
     /// scrubbing three resident 100 MB segments and back. Six keeps that small working set
-    /// warm; the segment bytes are already disk-backed and the bound remains fixed.
+    /// warm; each extractor maps its segment file (audit SEG-2), so the entries hold clean
+    /// file-backed pages rather than heap copies, and the bound remains fixed.
     nonisolated static let scrubThumbnailExtractorLimit = 6
 
     /// Cache-backed scrub still for the active native session (live or VOD). Decodes from
@@ -54,7 +55,8 @@ extension AetherEngine {
             scrubThumbnailExtractors.append(hit)
             extractor = hit.extractor
         } else {
-            extractor = FrameExtractor(reader: DataIOReader(data: source.data), formatHint: "mp4")
+            guard let reader = source.makeReader() else { return nil }
+            extractor = FrameExtractor(reader: reader, formatHint: "mp4")
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
             trimScrubThumbnailExtractors()
         }

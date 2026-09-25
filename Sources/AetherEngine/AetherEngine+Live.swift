@@ -38,7 +38,8 @@ extension AetherEngine {
             scrubThumbnailExtractors.append(hit)
             extractor = hit.extractor
         } else {
-            extractor = FrameExtractor(reader: DataIOReader(data: source.data), formatHint: "mp4")
+            guard let reader = source.makeReader() else { return nil }
+            extractor = FrameExtractor(reader: reader, formatHint: "mp4")
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
             while scrubThumbnailExtractors.count > 2 {
                 let evicted = scrubThumbnailExtractors.removeFirst()

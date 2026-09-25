@@ -2390,15 +2390,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return prov?.sealedLiveTargetDurationSeconds
     }
 
-    func scrubThumbnailSource(atSeconds seconds: Double) -> (data: Data, segmentIndex: Int)? {
+    /// A resident segment a scrub still can decode from. Resolving it reads nothing, so an extractor
+    /// LRU hit costs no I/O; `makeReader()` maps the segment file rather than reading it into the heap
+    /// (audit SEG-2). SegmentCache only ever replaces or unlinks a segment file, never rewrites it in
+    /// place, so a mapping stays valid for as long as the reader holds it.
+    struct ScrubThumbnailSource: Sendable {
+        let segmentIndex: Int
+        let initData: Data
+        let segmentURL: URL
+
+        func makeReader() -> DataIOReader? {
+            guard let segment = try? Data(contentsOf: segmentURL, options: .alwaysMapped) else { return nil }
+            return DataIOReader(parts: [initData, segment])
+        }
+    }
+
+    func scrubThumbnailSource(atSeconds seconds: Double) -> ScrubThumbnailSource? {
         restartLock.lock()
         let prov = provider
         restartLock.unlock()
         guard let prov else { return nil }
-        guard let seg = prov.thumbnailSegment(atSeconds: seconds) else { return nil }
-        guard let initData = prov.peekInitSegment(),
-              let segData = try? Data(contentsOf: seg.fileURL) else { return nil }
-        return (initData + segData, seg.index)
+        guard let seg = prov.thumbnailSegment(atSeconds: seconds),
+              let initData = prov.peekInitSegment() else { return nil }
+        return ScrubThumbnailSource(segmentIndex: seg.index, initData: initData, segmentURL: seg.fileURL)
     }
 
     public func stop() {
