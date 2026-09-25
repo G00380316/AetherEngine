@@ -75,7 +75,10 @@ final class HLSOriginRelay: @unchecked Sendable {
     /// invalidated.
     private let session: URLSession
 
-    init() {
+    private let heldBodyLimit: Int
+
+    init(maximumHeldBodyBytes: Int = HLSOriginRelay.maximumHeldBodyBytes) {
+        heldBodyLimit = maximumHeldBodyBytes
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.urlCache = nil
@@ -364,6 +367,13 @@ final class HLSOriginRelay: @unchecked Sendable {
         case failed
     }
 
+    /// Audit NET-10: a held body is buffered whole, and the resource timeout alone let a hostile or
+    /// broken origin grow one for two minutes at link rate. A playlist larger than this is not one a
+    /// player will get through; a held media body (a segment served without a length) gets the wider
+    /// cap, and an error body is dropped past it while its status still goes through.
+    static let maximumHeldPlaylistBytes = 16 * 1024 * 1024
+    static let maximumHeldBodyBytes = 64 * 1024 * 1024
+
     /// The answers that mean "you are asking too often", which arm the pacer for this origin.
     private static let refusalStatuses: Set<Int> = [429, 503, 509]
 
@@ -424,11 +434,20 @@ final class HLSOriginRelay: @unchecked Sendable {
         // A length the origin did not state cannot be framed for the player without buffering the
         // body to measure it, and a playlist has to be read whole to be rewritten at all.
         let declaredLength = http.expectedContentLength
-        let mustHold = declaredLength < 0
-            || !(200..<300).contains(http.statusCode)
-            || Self.looksLikePlaylist(url: origin, contentType: contentType)
+        let isPlaylist = Self.looksLikePlaylist(url: origin, contentType: contentType)
+        let isSuccess = (200..<300).contains(http.statusCode)
+        let mustHold = declaredLength < 0 || !isSuccess || isPlaylist
         guard !mustHold else {
-            let body = pump.awaitWholeBody()
+            let limit = isPlaylist ? min(Self.maximumHeldPlaylistBytes, heldBodyLimit) : heldBodyLimit
+            guard let body = pump.awaitWholeBody(limit: limit) else {
+                EngineLog.emit(
+                    "[HLSOriginRelay] \(origin.host ?? "origin") answered \(http.statusCode) with a body over "
+                        + "\(limit) bytes; not holding it", category: .hlsServer)
+                if isSuccess { return .failed }
+                return .held(
+                    Fetched(status: http.statusCode, body: Data(), contentType: contentType,
+                            contentRange: contentRange))
+            }
             if let error = pump.awaitFailure() {
                 // A playlist read halfway is not a playlist, and the framing of a held answer is its
                 // own length, so there is nothing here worth passing on.
@@ -568,14 +587,20 @@ private final class UpstreamPump: NSObject, URLSessionDataDelegate, @unchecked S
         return head
     }
 
-    /// Every byte of the body, for the answers that have to be read whole.
-    func awaitWholeBody() -> Data {
+    /// Every byte of the body, for the answers that have to be read whole, or nil once it passes
+    /// `limit`, which also stops the transfer.
+    func awaitWholeBody(limit: Int) -> Data? {
+        if let head = awaitHead(), head.expectedContentLength > Int64(limit) {
+            abandon()
+            return nil
+        }
         var body = Data()
-        _ = drain { chunk in
+        let complete = drain { chunk in
+            guard body.count + chunk.count <= limit else { return false }
             body.append(chunk)
             return true
         }
-        return body
+        return complete ? body : nil
     }
 
     /// Hands each chunk to `write` as it arrives, until the body ends or a write fails. Returns

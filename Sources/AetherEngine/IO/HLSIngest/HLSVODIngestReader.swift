@@ -510,13 +510,13 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     }
 
     private func fetchPlaylist(_ url: URL) async throws -> (HLSPlaylist, URL) {
-        let (data, response) = try await session.data(for: makeRequest(url))
+        let (data, response) = try await BoundedPlaylistFetch.data(
+            for: makeRequest(url), session: session, limit: Self.maximumPlaylistBytes)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
             throw HLSIngestError.playlistUnreachable(status: status)
         }
-        guard data.count <= Self.maximumPlaylistBytes,
-              let text = String(data: data, encoding: .utf8) else {
+        guard let text = String(data: data, encoding: .utf8) else {
             throw HLSIngestError.playlistInvalid(reason: "playlist is not bounded UTF-8")
         }
         return (try HLSPlaylistParser.parse(text), response.url ?? url)

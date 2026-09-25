@@ -23,6 +23,9 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private let credentialOrigin: URL
     private let role: Role
     private let fifo = ByteFIFO(capacity: 16 * 1024 * 1024)
+    /// Wider than the VOD reader's 2 MB: a live window with hours of DVR at short segments is a
+    /// legitimately long playlist, and this one is refetched every few seconds rather than once.
+    static let maximumPlaylistBytes = 8 * 1024 * 1024
     private let session: URLSession
     private var ingestTask: Task<Void, Never>?
     private let startLock = NSLock()
@@ -566,7 +569,8 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
 
     /// Fetch + parse a playlist. Returns parsed playlist and final URL after redirects (relative segment URIs resolve against it).
     private func fetchPlaylist(_ url: URL) async throws -> (HLSPlaylist, URL) {
-        let (data, response) = try await session.data(for: makeRequest(url))
+        let (data, response) = try await BoundedPlaylistFetch.data(
+            for: makeRequest(url), session: session, limit: Self.maximumPlaylistBytes)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
             throw HLSIngestError.playlistUnreachable(status: status)

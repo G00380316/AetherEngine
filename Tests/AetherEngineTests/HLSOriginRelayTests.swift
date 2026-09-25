@@ -231,6 +231,41 @@ struct HLSOriginRelayAddressingTests {
     // which a macOS `swift build` never shows.
     #if os(macOS)
 
+    @Test("A held body that outgrows its cap is refused instead of buffered whole (audit NET-10)")
+    func heldBodyIsBounded() async throws {
+        // No length stated, so the relay has to hold it; eight 64 KB slices against a 256 KB cap.
+        let upstream = try #require(await TricklingOrigin(slices: 8, pauseSeconds: 0, declaresLength: false))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay(maximumHeldBodyBytes: 256 * 1024)
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let entry = try #require(server.relayURL(for: URL(string: "http://127.0.0.1:\(upstream.port)/seg.ts")!))
+        var request = URLRequest(url: entry)
+        request.timeoutInterval = 30
+        let (body, response) = try await URLSession.shared.data(for: request)
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 502, "an over-cap held body was relayed (\(body.count) bytes)")
+    }
+
+    @Test("A held body under its cap still arrives whole")
+    func heldBodyUnderCapArrives() async throws {
+        let upstream = try #require(await TricklingOrigin(slices: 2, pauseSeconds: 0, declaresLength: false))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay(maximumHeldBodyBytes: 256 * 1024)
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let entry = try #require(server.relayURL(for: URL(string: "http://127.0.0.1:\(upstream.port)/seg.ts")!))
+        var request = URLRequest(url: entry)
+        request.timeoutInterval = 30
+        let (body, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(body.count == TricklingOrigin.totalBytes(slices: 2))
+    }
+
     @Test("A range is forwarded verbatim and its framing comes back")
     func rangesPassThroughUntouched() async throws {
         let upstream = try #require(await RangeEchoOrigin())

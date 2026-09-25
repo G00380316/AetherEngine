@@ -26,6 +26,9 @@ enum HLSCarriageProbe {
     private static let sharedSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
+        // The request timeout is an idle timeout; without a resource ceiling an origin trickling a
+        // byte every few seconds kept a probe open for the 7-day default (audit NET-10).
+        configuration.timeoutIntervalForResource = 30
         return URLSession(
             configuration: configuration, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }()
@@ -205,12 +208,13 @@ enum HLSCarriageProbe {
     ) async throws -> (HLSPlaylist, URL) {
         let request = makeRequest(
             url, httpHeaders: RedirectHeaderPolicy.scoped(httpHeaders, grantedFor: credentialOrigin, sentTo: url))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await BoundedPlaylistFetch.data(
+            for: request, session: session, limit: maximumPlaylistBytes)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
             throw HLSIngestError.playlistUnreachable(status: status)
         }
-        guard data.count <= maximumPlaylistBytes, let text = String(data: data, encoding: .utf8) else {
+        guard let text = String(data: data, encoding: .utf8) else {
             throw HLSIngestError.playlistInvalid(reason: "playlist is not bounded UTF-8")
         }
         return (try HLSPlaylistParser.parse(text), response.url ?? url)
