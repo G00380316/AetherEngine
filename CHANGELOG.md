@@ -10,7 +10,26 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- **The origin relay no longer writes the media server's access token into its local URLs.** They
+  name the origin by a per-session sealed reference, so the token no longer reaches the request
+  log, `load url=` lines, rewritten playlists or an AirPlay receiver (audit NET-1).
+- **Log redaction also catches credentials that are percent-encoded, or encoded twice, inside
+  another URL.** `api%5Fkey%3D...` is now stripped the same as `api_key=...` (audit NET-1).
+- **Credential headers stay with the host's own origin when a playlist names another host or drops
+  to http.** Other headers still go everywhere, the same rule redirects already follow (audit NET-7).
+- **A LAN peer can no longer hold the loopback server's connection slots.** Connections without the
+  session token must send a request head within 10 s, and LAN peers are held to 24 of the 32 slots
+  (audit NET-6).
+
+### Fixed
+
+- **Playlist and held relay bodies are capped while they download, not after.** A runaway origin can
+  no longer grow one until the app is killed (audit NET-10).
+- **The accept loop backs off when the process runs out of file descriptors**, instead of spinning a
+  core and flooding the log (audit NET-13).
+- **The server's stop line names the port it released** (audit NET-12).
 
 ## [7.16.1] - 2026-09-24
 
