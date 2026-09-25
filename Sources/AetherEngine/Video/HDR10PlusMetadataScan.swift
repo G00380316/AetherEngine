@@ -45,7 +45,7 @@ enum HDR10PlusMetadataScan {
     static func bytesCarryHDR10Plus(
         _ data: UnsafePointer<UInt8>?, size: Int, codecID: AVCodecID, framing: VideoNALFraming = .annexB
     ) -> Bool {
-        guard let data, size > 0 else { return false }
+        guard let data, size > 0, mayContainT35Header(data, size: size) else { return false }
         let bytes = UnsafeBufferPointer(start: data, count: size)
         switch codecID {
         case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC:
@@ -55,6 +55,15 @@ enum HDR10PlusMetadataScan {
         default:
             return false
         }
+    }
+
+    /// Audit BIT-4: exact prefilter. The playback scan runs on every video packet until its first hit,
+    /// so a source without HDR10+ paid a byte-wise NAL walk for the whole session. The T.35 header
+    /// holds no `00 00` pair, so no emulation-prevention byte can land inside it and AV1 does not
+    /// escape at all: a payload that carries HDR10+ in-band carries these six bytes verbatim.
+    static func mayContainT35Header(_ data: UnsafePointer<UInt8>, size: Int) -> Bool {
+        guard size >= t35Header.count else { return false }
+        return t35Header.withUnsafeBufferPointer { memmem(data, size, $0.baseAddress, $0.count) != nil }
     }
 
     // MARK: - H.264 / HEVC
