@@ -1320,6 +1320,9 @@ public final class AetherEngine: ObservableObject {
     /// producer or software host is owned by its session and may be torn down under us.
     weak var activeRecordingHost: AnyObject?
 
+    /// Which recording a writer failure belongs to (audit CORE-5). Bumped once per writer.
+    var recordingGeneration: UInt64 = 0
+
     /// Republishes `recordingState` progress at 1 Hz while a recording runs.
     var recordingProgressTimer: Timer?
 

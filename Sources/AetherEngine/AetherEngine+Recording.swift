@@ -40,9 +40,7 @@ public extension AetherEngine {
             url: url,
             streams: descriptors,
             ceilingBytes: Self.recordingQueueCeilingBytes,
-            onFailure: { [weak self] failure in
-                Task { @MainActor in self?.recordingDidFail(failure) }
-            }
+            onFailure: makeRecordingFailureHandler()
         )
 
         activeRecording = writer
@@ -107,9 +105,26 @@ extension AetherEngine {
         recordingState = .ended(reason)
     }
 
+    /// The writer's failure callback, bound to the recording it is built for. The writer reports
+    /// from its teardown queue after draining and writing the trailer, so the report of a recording
+    /// that has already ended can land after the next one started (a zap with auto-record). Without
+    /// the binding it ended that next recording, unfinalized, with the previous one's reason
+    /// (audit CORE-5).
+    func makeRecordingFailureHandler() -> @Sendable (RecordingFailure) -> Void {
+        recordingGeneration &+= 1
+        let generation = recordingGeneration
+        return { [weak self] failure in
+            Task { @MainActor in self?.recordingDidFail(failure, generation: generation) }
+        }
+    }
+
     /// Called from the writer's failure callback, already hopped to the main actor.
-    func recordingDidFail(_ failure: RecordingFailure) {
-        guard activeRecording != nil else { return }
+    func recordingDidFail(_ failure: RecordingFailure, generation: UInt64) {
+        guard activeRecording != nil, generation == recordingGeneration else {
+            EngineLog.emit("[Recording] failure of an earlier recording ignored: \(failure)",
+                           category: .session)
+            return
+        }
         (activeRecordingHost as? LiveRecordingHost)?.setRecordingSink(nil)
         activeRecordingHost = nil
         activeRecording = nil
@@ -194,9 +209,7 @@ extension AetherEngine {
             url: url,
             streams: host.recordingStreamDescriptors(),
             ceilingBytes: Self.recordingQueueCeilingBytes,
-            onFailure: { [weak self] failure in
-                Task { @MainActor in self?.recordingDidFail(failure) }
-            }
+            onFailure: makeRecordingFailureHandler()
         )
         activeRecording = writer
         activeRecordingHost = host
