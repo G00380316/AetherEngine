@@ -34,9 +34,20 @@ the public-API contract.
   instead of trapping (audit SEG-1).
 - **The Dolby Vision profile check can no longer read a whole file while playback is starting.** It
   stops after a fixed number of packets from any stream, or 64 MiB (audit BIT-2).
+- **Hostile playlists and disc images no longer crash the app.** An `EXT-X-MEDIA-SEQUENCE` near
+  `Int.max`, a crafted UDF partition map or descriptor sequence, a 4 GB ISO9660 directory length and a
+  `#EXTINF:inf` behind an injected subtitle sidecar all trapped; each is now rejected or bounded at
+  parse, and the sidecar playlist fetch is size-capped (audit NET-3, NET-4, NET-5, NET-11, NAT-1,
+  NAT-5).
 
 ### Fixed
 
+- **CRLF-terminated HLS playlists parse.** In Swift `"\r\n"` is one Character, so splitting on `"\n"`
+  read the whole playlist as one line and rejected it on the live/VOD ingest, the audio tap and the
+  subtitle proxy (audit NET-2).
+- **A remote disc image only accepts a 206 that starts at the requested offset**, instead of placing
+  wrong bytes or buffering a whole-file 200. The UDF descriptor scan also stops at its Terminating
+  Descriptor again (audit NET-9, NET-11).
 - **Closing the player during a scrub restart no longer spins segment requests at full CPU**
   (audit SEG-3).
 - **A re-cut segment can no longer be dropped by a request that is reading it at the same moment**,
@@ -102,6 +113,7 @@ the public-API contract.
 
 - **Faster first segment after a seek on TrueHD sources, and less CPU for HDR10+ detection on sources
   without HDR10+** (audit SEG-6, BIT-4).
+- **The live ingest FIFO no longer re-copies its whole buffer on every read** (audit NET-8).
 
 ## [7.16.1] - 2026-09-24
 
