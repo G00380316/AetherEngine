@@ -161,6 +161,15 @@ final class HLSPlaylistTrackerTests: XCTestCase {
         XCTAssertEqual(new.map(\.uri), ["e", "f"])
     }
 
+    // audit NET-3: a MEDIA-SEQUENCE the parser somehow let through near Int.max used to trap
+    // `mediaSequence + segments.count` here. `&+`/`&-` compute mod 2^64, so relative distances
+    // (and therefore which segments are new) come out the same as at a small sequence number.
+    func testDoesNotTrapOnMediaSequenceNearIntMax() {
+        var tracker = HLSPlaylistTracker(edgeOffset: 3, minJoinCoverageSeconds: 8)
+        let new = tracker.newSegments(in: playlist(sequence: Int.max - 1, uris: ["a", "b", "c"]))
+        XCTAssertEqual(new.map(\.uri), ["b", "c"])
+    }
+
     func testJoinSegmentLimitAppliesTheMarginOnlyBelowTheCap() {
         XCTAssertEqual(HLSPlaylistTracker.joinSegmentLimit(edgeOffset: 8, windowSegmentCount: 3), 8)
         XCTAssertEqual(HLSPlaylistTracker.joinSegmentLimit(edgeOffset: 8, windowSegmentCount: 4), 3)
