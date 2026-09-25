@@ -841,6 +841,19 @@ public struct LoadOptions: Sendable, Equatable {
     /// is demuxed), so this has nothing to act on there and the engine says so in the log.
     public var preferredDecodePath: DecodePath = .automatic
 
+    /// Whether a native session AVPlayer refuses on its merits may be rebuilt on the software path
+    /// (AE#561). Default `true`.
+    ///
+    /// When AVPlayer fails the item with a verdict on the MEDIA (`CoreMediaErrorDomain`), every native
+    /// recovery answers the same bytes again, so the engine spends one rebuild per session on
+    /// `SoftwarePlaybackHost`, whose libavcodec skips the frame Apple's parser refused. `false`
+    /// declines that rung: the failure surfaces as `.error` with `PlaybackErrorKind.nativeItemFailed`,
+    /// the way it did before 7.9.0, for a host that re-plans a failing title with a ladder of its own
+    /// (AE#629). Either way `softwarePathEscalations` says when the rung is taken.
+    ///
+    /// A tuning field: correctable on a playing session through `reloadAtCurrentPosition(applying:)`.
+    public var escalatesToSoftwarePath: Bool = true
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -892,7 +905,8 @@ public struct LoadOptions: Sendable, Equatable {
         audioDelaySeconds: Double = 0,
         deinterlaceMode: DeinterlaceMode = .auto,
         deinterlaceFieldRate: DeinterlaceFieldRate = .field,
-        preferredDecodePath: DecodePath = .automatic
+        preferredDecodePath: DecodePath = .automatic,
+        escalatesToSoftwarePath: Bool = true
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -935,6 +949,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
         self.preferredDecodePath = preferredDecodePath
+        self.escalatesToSoftwarePath = escalatesToSoftwarePath
     }
 }
 

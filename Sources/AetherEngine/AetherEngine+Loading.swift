@@ -1613,6 +1613,15 @@ extension AetherEngine {
                             message: "item death at a frozen position, revive budget exhausted",
                             positionSeconds: position.isFinite ? max(0, position) : 0
                         )
+                        // AE#629: a host that declined the rung asked for exactly this failure. Left
+                        // unsaid, the session sits dead, which is what 7.8.1 did here too.
+                        guard self.loadedOptions.escalatesToSoftwarePath else {
+                            EngineLog.emit(
+                                "[AetherEngine] #629 the host declined the software-path rung; "
+                                + "surfacing the item death", category: .engine)
+                            self.publishError(Self.absorbedFailure(request))
+                            return
+                        }
                         Task { @MainActor [weak self] in await self?.escalateToSoftwarePath(request) }
                         return
                     }
@@ -1643,11 +1652,13 @@ extension AetherEngine {
         let escalationBudget = softwarePathEscalationBudget
         let escalationPreferred = loadedOptions.preferredDecodePath
         let escalationRemoteHLS = loadedOptions.nativeRemoteHLS
+        let escalationAllowed = loadedOptions.escalatesToSoftwarePath
         host.softwarePathAvailability = {
             SoftwarePathEscalation.Availability(
                 alreadyEscalated: escalationBudget.isSpent,
                 preferredDecodePath: escalationPreferred,
-                nativeRemoteHLS: escalationRemoteHLS
+                nativeRemoteHLS: escalationRemoteHLS,
+                hostAllowsEscalation: escalationAllowed
             )
         }
         host.$pendingSoftwarePathEscalation
@@ -2210,6 +2221,7 @@ extension AetherEngine {
         // It follows the TARGET route, not the previous one: a rebuild that flips to software renders
         // into its own layer, and a preserved host would leave AVKit bound to a stale player with
         // audio still flowing into the next load (the release `load()` does by hand on that branch).
+        claimSoftwarePathTakeover()   // AE#629
         stopInternal(resetDisplayCriteria: false, keepNativeHost: !targetSoftwarePath, keepCustomReader: true)
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         let gen = loadGeneration

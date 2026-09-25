@@ -1365,6 +1365,13 @@ public final class AetherEngine: ObservableObject {
     /// fired and which of its own tracks matches. No replay; subscribe per session.
     public let systemCaptionRequest = PassthroughSubject<SystemCaptionRequest, Never>()
 
+    /// Fires when a native session AVPlayer refused on its merits is rebuilt on the software path
+    /// (AE#561), carrying the failure the rebuild absorbed. Without it a host sees only `videoRoute`
+    /// change, which a host re-planning failing titles itself cannot tell from a routing decision
+    /// (AE#629). `LoadOptions.escalatesToSoftwarePath = false` declines the rebuild instead. No
+    /// replay; subscribe per session.
+    public let softwarePathEscalations = PassthroughSubject<SoftwarePathEscalationEvent, Never>()
+
     // MARK: - Scrub thumbnails
 
     /// LRU (cap 2) of FrameExtractor contexts for cache-backed scrub thumbnails (live and
@@ -1916,6 +1923,10 @@ public final class AetherEngine: ObservableObject {
     /// the time `load()` runs they look identical.
     private var startupContinuesAcrossReroute = false
 
+    /// AE#629: generations of the `load()` calls a caller is still awaiting. The software-path
+    /// rebuild reads it to tell a startup it is taking over from a session that already returned.
+    var waitingLoadGenerations: Set<UInt64> = []
+
     /// Open a startup sequence for the load now beginning, and return its generation for the call
     /// sites that have to record checkpoints from detached work. A reroute continues the sequence
     /// already in flight instead of opening a new one.
@@ -1938,6 +1949,12 @@ public final class AetherEngine: ObservableObject {
     /// `startupContinuesAcrossReroute`).
     func continueStartupAcrossReroute() {
         startupContinuesAcrossReroute = true
+    }
+
+    /// Withdraw a continuation that no `load()` consumed, because the reroute was refused before it
+    /// reached one. Left set, it would fold the host's NEXT load into a startup that already ended.
+    func abandonStartupContinuation() {
+        startupContinuesAcrossReroute = false
     }
 
     /// Record a checkpoint against a startup generation. `generation` defaults to the running one,
@@ -2319,6 +2336,14 @@ public final class AetherEngine: ObservableObject {
     /// the media. Replaced (not reset) on teardown, so a closure held by a dead host cannot spend
     /// the next session's.
     var softwarePathEscalationBudget = SoftwarePathEscalation.Budget()
+
+    /// AE#629: the escalation rebuild in flight or finished, kept so a `load()` whose startup it
+    /// superseded can wait for it instead of throwing. Matched by generation, so a stale one is inert.
+    var softwarePathTakeover: SoftwarePathEscalation.Takeover?
+    /// The escalation rebuild most recently started, and the generation it is armed to take over
+    /// until its teardown claims it (see `claimSoftwarePathTakeover`).
+    var softwarePathRebuild: Task<Void, Error>?
+    var softwarePathTakeoverArm: UInt64?
     /// #65 final rung, storm shape: on a frozen live playlist each stage-2 reload replays the tail,
     /// re-stalls within seconds, and the fresh stall SUPERSEDES the ladder task before its
     /// post-reload rung can run, so the reload cycle alone would loop forever. This gate persists
@@ -3650,6 +3675,43 @@ public final class AetherEngine: ObservableObject {
         audioSourceStreamIndex: Int32? = nil,
         discTitleID: Int? = nil
     ) async throws -> SourceProbe? {
+        let attempt = LoadAttempt()
+        defer { if let gen = attempt.generation { waitingLoadGenerations.remove(gen) } }
+        do {
+            return try await loadSession(
+                source: source, startPosition: startPosition, options: options,
+                audioSourceStreamIndex: audioSourceStreamIndex, discTitleID: discTitleID,
+                attempt: attempt)
+        } catch is CancellationError {
+            // AE#629: the engine took this startup over itself (the AE#561 rebuild), so the caller is
+            // still waiting for the same thing and gets it, the way a #361 reroute keeps its wait. A
+            // load the HOST superseded matches no takeover and unwinds as before.
+            guard let generation = attempt.generation,
+                  let takeover = softwarePathTakeover,
+                  takeover.supersededGeneration == generation else { throw CancellationError() }
+            EngineLog.emit(
+                "[AetherEngine] #629 load (gen \(generation)) follows the software-path rebuild "
+                + "instead of unwinding", category: .engine)
+            try await takeover.rebuild.value
+            return attempt.probe
+        }
+    }
+
+    /// What `loadSession` tells the public `load` about itself: the generation it ran under and the
+    /// probe it assembled, which a load followed across a takeover still returns (AE#629).
+    final class LoadAttempt {
+        var generation: UInt64?
+        var probe: SourceProbe?
+    }
+
+    private func loadSession(
+        source: MediaSource,
+        startPosition: Double?,
+        options: LoadOptions,
+        audioSourceStreamIndex: Int32?,
+        discTitleID: Int?,
+        attempt: LoadAttempt
+    ) async throws -> SourceProbe? {
         var source = source
         var options = options
         // #436: a speed the host set belongs to the item it was set on. The rebuilds a session makes
@@ -3697,6 +3759,7 @@ public final class AetherEngine: ObservableObject {
         // here bounces the panel through SDR before apply() re-negotiates the same mode on video->video
         // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
+        claimSoftwarePathTakeover()   // AE#629
         stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
         if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
@@ -3712,6 +3775,8 @@ public final class AetherEngine: ObservableObject {
         DiscReader.clearCache()
         // Capture generation; every suspension point re-checks for supersession.
         let gen = loadGeneration
+        attempt.generation = gen
+        waitingLoadGenerations.insert(gen)
         // #361: open the host-visible startup sequence. A reroute re-entering load() continues the
         // one already running rather than starting a second.
         let startupGen = beginStartupProgress()
@@ -4196,6 +4261,7 @@ public final class AetherEngine: ObservableObject {
         let sourceProbe: SourceProbe? = probeOpened
             ? Self.makeSourceProbe(demuxer: probe, displayURL: url)
             : nil
+        attempt.probe = sourceProbe
         // Resolve the initial audio track: an explicit host override wins, else the ordered language
         // preference (#72) resolved from this single probe. selectedAudio is nil when neither applies,
         // so the session keeps its own default pick (empty preferences + no override is a behavioural

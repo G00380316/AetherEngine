@@ -400,6 +400,6 @@ enum SessionOptionCorrection {
         "declaredDurationSeconds", "probesize", "maxAnalyzeDuration", "preferredAudioLanguages",
         "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "autoplay",
         "audioDelaySeconds", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
-        "isLiveRejoin", "subtitleSessionCarryover",
+        "escalatesToSoftwarePath", "isLiveRejoin", "subtitleSessionCarryover",
     ]
 }
