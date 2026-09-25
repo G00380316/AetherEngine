@@ -68,6 +68,31 @@ struct NALUnitChainTests {
         #expect(Self.run([0x00, 0x00, 0x01, 0x26, 0x01, 0xAA, 0xBB, 0xCC]) == nil)
     }
 
+    /// Audit BIT-1: a first NAL of 256 to 511 bytes has the 4-byte length `00 00 01 xx`, which the
+    /// head test alone reads as a start code, so the overlong length behind it reached the parser.
+    @Test("A 256-511 byte first NAL no longer hides an overrun once the track walked exactly")
+    func threeByteHeadIsALengthOnceConfirmed() {
+        let first = Self.nal([0x4E, 0x01] + [UInt8](repeating: 0x5A, count: 318))
+        #expect(Array(first.prefix(3)) == [0x00, 0x00, 0x01])
+        let broken: [UInt8] = [0x16, 0xE5, 0x7A, 0xB3] + [UInt8](repeating: 0x5A, count: 96)
+        let sample = first + broken
+
+        #expect(Self.run(sample) == nil, "unconfirmed, the head still reads as Annex B")
+        let confirmed = sample.withUnsafeBytes {
+            NALUnitChain.completeRunLength($0, lengthPrefixSize: 4, framingConfirmed: true)
+        }
+        #expect(confirmed == first.count)
+
+        // The healthy sample of the same shape is what confirms the framing in the first place.
+        #expect(first.withUnsafeBytes { NALUnitChain.walksExactly($0, lengthPrefixSize: 4) })
+        // Annex B never confirms it, and a 4-byte start code stays refused even once confirmed.
+        let annexB: [UInt8] = [0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xAA, 0xBB, 0x00, 0x00, 0x01, 0x02, 0x01]
+        #expect(!annexB.withUnsafeBytes { NALUnitChain.walksExactly($0, lengthPrefixSize: 4) })
+        #expect(annexB.withUnsafeBytes {
+            NALUnitChain.completeRunLength($0, lengthPrefixSize: 4, framingConfirmed: true)
+        } == nil)
+    }
+
     @Test("The prefix width is honoured, not assumed to be four")
     func widthIsHonoured() {
         let two = Self.nal([0x26, 0x01, 0xAA], lengthPrefixSize: 2)

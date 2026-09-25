@@ -174,6 +174,19 @@ final class MP4SegmentMuxer {
         ProcessInfo.processInfo.environment["AETHER_DISABLE_NAL_SANITIZER"] != nil
     /// How many video samples the AE#561 sanitizer has had to cut, over this muxer's life.
     private var truncatedVideoSamples: Int = 0
+    /// Audit BIT-1: a video sample of this track walked exactly as a length-prefixed chain, so a
+    /// `00 00 01` head is a 256-511 byte length from here on, not an Annex B start code.
+    private var videoNALFramingConfirmed = false
+
+    private func sanitizerCut(_ bytes: UnsafeRawBufferPointer, lengthPrefixSize: Int) -> Int? {
+        let cut = NALUnitChain.completeRunLength(
+            bytes, lengthPrefixSize: lengthPrefixSize, framingConfirmed: videoNALFramingConfirmed)
+        if cut == nil, !videoNALFramingConfirmed,
+           NALUnitChain.walksExactly(bytes, lengthPrefixSize: lengthPrefixSize) {
+            videoNALFramingConfirmed = true
+        }
+        return cut
+    }
 
     /// Only AC-3 / E-AC-3 / TrueHD build their mp4 sample entry from a parsed packet (dac3/dec3/dmlp),
     /// so only they can hit the "moov before audio parsed" wedge and need the #64-flush guard. Shared with
@@ -625,7 +638,7 @@ final class MP4SegmentMuxer {
            let lengthPrefixSize = videoNALLengthPrefixSize,
            let data = packet.pointee.data,
            packet.pointee.size > 0,
-           let complete = NALUnitChain.completeRunLength(
+           let complete = sanitizerCut(
                UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
                lengthPrefixSize: lengthPrefixSize
            ) {
