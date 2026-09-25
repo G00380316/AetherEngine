@@ -567,8 +567,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private static let liveWinHighWaterDefault = 64 * 1024 * 1024
     private static let winLowWater = 8 * 1024 * 1024
     // #220: how much the persistent reader asks for at a time. Bounds a single request's
-    // exposure by construction (an origin cannot serve more than it was asked for, whatever
-    // it thinks of flow control) and keeps the request cadence modest on a healthy link:
+    // exposure: `appendPersistentData` drops anything past the requested end and ends the
+    // transfer (audit DMX-1), so an origin that ignores Range or answers wider than asked
+    // cannot grow the window past it. It also keeps the request cadence modest on a healthy link:
     // one request per range boundary while the consumer keeps up, one per
     // highWater-to-lowWater drain cycle when the origin outruns it.
     static let persistentRangeBytes: Int64 = 32 * 1024 * 1024
@@ -780,6 +781,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         defer { winCond.unlock() }
         return activeTransfer != nil
+    }
+
+    /// Bytes the persistent window holds, behind and ahead of the cursor.
+    var windowBytesForTesting: Int {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return window.count
     }
 
     /// #220/#310: set when WE ended the connection at `winHighWater` (ending is the only
@@ -2501,6 +2509,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     EngineLog.emit("[AVIOReader] detour: server ignored Range (200 for offset \(offset)); rejecting", category: .demux, level: .verbose)
                     return .failed
                 }
+                if !isLive, let served = Self.misplacedRangeStart(http, requestedOffset: offset) {
+                    EngineLog.emit("[AVIOReader] detour: 206 starts at \(served), not \(offset); rejecting (audit DMX-5)", category: .demux)
+                    return .failed
+                }
             }
             addBytesFetched(data.count)
             return .ok(data)
@@ -2825,8 +2837,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         connGeneration &+= 1
         let generation = connGeneration
-        // #220: VOD asks for a fixed amount at a time, so the origin cannot deliver more than
-        // was requested and the window is bounded by construction rather than by reaction. Two
+        // #220: VOD asks for a fixed amount at a time, and anything an origin delivers past it is
+        // dropped at the append (audit DMX-1), so the window is bounded by the ask. Two
         // cases keep the open-ended form: live, where the material is produced in real time so
         // the origin cannot outrun media rate and the end is moving, and a source whose total
         // size is not resolved yet, where there is nothing to clamp the last range against. An
@@ -3113,14 +3125,28 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// delegate callback has no flow-control contract (TLS/H2 transports keep reading at
     /// line rate into unbounded internal buffers, the #174 EXC_RESOURCE). Force-copy
     /// releases source dispatch_data per delivery (same leak control as the chunk path).
-    fileprivate func appendPersistentData(_ data: Data, generation: Int) {
+    fileprivate func appendPersistentData(_ delivered: Data, generation: Int) {
         winCond.lock()
         guard generation == connGeneration, !isFullyClosed else {
             // #93: a slow read's summary line reports how much data the stale-generation
             // guard discarded while the read waited.
-            staleGenDroppedBytes += Int64(data.count)
+            staleGenDroppedBytes += Int64(delivered.count)
             winCond.unlock()
             return
+        }
+        // Audit DMX-1: the range is the bound only if bytes past its end are refused. A 200 that
+        // ignored Range at offset 0, or a 206 wider than asked, otherwise kept appending under
+        // `connEnded`, which also disarms the high-water end below, so the rest of the file
+        // streamed into the window. The excess is dropped and the transfer ended; the frontier
+        // refill asks for it properly.
+        var data = delivered
+        var overDelivered = false
+        if let end = connRangeEnd {
+            let room = end + 1 - (winStart + Int64(window.count))
+            if Int64(data.count) > room {
+                data = data.prefix(Int(max(0, room)))
+                overDelivered = true
+            }
         }
         lastDeliveryAt = DispatchTime.now()   // #309: the delivery-gap watchdog's only input
         var firstDataMs: Double? = nil
@@ -3164,9 +3190,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         addBytesFetched(count)
         // #220: the requested range has been delivered in full. That ends the connection on
         // purpose; the read loop re-requests at the frontier once the consumer has drawn down.
+        var overDeliveredTransfer: (any PersistentTransfer)?
         if let end = connRangeEnd, winStart + Int64(window.count) > end {
             connEndedAtRangeEnd = true
             connEnded = true
+            if overDelivered {
+                overDeliveredTransfer = activeTransfer
+                activeTransfer = nil
+            }
         }
         winCond.broadcast()
         // #310: past high water the connection is ENDED, not suspended. suspend() is
@@ -3195,6 +3226,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             winCond.broadcast()
         }
         winCond.unlock()
+        if let overDeliveredTransfer {
+            EngineLog.emit(
+                "[AVIOReader] \(label) gen=\(generation) origin delivered past the requested range "
+                + "end; ending the connection (audit DMX-1)",
+                category: .demux)
+            overDeliveredTransfer.cancelTransfer()
+            overDeliveredTransfer.releaseOriginTicket()
+        }
         if let toCancel {
             EngineLog.emit(
                 "[AVIOReader] \(label) window high water: \(ahead / 1024 / 1024)MB ahead; ending the "
@@ -3323,6 +3362,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             )
             isOK = false
         }
+        // Live is exempt for the same reason as above: its offset is bookkeeping, and the append
+        // anchors the bytes at the frontier whatever the origin calls them.
+        if isOK, !isLive, generation == connGeneration,
+           let served = Self.misplacedRangeStart(http, requestedOffset: requestedOffset) {
+            EngineLog.emit(
+                "[AVIOReader] \(label) gen=\(generation) 206 starts at \(served), not the requested "
+                + "\(requestedOffset); rejecting body (audit DMX-5)",
+                category: .demux
+            )
+            isOK = false
+        }
 
         if isOK {
             recordResolvedURL(respondedBy)
@@ -3359,7 +3409,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // #310: our own high-water cancel completes here as NSURLErrorCancelled. That end was
         // already logged where it was decided; reporting it as an error too would make every
         // drain cycle against a fast origin read like a transport fault.
-        let deliberateEnd = isCurrentGen && connEndedByBackpressure
+        let deliberateEnd = isCurrentGen && (connEndedByBackpressure || connEndedAtRangeEnd)
         let windowAhead = isCurrentGen ? (window.count - max(0, Int(position - winStart))) : 0
         winCond.broadcast()
         winCond.unlock()
@@ -3620,6 +3670,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Total size from a data-connection response: `Content-Range` total on a 206, or
     /// `Content-Length` on a from-0 2xx (origins that answer 200 ignoring Range). Nil when
     /// the origin gave no usable length (chunked, or an unknown `*` total). Issue #70.
+    /// Audit DMX-5: where a 206 says its body starts, when that is not where it was asked to.
+    /// Every ranged path here places the body at the REQUESTED offset, so a 206 aligned to an
+    /// edge's own chunk boundary would shift every later read by the difference. Nil for any other
+    /// status and for a Content-Range this cannot read (those keep the lenient historical path).
+    static func misplacedRangeStart(_ http: HTTPURLResponse, requestedOffset: Int64) -> Int64? {
+        guard http.statusCode == 206,
+              let value = http.value(forHTTPHeaderField: "Content-Range") else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        guard trimmed.lowercased().hasPrefix("bytes ") else { return nil }
+        let span = trimmed.dropFirst("bytes ".count).split(separator: "/", maxSplits: 1).first ?? ""
+        guard let dash = span.firstIndex(of: "-"),
+              let start = Int64(span[..<dash].trimmingCharacters(in: .whitespaces)) else { return nil }
+        return start == requestedOffset ? nil : start
+    }
+
     static func sizeFromResponse(_ http: HTTPURLResponse, requestedOffset: Int64) -> Int64? {
         // On a 206 the total lives ONLY in Content-Range; Content-Length is the partial span,
         // so a 206 with an unknown (`*`) or unparseable range must report no size, never fall
@@ -3876,6 +3941,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     if status == 200 && offset > 0 && !isLive {
                         EngineLog.emit(
                             "[AVIOReader] server ignored Range (200 for offset \(offset)); rejecting chunk",
+                            category: .demux
+                        )
+                        return nil
+                    }
+                    if !isLive, let served = Self.misplacedRangeStart(http, requestedOffset: offset) {
+                        EngineLog.emit(
+                            "[AVIOReader] chunk fetch: 206 starts at \(served), not \(offset); rejecting (audit DMX-5)",
                             category: .demux
                         )
                         return nil

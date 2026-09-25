@@ -30,6 +30,9 @@ final class ThrottledOriginServer: @unchecked Sendable {
         /// ended SHORT of its Content-Length - the observable behind the sequential reader's
         /// EIO-not-EOF distinction (a lost source must not read as end-of-media).
         case serveThenDrop(afterBytes: Int64)
+        /// Audit DMX-5: a 206 that starts `start` rather than where it was asked, the way an edge
+        /// that aligns ranges to its own chunk boundary answers. The body is that range's.
+        case serve206From(start: Int64)
     }
 
     let port: UInt16
@@ -314,6 +317,8 @@ final class ThrottledOriginServer: @unchecked Sendable {
         switch respond(requestIndex, offset, path) {
         case .serve206:
             break
+        case .serve206From(let start):
+            offset = max(0, min(start, totalSize - 1))
         case .serveThenGoSilent(let afterBytes):
             silentAfter = max(0, afterBytes)
         case .serveThenDrop(let afterBytes):
