@@ -4531,11 +4531,13 @@ public final class AetherEngine: ObservableObject {
         // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches
         // readyToPlay then renders nothing on the native path. QuickTime plays it via its own software decoder;
         // there is no analogous fallback on the native route, so route it to the SoftwarePlaybackHost
-        // (libavcodec), which decodes these profiles. VOD only: forced-native live keeps its verified path, and
-        // broadcast H.264 / HEVC is HW-decodable. Apple Silicon HW-decodes these, so the probe keeps them native.
+        // (libavcodec), which decodes these profiles. VOD only for H.264 / HEVC: forced-native live keeps its
+        // verified path, and broadcast H.264 / HEVC is HW-decodable. AV1 is judged on live too (audit HLS-5).
+        // Apple Silicon HW-decodes these, so the probe keeps them native.
         // #176: DV Profile 5 is exempt inside the policy; the raw-hvcC probe misjudges the dvh1 route and the
         // software path decodes IPT-PQ-c2 with a green/purple cast, so P5 must stay native unconditionally.
-        if !useSoftwarePath, !options.isLive, probeOpened,
+        if !useSoftwarePath, probeOpened,
+           VideoRoutingPolicy.consultsUndecodableFormatGate(codecID: detectedCodecID, isLive: options.isLive),
            let vStream = probe.stream(at: probe.videoStreamIndex),
            let codecpar = vStream.pointee.codecpar {
             let dvProfile = Self.dvProfile(stream: vStream)

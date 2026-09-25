@@ -125,6 +125,15 @@ enum VideoRoutingPolicy {
         }
     }
 
+    /// Whether a load consults `forcesSoftwareForUndecodableFormat` at all. H.264 / HEVC keep it VOD-only:
+    /// broadcast live is hardware-decodable and forced-native live keeps its verified path. AV1 is
+    /// consulted on live too (audit HLS-5 follow-up): a live AV1 High / Professional stream on a
+    /// hardware-AV1 device has no native picture, and live AV1 already goes to the software host
+    /// wherever hardware AV1 is missing entirely.
+    static func consultsUndecodableFormatGate(codecID: AVCodecID, isLive: Bool) -> Bool {
+        !isLive || codecID == AV_CODEC_ID_AV1
+    }
+
     /// Audit HLS-5: Apple's hardware AV1 decoders (A17 Pro, M3 and later) decode Main profile only,
     /// 8/10-bit 4:2:0. `av1Available` is a codec-level answer, so High (4:4:4) and Professional
     /// (4:2:2, 12-bit) reached AVPlayer and rendered nothing while dav1d would have played them.

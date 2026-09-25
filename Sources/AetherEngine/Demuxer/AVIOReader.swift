@@ -1468,6 +1468,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         readDeadline = .distantFuture
     }
 
+    private var readByteBudget = ReadByteBudget()
+    var readByteBudgetExhausted: Bool { readByteBudget.exhausted }
+    func beginReadByteBudget(_ bytes: Int64) { readByteBudget.begin(bytes) }
+    func endReadByteBudget() { readByteBudget.end() }
+
     /// Deadline expired; latches `readDeadlineFired` at the check sites.
     private var readDeadlinePassedOrAborted: Bool { isPastReadDeadline }
 
@@ -1588,13 +1593,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
         guard !isClosed else { return -1 }
         if readDeadlinePassedOrAborted { readDeadlineFired = true; return -1 }
+        guard let allowed = readByteBudget.allowance(size) else { return -1 }
         // Check usePersistentReader before isStreaming: live feeds without
         // Content-Length must use the reconnect-capable persistent path.
         let n: Int32
-        if usePersistentReader { n = readPersistent(into: buf, size: size) }
-        else if isStreaming { n = readStreaming(into: buf, size: size) }
-        else { n = readSeekable(into: buf, size: size) }
+        if usePersistentReader { n = readPersistent(into: buf, size: allowed) }
+        else if isStreaming { n = readStreaming(into: buf, size: allowed) }
+        else { n = readSeekable(into: buf, size: allowed) }
         if n > 0 { applyThrottle(deliveredBytes: Int(n)) }
+        readByteBudget.consumed(n)
         return n
     }
 
