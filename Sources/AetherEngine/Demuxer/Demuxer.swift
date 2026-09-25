@@ -692,14 +692,15 @@ public final class Demuxer: @unchecked Sendable {
     private func applyProbeBudget(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
         ctx.pointee.probesize = openProfile.probesize
         ctx.pointee.max_analyze_duration = openProfile.maxAnalyzeDuration
-        if let probeControl {
-            ctx.pointee.interrupt_callback = AVIOInterruptCB(
-                callback: { opaque in
-                    guard let opaque else { return 0 }
-                    return Unmanaged<ProbeControl>.fromOpaque(opaque).takeUnretainedValue().isStopped ? 1 : 0
-                },
-                opaque: Unmanaged.passUnretained(probeControl).toOpaque())
-        }
+        // Installed unconditionally: a local input's URLContext copies the callback at open, so the
+        // input byte budget could not reach it later.
+        ctx.pointee.interrupt_callback = AVIOInterruptCB(
+            callback: { opaque in
+                guard let opaque else { return 0 }
+                return Unmanaged<DemuxInterrupt>.fromOpaque(opaque).takeUnretainedValue()
+                    .shouldInterrupt() ? 1 : 0
+            },
+            opaque: Unmanaged.passUnretained(interrupt).toOpaque())
     }
 
     /// Demuxer fflags applied to every avformat_open_input.
@@ -2095,11 +2096,47 @@ public final class Demuxer: @unchecked Sendable {
     }
 
     /// Static metadata probes only. Strong ownership outlives the native interrupt callback.
-    var probeControl: ProbeControl?
+    var probeControl: ProbeControl? {
+        get { interrupt.probeControl }
+        set { interrupt.probeControl = newValue }
+    }
+
+    /// Target of the format context's interrupt callback, owned for the demuxer's whole life so the
+    /// unretained pointer libavformat holds cannot dangle.
+    private let interrupt = DemuxInterrupt()
+
+    /// Caps the source bytes libavformat may consume until `endInputByteBudget`, enforced below
+    /// `av_read_frame`. A pass that sets AVDISCARD_ALL on other streams needs this: the demuxer reads
+    /// and drops their blocks inside one `av_read_frame`, where no packet or packet-byte cap sees them.
+    /// Overshoot is at most one read. Call from the thread that reads packets.
+    func beginInputByteBudget(_ bytes: Int64) {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        if let provider = avioProvider {
+            provider.beginReadByteBudget(bytes)
+        } else if let pb = formatContext?.pointee.pb {
+            interrupt.armInputCeiling(pb: pb, bytes: bytes)
+        }
+    }
+
+    func endInputByteBudget() {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        avioProvider?.endReadByteBudget()
+        interrupt.disarmInputCeiling()
+    }
+
+    /// True when a read was refused because the budget armed by `beginInputByteBudget` was spent.
+    var inputByteBudgetExhausted: Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return (avioProvider?.readByteBudgetExhausted ?? false) || interrupt.inputCeilingHit
+    }
 
     func close() {
         avioProvider?.markClosed()  // unblocks av_read_frame (tvOS suspends threads in background)
         accessLock.lock()
+        interrupt.disarmInputCeiling()
         if formatContext != nil {
             avformat_close_input(&formatContext)
         }
@@ -2135,4 +2172,35 @@ enum DemuxerError: Error, CustomStringConvertible, LocalizedError {
     }
 
     var errorDescription: String? { description }
+}
+
+/// Answers libavformat's interrupt callback. `probeControl` is set before open; the input ceiling is
+/// armed and read only on the thread that holds the demuxer's access lock for the native call.
+private final class DemuxInterrupt: @unchecked Sendable {
+    var probeControl: ProbeControl?
+    private var pb: UnsafeMutablePointer<AVIOContext>?
+    private var ceiling: Int64 = .max
+    private(set) var inputCeilingHit = false
+
+    /// Local (URLContext) inputs only: a provider-backed input never consults this callback per read.
+    func armInputCeiling(pb: UnsafeMutablePointer<AVIOContext>, bytes: Int64) {
+        self.pb = pb
+        let (sum, overflow) = pb.pointee.bytes_read.addingReportingOverflow(max(0, bytes))
+        ceiling = overflow ? .max : sum
+        inputCeilingHit = false
+    }
+
+    func disarmInputCeiling() {
+        pb = nil
+        ceiling = .max
+    }
+
+    func shouldInterrupt() -> Bool {
+        if probeControl?.isStopped == true { return true }
+        if let pb, pb.pointee.bytes_read >= ceiling {
+            inputCeilingHit = true
+            return true
+        }
+        return false
+    }
 }

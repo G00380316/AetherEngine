@@ -25,6 +25,10 @@ public struct HDR10PlusDetectionOptions: Sendable, Equatable {
     /// This is the cap that actually binds on the content the feature targets: one UHD HEVC keyframe runs to
     /// several MB, so a handful of packets can exhaust it long before `maxPackets` does. A packet larger
     /// than the remaining budget stops the pass BEFORE inspection, even if it carries HDR10+.
+    ///
+    /// It also sets what the pass may read from the source in total, video or not: four times this
+    /// value, and never less than 4 MiB. That bound sits below the demuxer, so the blocks of the other
+    /// streams, which the demuxer reads and drops without ever handing them back as packets, count too.
     public var maxBytes: Int64
 
     /// Soft wall-clock budget, checked before and after reads and after inspection. NOT preemptive:
@@ -104,6 +108,15 @@ extension AetherEngine {
         return nil
     }
 
+    /// Source bytes the scan may consume, whatever stream they belong to. `maxBytes` alone bounds only
+    /// the video packets the scan sees; with the other streams at AVDISCARD_ALL the demuxer reads and
+    /// drops their blocks inside one `av_read_frame`, so a file with one video packet followed by
+    /// gigabytes of another stream would otherwise be read to its end. Saturating: `maxBytes` is public.
+    nonisolated static func hdr10PlusInputByteBudget(maxBytes: Int64) -> Int64 {
+        let (product, overflowed) = max(0, maxBytes).multipliedReportingOverflow(by: 4)
+        return overflowed ? .max : max(product, 4 * 1024 * 1024)
+    }
+
     /// Packet ceiling for the AVDISCARD_ALL fuse, saturating rather than trapping: `maxPackets` is public and
     /// `Int.max` is a plausible "no limit" value to pass.
     nonisolated static func hdr10PlusForeignPacketFuse(maxPackets: Int) -> Int {
@@ -148,6 +161,12 @@ extension AetherEngine {
         // Matroska's BlockAdditional carriage is attached by the demuxer to the packet, so the scan needs the
         // packets themselves either way; dropping the other streams keeps the byte budget spent on video.
         demuxer.discardAllStreamsExcept([videoIndex])
+        demuxer.beginInputByteBudget(Self.hdr10PlusInputByteBudget(maxBytes: options.maxBytes))
+        defer { demuxer.endInputByteBudget() }
+        // A read the input budget refused surfaces as an error or as EOF, depending on the container.
+        func readEnded(_ reason: HDR10PlusDetectionOutcome.StopReason) -> HDR10PlusDetectionOutcome.StopReason {
+            demuxer.inputByteBudgetExhausted ? .byteCap : reason
+        }
 
         let start = now()
         func elapsed() -> TimeInterval {
@@ -170,7 +189,7 @@ extension AetherEngine {
                 packet = try demuxer.readPacket()
             } catch {
                 return HDR10PlusDetectionOutcome(
-                    stopReason: .demuxError, packetsRead: packetsRead, bytesRead: bytesRead)
+                    stopReason: readEnded(.demuxError), packetsRead: packetsRead, bytesRead: bytesRead)
             }
             defer {
                 if let packet {
@@ -184,7 +203,7 @@ extension AetherEngine {
             }
             guard let pkt = packet else {
                 return HDR10PlusDetectionOutcome(
-                    stopReason: .demuxEOF, packetsRead: packetsRead, bytesRead: bytesRead)
+                    stopReason: readEnded(.demuxEOF), packetsRead: packetsRead, bytesRead: bytesRead)
             }
 
             var found = false
