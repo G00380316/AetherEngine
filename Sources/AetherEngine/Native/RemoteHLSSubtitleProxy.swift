@@ -179,6 +179,12 @@ enum RemoteHLSSubtitleProxy {
             configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }
 
+    /// Matches the sibling HLS fetchers (`HLSCarriageProbe`, `HLSVODIngestReader`). This proxy fetches
+    /// an origin master and one variant before AVPlayer ever opens the source, so an origin that
+    /// answers with a fast, unbounded stream under the m3u8 URL could otherwise buffer until jetsam
+    /// (audit NAT-5).
+    private static let maximumPlaylistBytes = 2 * 1024 * 1024
+
     /// Returns the body and the URL it finally came from; every relative URI in the playlist resolves
     /// against the latter, so a redirecting origin (Plex's transcode handoff) still rewrites correctly.
     private static func fetchPlaylist(_ url: URL,
@@ -189,9 +195,10 @@ enum RemoteHLSSubtitleProxy {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await BoundedPlaylistFetch.data(
+                for: request, session: session, limit: maximumPlaylistBytes)
         } catch {
-            throw Refusal.fetchFailed("\(error.localizedDescription)")
+            throw Refusal.fetchFailed("\(error)")
         }
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw Refusal.fetchFailed("HTTP \(http.statusCode)")
@@ -219,7 +226,7 @@ enum RemoteHLSSubtitleProxy {
         switch playlist {
         case .media(let media):
             guard media.hasEndList else { throw Refusal.notVOD }
-            return media.segments.reduce(0) { $0 + $1.duration }
+            return try sumSegmentDurations(media.segments)
         case .master(let master):
             guard let variant = master.variants.first,
                   let variantURL = HLSPlaylistParser.resolve(uri: variant.uri, against: url) else {
@@ -230,7 +237,27 @@ enum RemoteHLSSubtitleProxy {
                 throw Refusal.unusablePlaylist("variant is not a media playlist")
             }
             guard media.hasEndList else { throw Refusal.notVOD }
-            return media.segments.reduce(0) { $0 + $1.duration }
+            return try sumSegmentDurations(media.segments)
         }
+    }
+
+    /// Longest program this proxy will serve as a whole-program WebVTT rendition.
+    static let maxProgramDurationSeconds: Double = 7 * 24 * 3600
+
+    /// A hostile or malformed EXTINF (`inf`, negative, or a huge total) reaches `Int(Double)` in
+    /// `wholeSecondsCovering` downstream and traps (audit NAT-1); refuse it here instead. Internal
+    /// rather than private so the parsing rule is testable without a network fixture.
+    static func sumSegmentDurations(_ segments: [HLSMediaSegment]) throws -> Double {
+        var total = 0.0
+        for segment in segments {
+            guard segment.duration.isFinite, segment.duration >= 0 else {
+                throw Refusal.unusablePlaylist("EXTINF is not a finite, non-negative duration")
+            }
+            total += segment.duration
+        }
+        guard total.isFinite, total <= maxProgramDurationSeconds else {
+            throw Refusal.unusablePlaylist("program duration exceeds \(maxProgramDurationSeconds)s")
+        }
+        return total
     }
 }
