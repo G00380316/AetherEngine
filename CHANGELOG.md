@@ -39,9 +39,26 @@ the public-API contract.
   `#EXTINF:inf` behind an injected subtitle sidecar all trapped; each is now rejected or bounded at
   parse, and the sidecar playlist fetch is size-capped (audit NET-3, NET-4, NET-5, NET-11, NAT-1,
   NAT-5).
+- **SECURITY.md names the current supported release line** instead of 2.1.x, CI pins third-party
+  GitHub Actions to commit SHAs with Dependabot proposing updates, and aetherctl writes its debug
+  files into a private per-run temporary directory instead of fixed names in `/tmp` (audit OPS-1,
+  OPS-2, OPS-3).
 
 ### Fixed
 
+- **A seek on the software path no longer lets one pre-seek frame wedge the picture.** A seek that
+  landed while the decoder was retrying a full queue, or while the hardware decoder was preparing a
+  packet, still let that packet through after the flush (audit DEC-1, DEC-4, AE#492).
+- **Seeking in audio-only playback no longer leaves stale audio queued ahead of the new position**
+  (audit DEC-2).
+- **Subtitles in Picture in Picture no longer squash anamorphic video or turn HDR to SDR while a line
+  is showing.** Composited frames keep the source's pixel aspect ratio, colour tags and colour space,
+  and the compositor's buffer pool is no longer raced at stop (audit DEC-3, DEC-5).
+- **A bridged audio track no longer goes silent for the rest of the session after one frame the
+  resampler rejects.** The frame is dropped and logged, and the previous resampler keeps running
+  (audit DEC-6).
+- **Stopping a live recording no longer blocks the main thread while the backlog is written.**
+  `recordingState` turns `.ended` once the file is closed, a moment after the stop (audit REC-1).
 - **CRLF-terminated HLS playlists parse.** In Swift `"\r\n"` is one Character, so splitting on `"\n"`
   read the whole playlist as one line and rejected it on the live/VOD ingest, the audio tap and the
   subtitle proxy (audit NET-2).
@@ -114,6 +131,8 @@ the public-API contract.
 - **Faster first segment after a seek on TrueHD sources, and less CPU for HDR10+ detection on sources
   without HDR10+** (audit SEG-6, BIT-4).
 - **The live ingest FIFO no longer re-copies its whole buffer on every read** (audit NET-8).
+- **Stripping ASS override tags from a cue is linear.** A cue of 200k tags took 525 s and now takes
+  0.15 s on the PiP and AirPlay subtitle track (audit SUB-1).
 
 ## [7.16.1] - 2026-09-24
 
