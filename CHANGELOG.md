@@ -27,9 +27,27 @@ the public-API contract.
 - **The held source connection no longer sends media-server credentials to a redirect target on
   another origin**, and writes the request path as the URL spells it, so an encoded line break can
   no longer inject header lines and IPv6 hosts get a valid Host header (audit DMX-3, DMX-4).
+- **A sidecar subtitle name can no longer add lines to the served HLS master.** Line breaks and other
+  control characters in a name or language are neutralised (audit NAT-6).
 
 ### Fixed
 
+- **Leaving a session while its software rebuild is running no longer leaves an error behind.** A
+  `stop()` or new `load()` during the AE#561 rebuild used to put the engine into `.error`, including
+  onto the next title's startup. The rebuild also runs in its own task now, so its waits no longer
+  spin inside the cancelled item-death task (audit CORE-1).
+- **A title started just before pressing the TV button no longer plays on in the background.** A
+  load or scrub still in flight when the app backgrounds gets the background teardown once it
+  settles, instead of carrying a live pipeline through the tvOS suspension (audit CORE-2, AE#597).
+- **Track selections survive a second background teardown on iOS** (audit CORE-3).
+- **Music plays again after a media services reset.** The reset rebuilds the audio-only AVPlayer too,
+  not only the video player (audit CORE-4, AE#597).
+- **A recording that fails while zapping no longer ends the next channel's recording**, and the live
+  edge snap no longer writes the previous channel's position after a zap (audit CORE-5, CORE-7).
+- **Load-time sidecar subtitles on the remote-HLS path select the right track** when names repeat,
+  match an origin rendition, or contain a quote (audit NAT-2).
+- **A superseded load or live-join probe no longer acts on the session that replaced it** (audit
+  CORE-6, NAT-4).
 - **An origin that ignores Range no longer streams the whole file into memory.** Bytes past the
   requested range are dropped and the connection is ended. Such an origin could never seek, and a
   file larger than memory got the app killed; it now ends in a read error instead, and
