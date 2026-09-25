@@ -282,9 +282,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         oldShift: Int64,
         fallbackDurationPts: Int64
     ) -> (newShift: Int64, continuationDts: Int64) {
-        let lastOutputDts = lastSrcDts - oldShift
-        let continuationDts = lastOutputDts + max(fallbackDurationPts, 1)
-        return (srcDts - continuationDts, continuationDts)
+        let lastOutputDts = SourceTimestampBounds.difference(lastSrcDts, oldShift)
+        let continuationDts = SourceTimestampBounds.sum(lastOutputDts, max(fallbackDurationPts, 1))
+        return (SourceTimestampBounds.difference(srcDts, continuationDts), continuationDts)
     }
 
     /// Derive audio shift so boundary packet lands exactly on the video seam regardless of source base.
@@ -293,7 +293,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audioBoundarySrcDts: Int64,
         seamOutAudioTb: Int64
     ) -> Int64 {
-        audioBoundarySrcDts - seamOutAudioTb
+        SourceTimestampBounds.difference(audioBoundarySrcDts, seamOutAudioTb)
     }
 
     /// Raw source PTS of the previous video packet (before shift); used for live discontinuity detection.
@@ -1324,7 +1324,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         guard firstSeenDts != Int64.min, tbSeconds > 0 else { return nil }
         let windowTicks = Int64(Self.sourceReplayStartWindowSeconds / tbSeconds)
         if jumpTicks < 0 {
-            return newDts <= firstSeenDts + windowTicks ? .rewind : nil
+            return newDts <= SourceTimestampBounds.sum(firstSeenDts, windowTicks) ? .rewind : nil
         }
         guard isLive, newDts >= Self.mpegTSWrapTicks else { return nil }
         return newDts % Self.mpegTSWrapTicks <= windowTicks ? .axisReset : nil
@@ -2681,14 +2681,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func readNextSourcePacketMerged() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
         guard let side = sideAudioDemuxer else {
             guard let packet = try demuxer.readPacket() else { return nil }
+            boundSourceTimestamps(packet)
             return (packet, .main)
         }
         if mergeMainLookahead == nil, !mergeMainEOF {
             mergeMainLookahead = try demuxer.readPacket()
-            if mergeMainLookahead == nil { mergeMainEOF = true }
+            if let pkt = mergeMainLookahead { boundSourceTimestamps(pkt) } else { mergeMainEOF = true }
         }
         if mergeSideLookahead == nil, !mergeSideEOF {
             mergeSideLookahead = try side.readPacket()
+            if let pkt = mergeSideLookahead { boundSourceTimestamps(pkt) }
             if mergeSideLookahead == nil {
                 mergeSideEOF = true
             } else if packedSideAudioClock != nil, let pkt = mergeSideLookahead {
@@ -2713,6 +2715,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         mergeMainLookahead = nil
         return (main, .main)
+    }
+
+    /// Pump-thread-only: an out-of-range source timestamp was logged once for this producer.
+    private var implausibleTimestampLogged = false
+
+    private func boundSourceTimestamps(_ packet: UnsafeMutablePointer<AVPacket>) {
+        let pts = packet.pointee.pts, dts = packet.pointee.dts
+        guard SourceTimestampBounds.sanitize(packet), !implausibleTimestampLogged else { return }
+        implausibleTimestampLogged = true
+        EngineLog.emit(
+            "[HLSSegmentProducer] source packet on stream \(packet.pointee.stream_index) carries an "
+            + "out-of-range timestamp (pts=\(pts) dts=\(dts)), treated as unset",
+            category: .session
+        )
     }
 
     /// Ordering key: dts when valid, else pts; AV_NOPTS_VALUE (Int64.min) yields immediately (NOPTS repair handles it downstream).
@@ -3109,7 +3125,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // adds #EXT-X-DISCONTINUITY at the seam.
                 if rebasesTimelineOnDiscontinuity, isVideoPkt, lastVideoSourceDts != Int64.min,
                    videoShiftPts != Int64.min, packet.pointee.dts != Int64.min {
-                    let jumpTicks = packet.pointee.dts - lastVideoSourceDts
+                    let jumpTicks = SourceTimestampBounds.difference(packet.pointee.dts, lastVideoSourceDts)
                     let thresholdSeconds = jumpTicks < 0
                         ? Self.discontinuityBackwardThresholdSeconds
                         : Self.discontinuityThresholdSeconds
@@ -3189,7 +3205,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if rebasesTimelineOnDiscontinuity, isAudioPkt, lastAudioSourceDts != Int64.min,
                    audioShiftPts != Int64.min, packet.pointee.dts != Int64.min,
                    let audio = audioConfig {
-                    let jumpTicks = packet.pointee.dts - lastAudioSourceDts
+                    let jumpTicks = SourceTimestampBounds.difference(packet.pointee.dts, lastAudioSourceDts)
                     let tb = audio.sourceTimeBase
                     let thresholdSeconds = jumpTicks < 0
                         ? Self.discontinuityBackwardThresholdSeconds
@@ -3214,10 +3230,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             pendingAudioShiftOverride = nil
                         }
-                        let lastOutputDts = lastAudioSourceDts - audioShiftPts
+                        let lastOutputDts = SourceTimestampBounds.difference(lastAudioSourceDts, audioShiftPts)
                         // Independent measurement (audio-first boundary): used directly only when no video-derived shift available.
-                        let measuredShift = packet.pointee.dts
-                            - (lastOutputDts + max(audioFallbackDurationPts, 1))
+                        let measuredShift = SourceTimestampBounds.difference(
+                            packet.pointee.dts, SourceTimestampBounds.sum(lastOutputDts, max(audioFallbackDurationPts, 1)))
                         var newShift = measuredShift
                         var inherited = false
                         if let p = pendingAudioInheritSeamOut,
@@ -3229,7 +3245,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             if let bridge = audio.bridge {
                                 // Bridge: free-running encoder restamps continuously; jump its timeline by the residual gap.
-                                let driftTicks = measuredShift - candidate
+                                let driftTicks = SourceTimestampBounds.difference(measuredShift, candidate)
                                 let tbSec = tb.den > 0
                                     ? Double(tb.num) / Double(tb.den) : 0
                                 bridge.noteTimelineJump(
@@ -3240,14 +3256,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 // Stream-copy: apply candidate verbatim (absolute, not clamped to lastOutputDts).
                                 // Delta handoff accumulated A/V drift across SSAI pod creatives (device symptom: seconds late by content return).
                                 // Sub-frame overlap at the seam left to OutputTimestampSanitizer; > 0.5 s re-anchors.
-                                let firstOutputDts = packet.pointee.dts - candidate
+                                let firstOutputDts = SourceTimestampBounds.difference(packet.pointee.dts, candidate)
                                 let overlapTicks = lastOutputDts - firstOutputDts
                                 let maxOverlapTicks = audio.sourceTimeBase.num > 0
                                     ? Int64(0.5 * Double(audio.sourceTimeBase.den)
                                             / Double(audio.sourceTimeBase.num))
                                     : Int64.max
                                 if overlapTicks > maxOverlapTicks {
-                                    newShift = packet.pointee.dts - lastOutputDts - 1
+                                    newShift = SourceTimestampBounds.difference(SourceTimestampBounds.difference(packet.pointee.dts, lastOutputDts), 1)
                                     EngineLog.emit(
                                         "[HLSSegmentProducer] audio rebase inherit re-anchored: "
                                         + "candidate=\(candidate) overlap=\(overlapTicks) ticks "
@@ -3284,7 +3300,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         if Date().timeIntervalSince(override_.at) < Self.rebasePairingWindowSeconds {
                             if let bridge = audio.bridge {
                                 // Bridge: residual between applied and video-derived shift becomes an encoder-timeline jump.
-                                let driftTicks = audioShiftPts - derivedShift
+                                let driftTicks = SourceTimestampBounds.difference(audioShiftPts, derivedShift)
                                 let tbSec = tb.den > 0
                                     ? Double(tb.num) / Double(tb.den) : 0
                                 bridge.noteTimelineJump(
@@ -3297,14 +3313,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             } else {
                                 // Stream-copy: apply seam-derived shift; sub-frame overlap left to OutputTimestampSanitizer;
                                 // only > 0.5 s overlap re-anchors.
-                                let lastOutputDts = lastAudioSourceDts - audioShiftPts
-                                let firstOutputDts = override_.boundarySrcDts - derivedShift
+                                let lastOutputDts = SourceTimestampBounds.difference(lastAudioSourceDts, audioShiftPts)
+                                let firstOutputDts = SourceTimestampBounds.difference(override_.boundarySrcDts, derivedShift)
                                 let overlapTicks = lastOutputDts - firstOutputDts
                                 let maxOverlapTicks = tb.num > 0
                                     ? Int64(0.5 * Double(tb.den) / Double(tb.num))
                                     : Int64.max
                                 let applied = overlapTicks > maxOverlapTicks
-                                    ? packet.pointee.dts - lastOutputDts - 1
+                                    ? SourceTimestampBounds.difference(SourceTimestampBounds.difference(packet.pointee.dts, lastOutputDts), 1)
                                     : derivedShift
                                 EngineLog.emit(
                                     "[HLSSegmentProducer] audio rebase corrected to video-derived shift: "
@@ -3332,7 +3348,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if isVideoPkt, lastVideoSourceDts != Int64.min,
                    packet.pointee.dts != Int64.min,
                    packet.pointee.dts <= lastVideoSourceDts,
-                   lastVideoSourceDts - packet.pointee.dts <= monoGlitchVideoTicks {
+                   SourceTimestampBounds.difference(lastVideoSourceDts, packet.pointee.dts) <= monoGlitchVideoTicks {
                     let original = packet.pointee.dts
                     let bumped = lastVideoSourceDts + 1
                     let ptsValid = packet.pointee.pts != Int64.min
@@ -3370,7 +3386,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if isAudioPkt, lastAudioSourceDts != Int64.min,
                    packet.pointee.dts != Int64.min,
                    packet.pointee.dts <= lastAudioSourceDts,
-                   lastAudioSourceDts - packet.pointee.dts <= monoGlitchAudioTicks {
+                   SourceTimestampBounds.difference(lastAudioSourceDts, packet.pointee.dts) <= monoGlitchAudioTicks {
                     // Same logic for audio. Audio doesn't have B-frame
                     // pts/dts skew so dts <= pts isn't a useful gate;
                     // just bump.
@@ -3539,7 +3555,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             actualFirstDts: firstActualVideoDts,
                             desiredTfdtPts: desiredFirstVideoTfdtPts,
                             planAnchorPts: planAnchorVideoPts)
-                        videoShiftPts = firstActualVideoDts - pinnedTfdtPts
+                        videoShiftPts = SourceTimestampBounds.difference(firstActualVideoDts, pinnedTfdtPts)
                         if audioWaitForVideo, let audio = audioConfig {
                             // Rescale into SOURCE audio TB (not encoder TB): FLAC bridge exposes this mismatch;
                             // using inputTimeBase landed the target 48x too far for bridged DTS sources.
@@ -3726,7 +3742,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         } else {
                             gapInAudioTb = restartTargetAudioDts == Int64.min
                                 ? 0
-                                : firstActualAudioDts - restartTargetAudioDts
+                                : SourceTimestampBounds.difference(firstActualAudioDts, restartTargetAudioDts)
                         }
                         let gapMs = audioTb.den > 0
                             ? Double(gapInAudioTb) * Double(audioTb.num) * 1000.0 / Double(audioTb.den)
@@ -3760,7 +3776,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                    packet.pointee.pts != Int64.min {
                     let rawPts = packet.pointee.pts
                     if lastRawVideoPts != Int64.min {
-                        let deltaTicks = rawPts - lastRawVideoPts
+                        let deltaTicks = SourceTimestampBounds.difference(rawPts, lastRawVideoPts)
                         let deltaSeconds = Double(deltaTicks) * sourceVideoTbSeconds
                         if abs(deltaSeconds) >= Self.discontinuityThresholdSeconds {
                             pendingDiscontinuityFlag = true
@@ -3784,10 +3800,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 let activeShift: Int64 = isVideoPkt ? videoShiftPts : audioShiftPts
                 if activeShift != Int64.min && activeShift != 0 {
                     if packet.pointee.dts != Int64.min {
-                        packet.pointee.dts -= activeShift
+                        packet.pointee.dts = SourceTimestampBounds.difference(packet.pointee.dts, activeShift)
                     }
                     if packet.pointee.pts != Int64.min {
-                        packet.pointee.pts -= activeShift
+                        packet.pointee.pts = SourceTimestampBounds.difference(packet.pointee.pts, activeShift)
                     }
                 }
 
@@ -4206,7 +4222,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         capTicks: Int64
     ) -> Int64 {
         if let next = nextDts, dts != Int64.min, next != Int64.min {
-            let inferred = next - dts
+            let inferred = SourceTimestampBounds.difference(next, dts)
             if inferred > 0, inferred <= capTicks { return inferred }
         }
         return existingDuration > 0 && existingDuration <= capTicks ? existingDuration : fallback
@@ -4342,7 +4358,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     ) {
         if packet.pointee.duration <= 0 {
             if let next = nextDts {
-                let inferred = next - packet.pointee.dts
+                let inferred = SourceTimestampBounds.difference(next, packet.pointee.dts)
                 packet.pointee.duration = inferred > 0 ? inferred : audioFallbackDurationPts
             } else {
                 packet.pointee.duration = audioFallbackDurationPts
