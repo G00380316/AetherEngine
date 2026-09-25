@@ -520,6 +520,7 @@ final class HLSLocalServer: @unchecked Sendable {
         shouldStop = true
         let fdToClose = listenFd
         listenFd = -1
+        let closingPort = port
         port = 0
         loggedMasterPlaylist = false
         loggedReducedMasterPlaylist = false
@@ -527,7 +528,6 @@ final class HLSLocalServer: @unchecked Sendable {
         mediaPlaylistBuildCount = 0
         let clients = clientFds
         clientFds.removeAll()
-        let closingPort = port
         stateLock.unlock()
         // AE#597: the one line that says a listener went away. Without it a log cannot tell a
         // server that was released from one that outlived its session on a port of its own.
