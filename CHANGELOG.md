@@ -43,9 +43,17 @@ the public-API contract.
   GitHub Actions to commit SHAs with Dependabot proposing updates, and aetherctl writes its debug
   files into a private per-run temporary directory instead of fixed names in `/tmp` (audit OPS-1,
   OPS-2, OPS-3).
+- **The HDR10+ and Atmos probes no longer read a crafted file to its end.** Blocks of the streams
+  they ignore are now counted against a byte budget below the demuxer, so one target packet followed
+  by gigabytes of another stream stops the probe instead of downloading it.
 
 ### Fixed
 
+- **Stopping playback during a restart after a stalled read aborts the replacement connection**,
+  instead of letting it finish its connect and stream probe after the session was gone.
+- **A non-finite segment or cadence duration can no longer crash the live playlist writer.**
+- **Live AV1 High and Professional streams play on hardware-AV1 devices**, through the software host
+  like VOD.
 - **A seek on the software path no longer lets one pre-seek frame wedge the picture.** A seek that
   landed while the decoder was retrying a full queue, or while the hardware decoder was preparing a
   packet, still let that packet through after the flush (audit DEC-1, DEC-4, AE#492).
