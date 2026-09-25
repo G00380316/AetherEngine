@@ -225,8 +225,34 @@ public final class Demuxer: @unchecked Sendable {
     // concurrent access triggers assertion failures in matroskadec.c.
     private let accessLock = NSLock()
 
-    private var avioProvider: AVIOProvider?
+    /// Audit DMX-11: `markClosed()` is the lock-free cross-thread abort, so it loads this reference
+    /// while the demux thread may be clearing it in `close()` or a failed open. A leaf lock of its
+    /// own (never `accessLock`, which `av_read_frame` holds for a whole network read) makes that
+    /// load a retained snapshot instead of a race.
+    private let providerLock = NSLock()
+    private var _avioProvider: AVIOProvider?
+    private var avioProvider: AVIOProvider? {
+        get {
+            providerLock.lock()
+            defer { providerLock.unlock() }
+            return _avioProvider
+        }
+        set {
+            providerLock.lock()
+            _avioProvider = newValue
+            providerLock.unlock()
+        }
+    }
     private var openProfile: DemuxerOpenProfile = .playback
+
+    /// Audit NAT-7: the stream pointers `stream(at:)` hands out, copied out of `formatContext`
+    /// under `accessLock`. MPEG-TS adds streams inside `av_read_frame`, which reallocates the
+    /// `streams` array, so a caller on another thread must not index the live array while a read
+    /// holds the lock. The `AVStream`s themselves live until `avformat_close_input`. Guarded by
+    /// `streamTableLock`, a leaf lock; `streamTableSize` is its length, guarded by `accessLock`.
+    private let streamTableLock = NSLock()
+    private var streamTable: [UnsafeMutablePointer<AVStream>] = []
+    private var streamTableSize = 0
 
     /// The URL and headers this demuxer was opened from, kept for the recordless Dolby Vision audit's
     /// second open. nil for a custom reader (no second open to give) and for a live source.
@@ -472,6 +498,9 @@ public final class Demuxer: @unchecked Sendable {
         onOpenProgress?(.containerOpened)
 
         try probeStreams(openedCtx)
+        accessLock.lock()
+        refreshStreamTableLocked()
+        accessLock.unlock()
         onOpenProgress?(.streamsProbed)
     }
 
@@ -627,6 +656,9 @@ public final class Demuxer: @unchecked Sendable {
         onOpenProgress?(.containerOpened)   // #361
 
         try probeStreams(ctxPtr!)
+        accessLock.lock()
+        refreshStreamTableLocked()
+        accessLock.unlock()
         onOpenProgress?(.streamsProbed)     // #361
         // #281: every parse seek this open performs has happened by now, so the provider can drop
         // the cold-start state that only exists to serve them. Deliberately after probeStreams:
@@ -858,6 +890,7 @@ public final class Demuxer: @unchecked Sendable {
         guard let ctx = formatContext else { return }
         reclassifyAttachedPictures(ctx)
         _ = avformat_find_stream_info(ctx, nil)
+        refreshStreamTableLocked()
     }
 
     /// True if the stream at `index` is missing or carries no resolved codec yet (`AV_CODEC_ID_NONE`).
@@ -1309,10 +1342,34 @@ public final class Demuxer: @unchecked Sendable {
     }
 
     func stream(at index: Int32) -> UnsafeMutablePointer<AVStream>? {
-        guard let ctx = formatContext, index >= 0, index < ctx.pointee.nb_streams else {
-            return nil
+        guard index >= 0 else { return nil }
+        // `try`, not `lock`: a read can hold `accessLock` for a whole network stall, and a caller
+        // on the main actor must not wait that out. The table a busy read leaves behind is current
+        // anyway, since `readPacketLocked` refreshes it whenever a read adds a stream.
+        if accessLock.try() {
+            refreshStreamTableLocked()
+            accessLock.unlock()
         }
-        return ctx.pointee.streams[Int(index)]
+        streamTableLock.lock()
+        defer { streamTableLock.unlock() }
+        return Int(index) < streamTable.count ? streamTable[Int(index)] : nil
+    }
+
+    /// Caller holds `accessLock`.
+    private func refreshStreamTableLocked() {
+        var table: [UnsafeMutablePointer<AVStream>] = []
+        if let ctx = formatContext, let streams = ctx.pointee.streams {
+            let count = Int(ctx.pointee.nb_streams)
+            table.reserveCapacity(count)
+            for i in 0..<count {
+                guard let stream = streams[i] else { break }
+                table.append(stream)
+            }
+        }
+        streamTableSize = table.count
+        streamTableLock.lock()
+        streamTable = table
+        streamTableLock.unlock()
     }
 
     /// Sets AVDISCARD_ALL on streams outside `keep`. Without this, matroska reads
@@ -1477,6 +1534,7 @@ public final class Demuxer: @unchecked Sendable {
         var packet: UnsafeMutablePointer<AVPacket>? = trackedPacketAlloc()
         guard packet != nil else { return nil }
         let ret = av_read_frame(ctx, packet)
+        if Int(ctx.pointee.nb_streams) != streamTableSize { refreshStreamTableLocked() }
         do {
             try probeControl?.check()
             if ret >= 0, let packet { try probeControl?.receivedPacket(packet) }
@@ -2031,6 +2089,7 @@ public final class Demuxer: @unchecked Sendable {
         formatContext = nil
         compositionRepair = nil
         compositionRepairEvaluated = false
+        refreshStreamTableLocked()
         accessLock.unlock()
 
         avioProvider?.close()
