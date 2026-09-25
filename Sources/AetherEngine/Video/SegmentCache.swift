@@ -457,6 +457,12 @@ final class SegmentCache: @unchecked Sendable {
                        category: .session)
     }
 
+    var isClosed: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return closed
+    }
+
     func fetch(index: Int, timeout: TimeInterval = 15.0) -> Data? {
         condition.lock()
         if let url = entries[index] {

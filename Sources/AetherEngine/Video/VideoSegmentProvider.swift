@@ -1570,6 +1570,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 if let bytes = cache.fetch(index: index, timeout: repositionWaitSlice) {
                     return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: true)
                 }
+                // Audit SEG-3: a closed cache answers fetch at once, so riding a restart that
+                // outlives stop() would spin this thread until the ride cap.
+                if cache.isClosed { break }
             }
             return logServed(index: index, bytes: nil, totalStart: totalStart, restarted: true)
         }
