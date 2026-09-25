@@ -167,6 +167,21 @@ extension HLSVideoEngine {
 
     func handlePumpFinished(_ prod: HLSSegmentProducer,
                                     reason: HLSSegmentProducer.PumpExitReason) {
+        // Audit HLS-1: a superseded pump (the #79 markClosed of a wedged read, or stop()) reports
+        // an aborted read as `.readError`. Acting on it spent the session-lifetime revive gate,
+        // doomed the replacement demuxer and queued an authoritative restart at a stale position.
+        restartLock.lock()
+        let isCurrent = producer === prod
+        restartLock.unlock()
+        guard isCurrent else {
+            if case .stopRequested = reason {} else {
+                EngineLog.emit(
+                    "[HLSVideoEngine] superseded producer exited (reason=\(reason)); not the session's pump, ignored",
+                    category: .session
+                )
+            }
+            return
+        }
         // #65 (VOD only): a broken backpressure wedge means AVPlayer is stuck behind a parked producer.
         // Re-anchor the producer on AVPlayer's real position so the segments it is starved for get produced.
         if case .backpressureWedge = reason {
@@ -903,7 +918,9 @@ extension HLSVideoEngine {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
             let dem = Demuxer()
-            registerReopenDemuxer(dem)  // register before blocking open so stop() can abort via markClosed
+            // Audit HLS-2: a zap during the sleep above must not open the old channel; on a
+            // single-slot tuner that orphan open takes the slot the new channel needs.
+            guard registerReopenDemuxer(dem, failedProducer: failedProducer) else { return }
             defer { unregisterReopenDemuxer(dem) }
             var freshReader: IOReader?
             do {
@@ -973,10 +990,14 @@ extension HLSVideoEngine {
         return producer === p
     }
 
-    private func registerReopenDemuxer(_ dem: Demuxer) {
+    /// Registers `dem` for `stop()` to abort, atomically with the check that the session still
+    /// belongs to `failedProducer`. False means a stop or a newer producer already took over.
+    func registerReopenDemuxer(_ dem: Demuxer, failedProducer: HLSSegmentProducer) -> Bool {
         restartLock.lock()
+        defer { restartLock.unlock() }
+        guard producer === failedProducer else { return false }
         reopenDemuxer = dem
-        restartLock.unlock()
+        return true
     }
 
     private func unregisterReopenDemuxer(_ dem: Demuxer) {
