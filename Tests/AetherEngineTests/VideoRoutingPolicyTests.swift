@@ -167,6 +167,16 @@ struct VideoRoutingPolicyTests {
             codecID: AV_CODEC_ID_AV1, dvProfile: nil, canHardwareDecode: { true }))
     }
 
+    @Test("live consults the format gate for AV1 only; VOD consults it for every codec")
+    func liveConsultsFormatGateForAV1Only() {
+        #expect(VideoRoutingPolicy.consultsUndecodableFormatGate(codecID: AV_CODEC_ID_AV1, isLive: true))
+        #expect(!VideoRoutingPolicy.consultsUndecodableFormatGate(codecID: AV_CODEC_ID_H264, isLive: true))
+        #expect(!VideoRoutingPolicy.consultsUndecodableFormatGate(codecID: AV_CODEC_ID_HEVC, isLive: true))
+        for codec in [AV_CODEC_ID_AV1, AV_CODEC_ID_H264, AV_CODEC_ID_HEVC] {
+            #expect(VideoRoutingPolicy.consultsUndecodableFormatGate(codecID: codec, isLive: false))
+        }
+    }
+
     @Test("av1C seq_profile decides: Main fits the hardware decoder, High and Professional do not")
     func av1ProfileFromAV1C() {
         // marker|version 0x81, then seq_profile (3 bits) | seq_level_idx_0 (5 bits), flags, reserved.
