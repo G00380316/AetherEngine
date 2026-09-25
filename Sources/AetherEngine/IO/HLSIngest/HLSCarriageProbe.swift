@@ -71,14 +71,20 @@ enum HLSCarriageProbe {
     /// AE#296: the segment stage, run apart from the playlist stage so the one media byte the probe ever
     /// spends is spent where losing it costs the verdict rather than the mount. Never throws: an origin
     /// that refuses this read leaves the source on the route it is already taking.
+    ///
+    /// `credentialOrigin` is the playlist the host gave `httpHeaders` for; the segment is a URI that
+    /// playlist named, so credentials only follow it to the same origin (audit NET-7).
     static func classifyDeferredSegmentHead(
         url: URL,
         httpHeaders: [String: String],
+        credentialOrigin: URL,
         session: URLSession? = nil
     ) async -> MPEGTransportStreamCodecProbe.Verdict {
         do {
             return try await classifySegmentHead(
-                url: url, httpHeaders: httpHeaders, session: session ?? sharedSession
+                url: url,
+                httpHeaders: RedirectHeaderPolicy.scoped(httpHeaders, grantedFor: credentialOrigin, sentTo: url),
+                session: session ?? sharedSession
             )
         } catch {
             EngineLog.emit("[HLSCarriageProbe] carriage probe inconclusive: \(error)", category: .engine)
@@ -104,7 +110,7 @@ enum HLSCarriageProbe {
             return verdict
         case .needsSegmentHead(let segmentURL):
             return await classifyDeferredSegmentHead(
-                url: segmentURL, httpHeaders: httpHeaders, session: session
+                url: segmentURL, httpHeaders: httpHeaders, credentialOrigin: playlistURL, session: session
             )
         }
     }
@@ -152,7 +158,8 @@ enum HLSCarriageProbe {
         advertisesFragmentedMP4OnlyVideo: Bool,
         session: URLSession
     ) async throws -> PlaylistEvidence {
-        let (root, rootURL) = try await fetchPlaylist(playlistURL, httpHeaders: httpHeaders, session: session)
+        let (root, rootURL) = try await fetchPlaylist(
+            playlistURL, httpHeaders: httpHeaders, credentialOrigin: playlistURL, session: session)
         let media: HLSMediaPlaylist
         let mediaURL: URL
         switch root {
@@ -165,7 +172,7 @@ enum HLSCarriageProbe {
                 return .settled(.inconclusive)
             }
             let (selected, selectedURL) = try await fetchPlaylist(
-                variantURL, httpHeaders: httpHeaders, session: session
+                variantURL, httpHeaders: httpHeaders, credentialOrigin: playlistURL, session: session
             )
             guard case .media(let value) = selected else { return .settled(.inconclusive) }
             media = value
@@ -193,9 +200,12 @@ enum HLSCarriageProbe {
     private static func fetchPlaylist(
         _ url: URL,
         httpHeaders: [String: String],
+        credentialOrigin: URL,
         session: URLSession
     ) async throws -> (HLSPlaylist, URL) {
-        let (data, response) = try await session.data(for: makeRequest(url, httpHeaders: httpHeaders))
+        let request = makeRequest(
+            url, httpHeaders: RedirectHeaderPolicy.scoped(httpHeaders, grantedFor: credentialOrigin, sentTo: url))
+        let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
             throw HLSIngestError.playlistUnreachable(status: status)

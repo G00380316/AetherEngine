@@ -499,9 +499,11 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         )
     }
 
-    private func makeRequest(_ url: URL) -> URLRequest {
+    /// Credentials only where the host's playlist is (audit NET-7).
+    func makeRequest(_ url: URL) -> URLRequest {
         var request = URLRequest(url: url)
-        for (field, value) in httpHeaders {
+        for (field, value) in RedirectHeaderPolicy.scoped(
+            httpHeaders, grantedFor: playlistURL, sentTo: url) {
             request.setValue(value, forHTTPHeaderField: field)
         }
         return request
@@ -534,7 +536,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     private func probeCarriage(_ url: URL) async throws -> MPEGTransportStreamCodecProbe.Verdict {
         try await HLSCarriageProbe.classifySegmentHead(
             url: url,
-            httpHeaders: httpHeaders,
+            httpHeaders: RedirectHeaderPolicy.scoped(httpHeaders, grantedFor: playlistURL, sentTo: url),
             session: session
         )
     }

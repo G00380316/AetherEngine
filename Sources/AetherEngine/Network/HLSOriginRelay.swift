@@ -53,6 +53,11 @@ final class HLSOriginRelay: @unchecked Sendable {
     /// now points at the local server.
     private var upstreamHeaders: [String: String] = [:]
 
+    /// The URLs the host itself pointed the relay at. Credential headers follow a fetch only to
+    /// one of these origins with no TLS downgrade; an origin a playlist revealed gets the rest of
+    /// the headers but not the token (audit NET-7).
+    private var credentialOrigins: [URL] = []
+
     /// The NSURLError code of the last upstream handshake this relay lost to system trust, if any.
     ///
     /// 6.69.0 classifies a refused certificate off the failed item's `NSUnderlyingErrorKey` chain,
@@ -142,6 +147,7 @@ final class HLSOriginRelay: @unchecked Sendable {
         stateLock.lock()
         allowedOrigins.insert(key)
         if !httpHeaders.isEmpty { upstreamHeaders = httpHeaders }
+        if !credentialOrigins.contains(origin) { credentialOrigins.append(origin) }
         stateLock.unlock()
         return key
     }
@@ -278,7 +284,7 @@ final class HLSOriginRelay: @unchecked Sendable {
 
         stateLock.lock()
         let permitted = allowedOrigins.contains(key)
-        let headers = upstreamHeaders
+        let headers = Self.headers(upstreamHeaders, for: origin, grantedFor: credentialOrigins)
         stateLock.unlock()
         guard permitted else {
             EngineLog.emit(
@@ -319,6 +325,17 @@ final class HLSOriginRelay: @unchecked Sendable {
                     status: 200, body: Data(rewritten.utf8),
                     contentType: "application/vnd.apple.mpegurl", contentRange: nil))
         }
+    }
+
+    /// Everything the host sent, with the credentials only when `target` is one of the host's own
+    /// origins (same host, same port, no downgrade).
+    static func headers(_ headers: [String: String], for target: URL, grantedFor anchors: [URL])
+        -> [String: String]
+    {
+        if anchors.contains(where: { RedirectHeaderPolicy.credentialsAllowed(from: $0, to: target) }) {
+            return headers
+        }
+        return RedirectHeaderPolicy.scoped(headers, grantedFor: nil, sentTo: target)
     }
 
     private static func looksLikePlaylist(url: URL, contentType: String?) -> Bool {

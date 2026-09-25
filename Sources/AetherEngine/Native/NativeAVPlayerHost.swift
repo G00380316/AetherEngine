@@ -2216,7 +2216,7 @@ final class NativeAVPlayerHost {
                     break
                 }
                 let verdict = await HLSCarriageProbe.classifyDeferredSegmentHead(
-                    url: segmentURL, httpHeaders: httpHeaders)
+                    url: segmentURL, httpHeaders: httpHeaders, credentialOrigin: url)
                 guard !Task.isCancelled, self.sessionID == sid else { return }
                 self.publishCarriageProbeVerdict(verdict, sid: sid, from: "segment PMT")
             }
