@@ -1595,14 +1595,18 @@ extension AetherEngine {
                         // AE#561: a frozen position across three reloads is the reload answering the
                         // same bytes three times. Offer the source to the engine's own decoder before
                         // the session is left dead.
-                        await self.escalateToSoftwarePath(
-                            SoftwarePathEscalation.Request(
-                                domain: SoftwarePathEscalation.mediaErrorDomain,
-                                code: 0,
-                                message: "item death at a frozen position, revive budget exhausted",
-                                positionSeconds: position.isFinite ? max(0, position) : 0
-                            )
+                        //
+                        // Its own task (audit CORE-1): the rebuild's load() cancels THIS task in its
+                        // prologue, and a rebuild left running in a cancelled task turns every
+                        // `try? await Task.sleep` poll on its way (the panel-switch wait) into a hot
+                        // spin on the main actor. Supersession is answered by the load generation.
+                        let request = SoftwarePathEscalation.Request(
+                            domain: SoftwarePathEscalation.mediaErrorDomain,
+                            code: 0,
+                            message: "item death at a frozen position, revive budget exhausted",
+                            positionSeconds: position.isFinite ? max(0, position) : 0
                         )
+                        Task { @MainActor [weak self] in await self?.escalateToSoftwarePath(request) }
                         return
                     }
                     EngineLog.emit(

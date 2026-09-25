@@ -42,6 +42,12 @@ extension AetherEngine {
             try await reloadAtCurrentPosition { $0.preferredDecodePath = .software }
             EngineLog.emit(
                 "[AetherEngine] #561 rebuilt on the software path", category: .engine)
+        } catch is CancellationError {
+            // Audit CORE-1: a stop() or a new load() superseded the rebuild. The session this
+            // failure belonged to is gone, and `.error` would land on whatever replaced it.
+            EngineLog.emit(
+                "[AetherEngine] #561 software rebuild superseded; nothing to surface",
+                category: .engine)
         } catch {
             // The rung is gone and the failure was never surfaced, so it has to be surfaced here or
             // the session would sit on a picture that stopped with nothing said.

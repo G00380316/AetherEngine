@@ -71,4 +71,30 @@ struct SoftwarePathEscalationTests {
         #expect(budget.isSpent)
         #expect(!budget.take())
     }
+
+    /// Audit CORE-1: the rebuild is a full load(), and a stop() landing inside it unwinds that load
+    /// with a CancellationError. The escalation read every throw as "the software path cannot serve
+    /// this session" and published `.error` onto an engine the viewer had already left.
+    @Test("A rebuild superseded by stop() leaves the engine idle, not in error", .timeLimit(.minutes(2)))
+    @MainActor
+    func supersededRebuildIsSilent() async throws {
+        let origin = try ProbeHTTPTestOrigin(data: ProbeTestFixtures.hdr10Plus(), stage: .headers)
+        defer { origin.stop() }
+        let engine = try AetherEngine()
+        engine.loadedURL = try #require(URL(string: "http://127.0.0.1:\(origin.port)/source.mkv"))
+
+        let escalation = Task { @MainActor in
+            await engine.escalateToSoftwarePath(SoftwarePathEscalation.Request(
+                domain: SoftwarePathEscalation.mediaErrorDomain, code: 0,
+                message: "item death at a frozen position", positionSeconds: 0))
+        }
+        // The rebuild's probe is parked on the origin, so the stop lands inside the load.
+        try await waitFor { origin.blocked.entered }
+        engine.stop()
+        origin.stop()
+        await escalation.value
+
+        #expect(engine.state == .idle)
+        #expect(engine.errorInfo == nil)
+    }
 }

@@ -3833,6 +3833,8 @@ public final class AetherEngine: ObservableObject {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                // A failure that lands after a successor took over is not this session's to publish.
+                if loadGeneration != gen { throw CancellationError() }
                 // Without this catch, a throwing loadRemoteHLS would strand state at .loading forever.
                 publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
@@ -4094,6 +4096,7 @@ public final class AetherEngine: ObservableObject {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if loadGeneration != gen { throw CancellationError() }
                 publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
             }
@@ -4240,6 +4243,7 @@ public final class AetherEngine: ObservableObject {
                 // Superseded: successor owns state.
                 throw CancellationError()
             } catch {
+                if loadGeneration != gen { throw CancellationError() }
                 publishLoadFailure(error)
                 throw error
             }
@@ -4773,6 +4777,9 @@ public final class AetherEngine: ObservableObject {
             // Superseded.
             throw CancellationError()
         } catch {
+            // A host or open that failed because stop()/load() tore it down mid-flight throws its own
+            // error before the post-load generation check; the successor owns the state (audit CORE-1).
+            if loadGeneration != gen { throw CancellationError() }
             // AE#246: the load-time probe failed for a reason that was not the HLS classification, so the
             // AE#154 check above saw an inconclusive failure and this load fell through to the loopback
             // path with no preopened demuxer. The session's own open is then the first one to read the
@@ -6677,6 +6684,13 @@ public final class AetherEngine: ObservableObject {
         liveOutageSourceGivenUp = false
         liveReloadWatchdogTask?.cancel()
         liveReloadWatchdogTask = nil
+        // Audit CORE-1: the #65/#93 recovery rungs belong to the session being torn down. Left
+        // running across a background teardown, the item-death confirm could start a software
+        // rebuild seconds later with the app suspended.
+        stallReengageTask?.cancel()
+        stallReengageTask = nil
+        itemDeathConfirmTask?.cancel()
+        itemDeathConfirmTask = nil
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
         // #356: counterpart to the install line, because a session-preserving reload lands here
         // too. The host sees its stream finish and has to re-install; without this the device log
