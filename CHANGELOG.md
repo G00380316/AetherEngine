@@ -32,6 +32,22 @@ the public-API contract.
 
 ### Fixed
 
+- **A slow source no longer ends a healthy session with "Source read failed" after a few scrubs.**
+  When the engine replaced a producer stuck in a read, the old producer's aborted read was treated as
+  the session failing: it spent the read-error revive budget, forced an extra reconnect and re-seeked
+  to a stale position. Exits from replaced producers and reads aborted by a stop are now ignored
+  (audit HLS-1).
+- **Changing channel during a live reconnect no longer opens the old channel again**, which on
+  single-connection tuners took the slot the new channel needed. A stop that lands during an open
+  now cancels it (audit HLS-2).
+- **8-bit HEVC in MPEG-TS is no longer advertised as Main10.** The CODECS string for Annex-B HEVC is
+  read from the stream's SPS, so the master playlist matches the init segment (audit HLS-3).
+- **Seeks that need a re-cut stay within their time limit** on slow sources (audit HLS-4).
+- **AV1 4:4:4, 4:2:2 and 12-bit play on devices with hardware AV1.** Apple's decoder handles AV1 Main
+  profile only; other profiles now take the dav1d software path for VOD (audit HLS-5).
+- **Scrub previews on large segments use far less memory.** The segment file is memory-mapped instead
+  of copied twice per preview, and nothing is read when a cached preview decoder already covers the
+  segment (audit SEG-2).
 - **Leaving a session while its software rebuild is running no longer leaves an error behind.** A
   `stop()` or new `load()` during the AE#561 rebuild used to put the engine into `.error`, including
   onto the next title's startup. The rebuild also runs in its own task now, so its waits no longer
