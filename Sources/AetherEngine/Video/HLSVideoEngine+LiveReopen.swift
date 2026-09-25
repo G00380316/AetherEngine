@@ -167,6 +167,21 @@ extension HLSVideoEngine {
 
     func handlePumpFinished(_ prod: HLSSegmentProducer,
                                     reason: HLSSegmentProducer.PumpExitReason) {
+        // Audit HLS-1: a superseded pump (the #79 markClosed of a wedged read, or stop()) reports
+        // an aborted read as `.readError`. Acting on it spent the session-lifetime revive gate,
+        // doomed the replacement demuxer and queued an authoritative restart at a stale position.
+        restartLock.lock()
+        let isCurrent = producer === prod
+        restartLock.unlock()
+        guard isCurrent else {
+            if case .stopRequested = reason {} else {
+                EngineLog.emit(
+                    "[HLSVideoEngine] superseded producer exited (reason=\(reason)); not the session's pump, ignored",
+                    category: .session
+                )
+            }
+            return
+        }
         // #65 (VOD only): a broken backpressure wedge means AVPlayer is stuck behind a parked producer.
         // Re-anchor the producer on AVPlayer's real position so the segments it is starved for get produced.
         if case .backpressureWedge = reason {

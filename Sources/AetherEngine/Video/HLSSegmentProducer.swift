@@ -4049,6 +4049,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 lastError = -1
                 exitReason = .readError(code: -1)
             }
+            // Audit HLS-1: a stop aborts a parked read through markClosed, which surfaces here.
+            stateLock.lock()
+            let stopped = shouldStop
+            stateLock.unlock()
+            if stopped { exitReason = .stopRequested }
             EngineLog.emit(
                 "[HLSSegmentProducer] demuxer.readPacket threw: \(error)",
                 category: .session
