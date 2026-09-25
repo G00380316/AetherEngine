@@ -395,6 +395,14 @@ struct Issue281ColdStartRoundTripTests {
         #expect(AVIOReader.suffixRangeStart(response(nil, length: 100), expectedLength: 100) == nil)
         #expect(AVIOReader.suffixRangeStart(response("bytes */1000", length: 100),
                                             expectedLength: 100) == nil)
+        // Audit DMX-8: a suffix ends on the last byte of a numeric total, or it is not a suffix.
+        #expect(AVIOReader.suffixRangeStart(response("bytes 900-999/*", length: 100),
+                                            expectedLength: 100) == nil)
+        #expect(AVIOReader.suffixRangeStart(response("bytes 900-999/2000", length: 100),
+                                            expectedLength: 100) == nil)
+        #expect(AVIOReader.suffixRangeStart(
+            response("bytes 9223372036854775708-9223372036854775807/*", length: 100),
+            expectedLength: 100) == nil)
     }
 
     /// The calibration the in-flight test above no longer carries, checked where it costs no socket

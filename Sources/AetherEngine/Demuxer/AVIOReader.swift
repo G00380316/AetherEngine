@@ -2737,16 +2737,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Start offset of the bytes a 206 actually carries, from `Content-Range: bytes a-b/total`.
     /// Returns nil unless the header agrees with what arrived, so a proxy that answered a suffix
     /// request with some other region cannot install bytes at the wrong offset.
+    ///
+    /// Audit DMX-8: a suffix is the END of the source, so the span has to end on the byte before a
+    /// numeric total. Without that, `bytes <2^63-65536>-<Int64.max>/*` installed a span whose `end`
+    /// overflows on the first read that reaches it.
     static func suffixRangeStart(_ http: HTTPURLResponse, expectedLength: Int) -> Int64? {
         guard let value = http.value(forHTTPHeaderField: "Content-Range") else { return nil }
         let scanner = value.replacingOccurrences(of: "bytes ", with: "")
         let parts = scanner.split(separator: "/", maxSplits: 1)
-        guard let range = parts.first else { return nil }
-        let bounds = range.split(separator: "-", maxSplits: 1)
+        guard parts.count == 2,
+              let total = Int64(parts[1].trimmingCharacters(in: .whitespaces)) else { return nil }
+        let bounds = parts[0].split(separator: "-", maxSplits: 1)
         guard bounds.count == 2,
               let start = Int64(bounds[0].trimmingCharacters(in: .whitespaces)),
               let end = Int64(bounds[1].trimmingCharacters(in: .whitespaces)),
-              start >= 0, end >= start,
+              start >= 0, end >= start, end == total - 1,
               end - start + 1 == Int64(expectedLength) else { return nil }
         return start
     }
@@ -4861,7 +4866,10 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard buffer.count < expectedLength else { return }
-        buffer.append(data)
+        // Audit DMX-9: clamped, as `RangeFetchDelegate` does. Appended whole, an origin that sends a
+        // few bytes past its own Content-Range read as a SHORT body and latched the origin as one
+        // that declines suffix ranges for the rest of the process.
+        buffer.append(data.prefix(expectedLength - buffer.count))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
